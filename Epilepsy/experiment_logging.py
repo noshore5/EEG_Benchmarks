@@ -1,0 +1,322 @@
+"""Process-wide logging policy for contribution experiment runners."""
+
+from __future__ import annotations
+
+import argparse
+from dataclasses import dataclass
+from datetime import datetime
+from enum import Enum
+import logging
+import os
+from pathlib import Path
+import sys
+
+
+class EventCategory(str, Enum):
+    """Stable semantic categories used by experiment log records."""
+
+    STATUS = "status"
+    CONFIG = "config"
+    INITIAL_DETAILS = "initial_details"
+    CWT = "cwt"
+    EPOCH = "epoch"
+    TRAIN_STEP = "train_step"
+    SELECTOR = "selector"
+    MOABB = "moabb"
+    FINAL_RESULTS = "final_results"
+    ARTIFACT = "artifact"
+
+
+@dataclass(frozen=True)
+class ConsolePolicy:
+    """Console visibility settings independent from durable file logging."""
+
+    initial_details: bool = False
+    final_results: bool = True
+    cwt_progress: bool = False
+    moabb_progress: bool = False
+    train_steps: bool = False
+    epoch_every: int = 5
+    selector_every: int = 0
+
+    @classmethod
+    def all(cls) -> ConsolePolicy:
+        """Return a policy that exposes every console event."""
+
+        return cls(
+            initial_details=True,
+            final_results=True,
+            cwt_progress=True,
+            moabb_progress=True,
+            train_steps=True,
+            epoch_every=1,
+            selector_every=1,
+        )
+
+    def __post_init__(self) -> None:
+        if self.epoch_every < 0:
+            raise ValueError("console epoch cadence must be non-negative.")
+        if self.selector_every < 0:
+            raise ValueError("console selector cadence must be non-negative.")
+
+
+_console_policy: ConsolePolicy | None = None
+
+
+def _non_negative_int(raw_value: str) -> int:
+    value = int(raw_value)
+    if value < 0:
+        raise argparse.ArgumentTypeError("value must be non-negative")
+    return value
+
+
+def add_console_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add grouped console visibility arguments to an experiment runner."""
+
+    group = parser.add_argument_group("Console logging")
+    group.add_argument(
+        "--console-all",
+        action="store_true",
+        help=(
+            "Show every configurable console event, including every epoch and "
+            "selector diagnostic. Explicit --no-console-* and cadence options "
+            "override it."
+        ),
+    )
+    group.add_argument(
+        "--console-initial-details",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Show model parameter, hash, configuration, and memory details.",
+    )
+    group.add_argument(
+        "--console-final-results",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Show final result tables (enabled by default).",
+    )
+    group.add_argument(
+        "--console-cwt-progress",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Show transient CWT progress bars.",
+    )
+    group.add_argument(
+        "--console-moabb-progress",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Show transient MOABB evaluation progress bars.",
+    )
+    group.add_argument(
+        "--console-train-steps",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Show per-batch training-step diagnostics (very verbose).",
+    )
+    group.add_argument(
+        "--console-epoch-every",
+        type=_non_negative_int,
+        default=None,
+        metavar="N",
+        help="Show every Nth epoch summary; 0 disables epoch summaries.",
+    )
+    group.add_argument(
+        "--console-selector-every",
+        type=_non_negative_int,
+        default=None,
+        metavar="N",
+        help="Show every Nth selector diagnostic; 0 disables them.",
+    )
+
+
+def console_policy_from_args(args: argparse.Namespace) -> ConsolePolicy:
+    """Resolve a console baseline plus explicitly supplied CLI overrides."""
+
+    baseline = ConsolePolicy.all() if args.console_all else ConsolePolicy()
+    values = {
+        "initial_details": args.console_initial_details,
+        "final_results": args.console_final_results,
+        "cwt_progress": args.console_cwt_progress,
+        "moabb_progress": args.console_moabb_progress,
+        "train_steps": args.console_train_steps,
+        "epoch_every": args.console_epoch_every,
+        "selector_every": args.console_selector_every,
+    }
+    resolved = {
+        name: value if value is not None else getattr(baseline, name)
+        for name, value in values.items()
+    }
+    return ConsolePolicy(**resolved)
+
+
+def get_console_policy() -> ConsolePolicy | None:
+    """Return the configured process policy, if an experiment runner set one."""
+
+    return _console_policy
+
+
+def is_experiment_logging_configured() -> bool:
+    """Whether the current process has an active experiment logging policy."""
+
+    return _console_policy is not None
+
+
+def resolve_experiment_log_path(
+    requested_path: str | os.PathLike[str] | None,
+    *,
+    run_id: str,
+    moabb_results_root: str | os.PathLike[str],
+    overwrite: bool,
+) -> Path:
+    """Resolve an experiment log path under the runner's overwrite policy.
+
+    Auto-generated paths (``requested_path`` is None) are timestamped, so
+    every run gets its own file instead of every rerun of the same run-id
+    silently truncating (``mode="w"``, see configure_experiment_logging)
+    the previous run's full epoch-by-epoch history at a fixed
+    ``<run-id>/experiment.log``. A ``<run-id>/experiment_latest.log`` symlink
+    is kept pointing at the newest one, so a stable path is still available
+    for tailing/scripting -- follow the symlink, don't grep the literal name.
+    Explicitly passing ``requested_path`` uses that exact path as-is (still
+    subject to ``overwrite``), for scripted/reproducible use where a stable
+    filename is wanted on purpose.
+    """
+
+    if requested_path is not None:
+        log_path = Path(requested_path).expanduser().resolve()
+    else:
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        run_dir = Path(moabb_results_root).expanduser().resolve() / run_id
+        log_path = run_dir / f"experiment_{timestamp}.log"
+
+    if log_path.exists() and not overwrite:
+        raise FileExistsError(
+            f"Experiment log already exists; refusing to overwrite: {log_path}"
+        )
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if requested_path is None:
+        latest_link = log_path.parent / "experiment_latest.log"
+        if latest_link.is_symlink() or latest_link.exists():
+            latest_link.unlink()
+        latest_link.symlink_to(log_path.name)
+
+    return log_path
+
+
+class _SemanticConsoleFilter(logging.Filter):
+    def __init__(self, policy: ConsolePolicy) -> None:
+        super().__init__()
+        self.policy = policy
+
+    @staticmethod
+    def _at_cadence(record: logging.LogRecord, cadence: int) -> bool:
+        if cadence <= 0:
+            return False
+        epoch = getattr(record, "event_epoch", None)
+        total = getattr(record, "event_total_epochs", None)
+        if not isinstance(epoch, int):
+            return False
+        return epoch % cadence == 0 or (isinstance(total, int) and epoch == total)
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno >= logging.WARNING:
+            return True
+
+        category = getattr(record, "event_category", None)
+        if isinstance(category, EventCategory):
+            category = category.value
+        if category == EventCategory.ARTIFACT.value:
+            return True
+        if category in {EventCategory.STATUS.value, EventCategory.CONFIG.value}:
+            return True
+        if category == EventCategory.INITIAL_DETAILS.value:
+            return self.policy.initial_details
+        if category == EventCategory.FINAL_RESULTS.value:
+            return self.policy.final_results
+        if category == EventCategory.CWT.value:
+            return self.policy.cwt_progress
+        if category == EventCategory.MOABB.value:
+            return self.policy.moabb_progress
+        if category == EventCategory.EPOCH.value:
+            return self._at_cadence(record, self.policy.epoch_every)
+        if category == EventCategory.TRAIN_STEP.value:
+            return self.policy.train_steps
+        if category == EventCategory.SELECTOR.value:
+            return self._at_cadence(record, self.policy.selector_every)
+        return False
+
+
+class _DurableCategoryFilter(logging.Filter):
+    """Give third-party records a stable category before either handler sees them."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not hasattr(record, "event_category"):
+            record.event_category = (
+                EventCategory.MOABB.value
+                if record.name == "moabb" or record.name.startswith("moabb.")
+                else "external"
+            )
+        return True
+
+
+def configure_experiment_logging(
+    log_path: Path,
+    *,
+    console_policy: ConsolePolicy,
+    overwrite: bool,
+) -> None:
+    """Install one durable file handler and one semantic console handler."""
+
+    global _console_policy
+
+    root_logger = logging.getLogger()
+    for handler in list(root_logger.handlers):
+        root_logger.removeHandler(handler)
+        handler.close()
+
+    file_handler = logging.FileHandler(
+        log_path,
+        mode="w" if overwrite else "x",
+        encoding="utf-8",
+    )
+    file_handler.setLevel(logging.INFO)
+    file_handler.addFilter(_DurableCategoryFilter())
+    file_handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s %(levelname)s %(name)s "
+            "[%(event_category)s] %(message)s",
+            defaults={"event_category": "external"},
+        )
+    )
+
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)
+    console_handler.addFilter(_SemanticConsoleFilter(console_policy))
+    console_handler.setFormatter(logging.Formatter("%(message)s"))
+
+    root_logger.setLevel(logging.INFO)
+    root_logger.addHandler(file_handler)
+    root_logger.addHandler(console_handler)
+    logging.captureWarnings(True)
+    logging.getLogger("moabb").setLevel(logging.INFO)
+    _console_policy = console_policy
+
+
+def log_event(
+    logger: logging.Logger,
+    category: EventCategory,
+    message: str,
+    *,
+    level: int = logging.INFO,
+    epoch: int | None = None,
+    total_epochs: int | None = None,
+) -> None:
+    """Emit one categorized record with optional epoch cadence metadata."""
+
+    extra = {
+        "event_category": category.value,
+        "event_epoch": epoch,
+        "event_total_epochs": total_epochs,
+    }
+    logger.log(level, message, extra=extra)
