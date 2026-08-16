@@ -1193,7 +1193,7 @@ class ChannelSubsetMixin:
     """Shared ``channel_subset`` param + slicing logic.
 
     Mirrors ``_BaseCWTGNNClassifier._apply_channel_subset`` in
-    xwt_phase_gnn_classifier.py (kept as a separate, self-contained
+    cwt_gnn_classifiers.py (kept as a separate, self-contained
     implementation there rather than refactored onto this mixin, to avoid
     touching that already-validated code path). Subclasses must set
     ``self.channel_subset`` (list[int] | list[str] | None) and
@@ -1962,7 +1962,16 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
                     no_improve_epochs += 1
 
             epoch_time = time.perf_counter() - epoch_start
-            aux_suffix = "" if avg_aux is None else f" {self.aux_metric_name}={avg_aux:.6f}"
+            # getattr default True: most models don't set _log_aux_metric at
+            # all and keep printing whenever they return an aux value (old
+            # behavior, unchanged). SparseEvidenceGNNClassifier sets it False
+            # for event_mode in ("dense", "temporal_graph"), where the aux
+            # value is provably a constant (1/nfreqs) -- see that class's
+            # __init__ for why.
+            log_aux = getattr(self, "_log_aux_metric", True)
+            aux_suffix = (
+                "" if (avg_aux is None or not log_aux) else f" {self.aux_metric_name}={avg_aux:.6f}"
+            )
             epoch_message = (
                 f"[Train][Epoch {epoch + 1}/{self.epochs}] "
                 f"loss={avg_loss:.6f} (improve {loss_delta:+.6f}) "

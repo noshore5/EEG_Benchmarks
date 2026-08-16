@@ -34,6 +34,8 @@ wavelet transform), so there's nothing worth caching in it.
 from __future__ import annotations
 
 import hashlib
+import os
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -45,6 +47,79 @@ try:
     from Epilepsy.pipelines.common import cwt_progress_context, prepare_cwt_tf
 except ModuleNotFoundError:
     from pipelines.common import cwt_progress_context, prepare_cwt_tf
+
+
+def default_cwt_cache_root() -> Path:
+    """Mirrors cwt_gnn_classifiers.default_surrogate_cache_root's
+    own convention (same env-var precedence, same "just a subfolder under
+    mne_data" default) so this cache lands next to the other on-disk
+    caches this pipeline already writes, without adding a new env var."""
+    configured = (
+        os.environ.get("MNE_DATASETS_BNCI_PATH")
+        or os.environ.get("MNE_DATA")
+        or str(Path.home() / "mne_data")
+    )
+    return Path(configured).expanduser() / "cwt_window_cache"
+
+
+class DiskCWTCache:
+    """Disk-backed drop-in for the plain `{}` compute_cwt_real_imag_tensors_cached
+    expects (only `.get(key)` / `cache[key] = value` are used -- see that
+    function's `cache` param). Persists across separate process runs (e.g.
+    two `python run_pipelines.py --smoke` invocations), not just across
+    folds within one `leave_one_seizure_out()` call the way a plain dict
+    shared across fold instances already did.
+
+    One `.npz` file per key under `cache_dir`; atomic write (temp file +
+    os.replace, same convention as cwt_gnn_classifiers.py's
+    save_surrogate_null_cache) so a process killed mid-write never leaves a
+    half-written entry for a later run to load.
+
+    2026-08-16: NO in-memory front-cache -- every `.get()` is a real disk
+    read, every hit costs that read again on a later fold. An earlier
+    version kept a `dict` in front of disk so repeat lookups within one
+    process were free; on this 16GB machine, that dict grew unbounded
+    across a leave-one-seizure-out run's folds (they mostly overlap, so by
+    fold 2-3 it held close to the whole dataset's decompressed CWT tensors
+    at once -- ~4.4GB for the real 2,991-window/23-channel config) and
+    pushed the machine into swap partway through a real run (epoch time
+    crept 6s -> 20s+ as swapping got worse, not from more compute). Trading
+    that back for a real (cheap, ~64KB/entry) disk read per hit.
+    """
+
+    def __init__(self, cache_dir: Path | str | None = None):
+        self._cache_dir = Path(cache_dir) if cache_dir is not None else default_cwt_cache_root()
+
+    def get(self, key: str):
+        path = self._cache_dir / f"{key}.npz"
+        if not path.is_file():
+            return None
+        try:
+            with np.load(path) as data:
+                return (data["real"], data["imag"])
+        except Exception:
+            return None  # corrupt/partial file -- treat as a miss, recompute+overwrite
+
+    def __setitem__(self, key: str, value: tuple[np.ndarray, np.ndarray]) -> None:
+        real, imag = value
+        self._cache_dir.mkdir(parents=True, exist_ok=True)
+        final_path = self._cache_dir / f"{key}.npz"
+        tmp_path = self._cache_dir / f".{key}.{os.getpid()}.tmp.npz"
+        # Compressed (2026-08-16): measured ~54% smaller on the matching
+        # dense-edge cache's tensors (see dense_edge_cache.py's save_dense_edge);
+        # CWT coefficients are less sparse (no COI-zeroing at this stage) so
+        # the ratio here is expected to be worse, but any reduction helps the
+        # same disk budget both caches share.
+        np.savez_compressed(tmp_path, real=real, imag=imag)
+        os.replace(tmp_path, final_path)
+
+    def __len__(self) -> int:
+        # Counts .npz files on disk -- unlike the old in-memory dict's
+        # count, this reflects everything ever cached under this cache_dir
+        # (including from prior process runs), not just this process's own
+        # touched set. Only called once, at the end of a run, for the
+        # summary print -- a directory listing there is cheap enough.
+        return sum(1 for _ in self._cache_dir.glob("*.npz")) if self._cache_dir.is_dir() else 0
 
 
 def _window_cache_key(

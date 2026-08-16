@@ -36,7 +36,15 @@ from moabb.datasets.preprocessing import FixedPipeline
 
 log = logging.getLogger(__name__)
 
-BASE_URL = "https://physionet.org/files/chbmit/1.0.0/"
+# 2026-08-16: PhysioNet's own HTTPS server throttles to ~180KB/s per
+# connection regardless of local link speed (confirmed: the same
+# connection hit ~3.4MB/s against a CDN and ~3.9MB/s against this mirror) --
+# not fixable from the client side. PhysioNet also publishes this exact
+# dataset on a public, no-auth-required S3 bucket (see the "AWS S3" bulk-
+# download option on https://physionet.org/content/chbmit/1.0.0/); verified
+# byte-identical (sha256) against a file already downloaded from the
+# physionet.org URL before switching. ~20x faster in practice.
+BASE_URL = "https://physionet-open.s3.amazonaws.com/chbmit/1.0.0/"
 SIGN = "CHBMIT"
 
 _FILE_RE = re.compile(r"File Name:\s*(\S+)")
@@ -162,6 +170,20 @@ class CHBMIT(BaseDataset):
         if wanted is not None:
             records = [r for r in records if r["filename"] in wanted]
         return records
+
+    def list_records(
+        self,
+        subject: int,
+        path: Optional[Union[str, Path]] = None,
+        force_update: bool = False,
+    ) -> List[dict]:
+        """Return every recording documented for `subject` (seizure-containing
+        and seizure-free alike). Cheap to call on its own (only downloads
+        the summary file) -- public counterpart to list_seizure_records for
+        callers that need the seizure-free entries too (e.g. label_mode=
+        "prediction"'s need for genuine interictal recordings; see
+        Epilepsy/run_pipelines.py's _build_windowed_dataset)."""
+        return self._list_records(subject, path, force_update)
 
     def list_seizure_records(
         self,
