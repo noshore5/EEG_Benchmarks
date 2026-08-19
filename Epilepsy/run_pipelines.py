@@ -185,14 +185,20 @@ PREDICTION_GRU_PARAMS: dict[str, object] = dict(
     _SHARED_ARCH_PARAMS,
     batch_size=32,
     learning_rate=2e-3,
-    # 2026-08-19: overrides _SHARED_ARCH_PARAMS's validation_split=0.0 --
-    # apples-to-apples fix against truong_stft_cnn, which trains with
-    # validation_split=0.2 (TRUONG_STFT_CNN_PARAMS below). Without this,
-    # dense_edge_gru trained on 100% of each fold's training windows while
-    # truong_stft_cnn trained on only 80%, a real (if secondary to window
-    # length) confound in comparing the two on the same task. Detection
-    # mode is untouched (DENSE_EDGE_GRU_PARAMS still inherits 0.0).
-    validation_split=0.2,
+    # 2026-08-19: REVERTED to _SHARED_ARCH_PARAMS's validation_split=0.0 --
+    # the apples-to-apples validation_split=0.2 fix (see git history) crashes
+    # every prediction-mode dense_edge_gru run: leave_one_seizure_out_prediction
+    # (above) trains via StreamingSparseEvidenceGNNClassifier, which explicitly
+    # raises NotImplementedError for validation_split > 0 (see that class's fit(),
+    # cwt_gnn_classifiers.py) -- lazy val_loader batching for the streaming
+    # classifier was never built. Until that's implemented, dense_edge_gru
+    # prediction mode trains on 100% of each fold's training windows while
+    # truong_stft_cnn (unaffected -- separate classifier, TRUONG_STFT_CNN_PARAMS
+    # below) trains on 80% -- a real, currently-unavoidable confound in comparing
+    # the two. Detection mode is untouched (DENSE_EDGE_GRU_PARAMS still inherits
+    # 0.0; SparseEvidenceGNNClassifier there is the non-streaming variant and was
+    # never affected by this).
+    validation_split=0.0,
 )
 
 DEFAULT_DETECTION_EPOCHS = 20
