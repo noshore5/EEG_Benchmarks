@@ -33,11 +33,12 @@ import hashlib
 import math
 import os
 from pathlib import Path
-from typing import Callable, Literal
+from typing import Callable, Literal, Sequence
 
 import numpy as np
 import torch
 import torch.nn as nn
+from torch.utils.data import DataLoader, Dataset, Sampler
 from tqdm.auto import tqdm
 
 try:
@@ -49,13 +50,23 @@ try:
         compute_cwt_real_imag_tensors,
         emit_initial_detail,
         fit_global_zscore_stats,
+        is_experiment_logging_configured,
         make_gaussian_weight2d,
         ordered_pair_indices as _ordered_pair_indices,
         phase_rule_deadzone_sign as _phase_rule_deadzone_sign,
+        print_torch_custom_model_summary,
+        print_torch_parameter_hashes,
+        print_torch_parameter_summary,
         resolve_coherence_utils,
         resolve_phase_rule as _resolve_phase_rule,
+        resolve_torch_device,
+        resolve_train_val_indices,
+        set_seed,
         upper_pair_indices,
+        validate_eeg_X,
+        validation_groups_from_metadata,
     )
+    from Epilepsy.pipelines.common import _count_eligible_tensor_batches, _min_accepted_batch_size
     from Epilepsy.pipelines.cwt_window_cache import compute_cwt_real_imag_tensors_cached
     from Epilepsy.pipelines.dense_edge_cache import (
         dense_edge_cache_key,
@@ -71,13 +82,23 @@ except ModuleNotFoundError:
         compute_cwt_real_imag_tensors,
         emit_initial_detail,
         fit_global_zscore_stats,
+        is_experiment_logging_configured,
         make_gaussian_weight2d,
         ordered_pair_indices as _ordered_pair_indices,
         phase_rule_deadzone_sign as _phase_rule_deadzone_sign,
+        print_torch_custom_model_summary,
+        print_torch_parameter_hashes,
+        print_torch_parameter_summary,
         resolve_coherence_utils,
         resolve_phase_rule as _resolve_phase_rule,
+        resolve_torch_device,
+        resolve_train_val_indices,
+        set_seed,
         upper_pair_indices,
+        validate_eeg_X,
+        validation_groups_from_metadata,
     )
+    from pipelines.common import _count_eligible_tensor_batches, _min_accepted_batch_size
     from pipelines.cwt_window_cache import compute_cwt_real_imag_tensors_cached
     from pipelines.dense_edge_cache import (
         dense_edge_cache_key,
@@ -1658,7 +1679,7 @@ class SparseEvidenceGNNCore(nn.Module):
         sampling_rate: int = 250,
         coi_enabled: bool = True,
         channel_encoder_dilation: int = 1,
-        feature_ablation: str = "none",
+        feature_ablation: str = "zero_channel_embed",
         # 2026-08-10: "mean" (default) is the original behavior -- every
         # event landing on a destination channel contributes an EQUAL share
         # to that channel's evidence (scatter_add then divide by active
@@ -2383,19 +2404,24 @@ class SparseEvidenceGNNCore(nn.Module):
         # untouched) -- only zeros one feature block immediately before the
         # message MLP, in forward() below, so it's a pure ablation of what
         # the CLASSIFIER sees, not of the event-detection pipeline itself.
-        #   "none"               -- no ablation (default, normal behavior).
-        #   "zero_event_features" -- event_features zeroed; message MLP
-        #       sees only src/dst channel embeddings (plus which edges have
-        #       events at all, via active_count/topology) -- tests whether
-        #       accuracy survives on raw per-channel signal shape alone.
-        #   "zero_channel_embed" -- src/dst embeddings zeroed; message MLP
+        #   "zero_channel_embed" -- (default, and the ONLY accepted value)
+        #       src/dst ChannelSignalEncoder embeddings zeroed; message MLP
         #       sees only each event's own (t, freq, mag, phase) -- tests
         #       whether accuracy survives on event content + graph topology
         #       alone, with no raw-signal information.
-        if feature_ablation not in ("none", "zero_event_features", "zero_channel_embed"):
+        #
+        # 2026-08-17: "none" and "zero_event_features" (which fed raw-signal
+        # channel embeddings to the classifier) are hard-disabled -- this
+        # kept getting switched on unintentionally (default was "none"), so
+        # rather than rely on every call site remembering to opt out, the
+        # capability itself is removed: no value other than
+        # "zero_channel_embed" is accepted, at construction time, regardless
+        # of what any pipeline config passes.
+        if feature_ablation != "zero_channel_embed":
             raise ValueError(
-                "feature_ablation must be 'none', 'zero_event_features', or "
-                f"'zero_channel_embed', got {feature_ablation!r}."
+                "feature_ablation must be 'zero_channel_embed' -- channel "
+                "embeddings are hard-disabled (see 2026-08-17 comment above), "
+                f"got {feature_ablation!r}."
             )
         self.feature_ablation = feature_ablation
 
@@ -4126,11 +4152,12 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         # kernel's parameter count. See ChannelSignalEncoder's docstring.
         channel_encoder_dilation: int = 1,
         # 2026-08-09 ablation, forwarded to SparseEvidenceGNNCore -- see that
-        # class's __init__ docstring for the three modes ("none" (default),
-        # "zero_event_features", "zero_channel_embed"). Does not change
-        # event computation/caching, only what SparseEvidenceGNNCore.forward
-        # feeds sparse_message_mlp.
-        feature_ablation: str = "none",
+        # class's __init__ docstring. 2026-08-17: hard-disabled to
+        # "zero_channel_embed" only (the only value SparseEvidenceGNNCore's
+        # __init__ now accepts) -- channel embeddings kept getting switched
+        # on unintentionally via the old "none" default, so nothing above
+        # this class can turn them back on.
+        feature_ablation: str = "zero_channel_embed",
         # 2026-08-10, forwarded to SparseEvidenceGNNCore -- see that class's
         # __init__ docstring. "mean" (default) is the original behavior;
         # "gated_softmax" lets sparse_message_mlp's events compete for
@@ -5314,3 +5341,242 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
             temporal_graph_edge_dim=self.temporal_graph_edge_dim,
             **kwargs,
         )
+
+
+# ============================================================================
+# 2026-08-17: StreamingSparseEvidenceGNNClassifier -- alternate, memory-
+# bounded version of SparseEvidenceGNNClassifier for label_mode="prediction"
+# 's much larger (full-subject) training sets. Added here as a SEPARATE
+# class (at the user's request, colocated in this file rather than a
+# separate module) -- nothing above this point is modified.
+#
+# Why this exists: the original class's fit() computes CWT + dense-edge
+# features for the WHOLE training set in one call, before the epoch loop
+# even starts (common.py:1499, `_prepare_features(X, fit=True,
+# train_idx=train_idx)`) -- materializing every training window's feature
+# tensors simultaneously. Measured directly from this pipeline's own disk
+# cache: ~2.04MB/window (dense-edge) + ~1.51MB/window (CWT, real+imag x 23
+# channels) = ~3.55MB/window. Detection mode's training sets (~2.5-3.8k
+# windows/fold, 7-file scope) fit in that pattern; label_mode="prediction"'s
+# full-subject training sets (~14-15k windows/fold before subsampling) do
+# not -- ~52GB needed against a 16GB-RAM/15GB-swap machine, confirmed by an
+# actual OOM kill (exit 137) on a real run. See the 2026-08-17 session note.
+#
+# Rather than touch _prepare_features/fit() on SparseEvidenceGNNClassifier
+# (detection mode's already-tuned, working path) or TorchEEGClassifier in
+# common.py (shared with the BCI pipeline too), this subclass overrides
+# ONLY fit(). It computes features one small batch at a time (calling the
+# exact same cache-aware _prepare_features every other call site already
+# uses, just invoked per-batch instead of once-for-the-whole-training-set),
+# then hands a standard, completely UNCHANGED _train_loop (common.py)
+# exactly the same batch shape it already expects (`*batch_inputs,
+# batch_y`, see common.py:1802-1803 / 2051-2052 / 2097-2098).
+#
+# Tradeoffs, both acceptable for this use case:
+# - Batch ORDER (and therefore the exact training trajectory) will NOT
+#   bit-match a run of the original class given the "same" seed --
+#   verified directly: DataLoader(shuffle=True, generator=g) draws an
+#   internal `_base_seed` from that SAME generator object before the
+#   RandomSampler it also owns first calls torch.randperm on it
+#   (torch/utils/data/dataloader.py's _BaseDataLoaderIter.__init__),
+#   consuming one extra draw ahead of the sampler in a way this class's
+#   own (simpler, directly-called torch.randperm) shuffling doesn't
+#   replicate. Chasing bit-exact matching of that undocumented, version-
+#   dependent internal ordering isn't a real correctness requirement --
+#   a different-but-still-uniformly-random shuffle is exactly as valid a
+#   training run as any other seed's. Verified instead on what actually
+#   matters: every training window is visited exactly once per epoch, and
+#   a given window's computed features are numerically identical to what
+#   the original whole-set computation produces for that same window.
+# - Loses _precompute_dense_edge_inputs's internal cross-window batching
+#   for the COLD-cache case (that method already chunks internally at
+#   `min(batch_size, 4)`; this streams at self.batch_size instead, calling
+#   _prepare_features fresh per training batch) -- slightly different
+#   chunking granularity on a cold cache, but every physical window still
+#   only pays real compute cost ONCE per run (same disk caches, same cache
+#   keys), so warm-cache epochs (2nd epoch onward, and any fold that shares
+#   windows with an earlier one) are unaffected either way.
+# - Assumes noise_augmentation_enabled=False (this pipeline's actual
+#   config, in both DENSE_EDGE_GRU_PARAMS and PREDICTION_GRU_PARAMS) --
+#   _fit_noise_augmentation_state's whole-training-set fitting isn't
+#   reimplemented for the lazy per-batch path; fit() raises
+#   NotImplementedError if augmentation is ever turned on with this class,
+#   rather than silently doing the wrong thing.
+# - validation_split > 0 isn't supported (also raises) -- this pipeline
+#   always runs with validation_split=0.0 (see run_pipelines.py's params),
+#   so nothing currently needs it; a lazy val_loader would need the same
+#   treatment as the train loader below.
+# ============================================================================
+
+
+class _BatchIndexSampler(Sampler):
+    """Yields lists of window indices, one list per batch, freshly
+    reshuffled every time iteration starts (matching
+    DataLoader(shuffle=True)'s per-epoch reshuffle) -- the index-selection
+    half of what TensorDataset + DataLoader(shuffle=True) used to do,
+    kept separate here from the (now lazy) feature computation below. See
+    this section's header comment on why this doesn't bit-match
+    DataLoader's own internal shuffle order (and why that's fine)."""
+
+    def __init__(self, n: int, batch_size: int, generator: torch.Generator):
+        self.n = int(n)
+        self.batch_size = int(batch_size)
+        self.generator = generator
+
+    def __iter__(self):
+        order = torch.randperm(self.n, generator=self.generator).tolist()
+        for start in range(0, self.n, self.batch_size):
+            yield order[start : start + self.batch_size]
+
+    def __len__(self) -> int:
+        return (self.n + self.batch_size - 1) // self.batch_size
+
+
+class _LazyFeatureBatchDataset(Dataset):
+    """Given a LIST of window indices (from _BatchIndexSampler, via
+    DataLoader(batch_size=None, sampler=...)), computes just that batch's
+    (raw_x, dense_edge_raw, y) via the classifier's own cache-aware
+    _prepare_features -- called on `len(indices)` windows, not the whole
+    training set, so at most one batch's tensors (~batch_size * 3.55MB,
+    e.g. ~114MB at batch_size=32) exist at a time instead of the whole
+    training set's (~52GB at this pipeline's real scale).
+
+    `batch_size=None` + a sampler that yields index LISTS (rather than
+    DataLoader's usual per-sample-then-collate) is how this Dataset's
+    __getitem__ ends up receiving a whole list of indices at once instead
+    of PyTorch's default one-int-at-a-time contract -- a documented
+    map-style-dataset pattern, not a workaround.
+    """
+
+    def __init__(self, classifier: "StreamingSparseEvidenceGNNClassifier", X_raw: np.ndarray, y_idx: np.ndarray):
+        self.classifier = classifier
+        self.X_raw = X_raw
+        self.y_idx = y_idx
+
+    def __getitem__(self, indices: Sequence[int]):
+        idx = np.asarray(indices, dtype=np.int64)
+        X_batch = self.X_raw[idx]
+        # fit=False: reuses self.X_mean_/self.X_std_ already fit ONCE on
+        # the whole training set in fit() below -- must NOT refit per
+        # batch, which would normalize each batch by its own, different,
+        # wrong mean/std instead of a single consistent training-set one.
+        raw_x, dense_edge_raw = self.classifier._prepare_features(X_batch, fit=False)
+        y_batch = torch.from_numpy(self.y_idx[idx]).long()
+        return raw_x, dense_edge_raw, y_batch
+
+    def __len__(self) -> int:
+        return int(self.X_raw.shape[0])
+
+
+class StreamingSparseEvidenceGNNClassifier(SparseEvidenceGNNClassifier):
+    """Drop-in alternative to SparseEvidenceGNNClassifier for training sets
+    too large to fit in memory as precomputed feature tensors -- same
+    constructor, same predict()/predict_proba() (test sets here are small
+    enough -- a few hundred to ~1k windows, ~2-4GB -- that the original
+    eager path is fine for them; only training needed changing), same
+    underlying _train_loop. Only fit()'s feature-materialization strategy
+    differs. See this section's header comment for the full rationale.
+    """
+
+    def fit(self, X, y, validation_groups: np.ndarray | None = None, metadata=None):
+        X = validate_eeg_X(X)
+        self._validate_batch_control_params()
+        set_seed(self.seed)
+        self.device_ = resolve_torch_device(self.device)
+
+        self.classes_ = np.unique(y)
+        self.class_to_idx_ = {cls: idx for idx, cls in enumerate(self.classes_)}
+        y_idx = np.array([self.class_to_idx_[cls] for cls in y], dtype=np.int64)
+        n_classes = len(self.classes_)
+
+        groups = validation_groups_from_metadata(
+            metadata, self.validation_group_column, validation_groups, X.shape[0],
+        )
+        train_idx, val_idx, chosen_groups = resolve_train_val_indices(
+            X.shape[0], y_idx, int(self.seed or 0), self.validation_split,
+            self.validation_group_column, groups,
+        )
+        if val_idx.size == 0:
+            self._vprint(1, "[Train] validation disabled.")
+        else:
+            # See this section's header comment -- not needed by this
+            # pipeline (validation_split=0.0 always), not built.
+            raise NotImplementedError(
+                "StreamingSparseEvidenceGNNClassifier doesn't support "
+                "validation_split > 0 -- a lazy val_loader would need the "
+                "same batching treatment as the train loader, not built "
+                "since nothing here currently sets validation_split != 0."
+            )
+
+        # ONE cheap, whole-training-set pass to fit normalization stats --
+        # NOT the full _prepare_features (which would also CWT/dense-edge
+        # the whole set, the exact cost this class exists to avoid).
+        # Mirrors _BaseCWTGNNClassifier._prepare_features's own fit=True
+        # branch above, up to (not including) the CWT call --
+        # fit_global_zscore_stats is a cheap elementwise reduction, not a
+        # wavelet transform, so holding X[train_idx] (raw signal only,
+        # ~0.09MB/window) for this one call is fine.
+        if self.normalize_input:
+            X_subset_train = self._apply_channel_subset(X[train_idx])
+            self.X_mean_, self.X_std_ = fit_global_zscore_stats(X_subset_train)
+        else:
+            self.X_mean_, self.X_std_ = 0.0, 1.0
+        if self._uses_noise_augmentation():
+            raise NotImplementedError(
+                "StreamingSparseEvidenceGNNClassifier assumes "
+                "noise_augmentation_enabled=False (this pipeline's actual "
+                "config) -- _fit_noise_augmentation_state's whole-training-"
+                "set fitting isn't implemented for the lazy per-batch path."
+            )
+
+        # Model construction only needs shape metadata (n_channels,
+        # n_time), never actual feature VALUES -- see
+        # _build_model_from_features above -- so a tiny probe stands in
+        # for the whole training set here.
+        probe_n = min(2, len(train_idx))
+        probe_features = self._prepare_features(X[train_idx[:probe_n]], fit=False)
+        self.model_ = self._build_model_from_features(probe_features, n_classes, device=self.device_).to(
+            self.device_
+        )
+        self._prepare_training_state_on_device()
+        if self.verbose >= 2 or is_experiment_logging_configured():
+            model_label = getattr(self, "model_label", self.__class__.__name__)
+            print_torch_parameter_summary(self.model_, header=model_label)
+            print_torch_parameter_hashes(self.model_, header=model_label)
+            print_torch_custom_model_summary(self.model_, header=model_label)
+
+        optimizer, alpha_optimizer, selector_specs = self._build_training_optimizers()
+        min_batch_size = _min_accepted_batch_size(int(self.batch_size), float(self.last_batch_min_ratio))
+
+        # Same seeding convention as the original fit() -- see
+        # common.py:1503-1524's comment on why this must be independent of
+        # torch's global RNG state (model construction above already
+        # consumed some of it).
+        shuffle_generator = torch.Generator()
+        shuffle_generator.manual_seed(
+            int(self.seed) if self.seed is not None else int(torch.initial_seed())
+        )
+
+        train_dataset = _LazyFeatureBatchDataset(self, X[train_idx], y_idx[train_idx])
+        train_sampler = _BatchIndexSampler(len(train_idx), self.batch_size, shuffle_generator)
+        train_loader = DataLoader(train_dataset, sampler=train_sampler, batch_size=None, num_workers=0)
+        val_loader = None  # val_idx.size == 0 enforced above
+
+        if _count_eligible_tensor_batches(train_loader, min_batch_size) == 0:
+            raise ValueError(
+                "last_batch_min_ratio leaves no eligible training batches. "
+                "Reduce last_batch_min_ratio or batch_size."
+            )
+
+        criterion = self._criterion(y_idx[train_idx])
+        self._reset_histories()
+        self._train_loop(
+            train_loader,
+            val_loader,
+            optimizer,
+            criterion,
+            n_classes,
+            selector_specs=selector_specs,
+            alpha_optimizer=alpha_optimizer,
+        )
+        return self

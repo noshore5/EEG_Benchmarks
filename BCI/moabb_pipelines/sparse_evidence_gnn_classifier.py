@@ -679,7 +679,7 @@ class SparseEvidenceGNNCore(nn.Module):
         sampling_rate: int = 250,
         coi_enabled: bool = True,
         channel_encoder_dilation: int = 1,
-        feature_ablation: str = "none",
+        feature_ablation: str = "zero_channel_embed",
         # 2026-08-10: "mean" (default) is the original behavior -- every
         # event landing on a destination channel contributes an EQUAL share
         # to that channel's evidence (scatter_add then divide by active
@@ -1404,19 +1404,24 @@ class SparseEvidenceGNNCore(nn.Module):
         # untouched) -- only zeros one feature block immediately before the
         # message MLP, in forward() below, so it's a pure ablation of what
         # the CLASSIFIER sees, not of the event-detection pipeline itself.
-        #   "none"               -- no ablation (default, normal behavior).
-        #   "zero_event_features" -- event_features zeroed; message MLP
-        #       sees only src/dst channel embeddings (plus which edges have
-        #       events at all, via active_count/topology) -- tests whether
-        #       accuracy survives on raw per-channel signal shape alone.
-        #   "zero_channel_embed" -- src/dst embeddings zeroed; message MLP
+        #   "zero_channel_embed" -- (default, and the ONLY accepted value)
+        #       src/dst ChannelSignalEncoder embeddings zeroed; message MLP
         #       sees only each event's own (t, freq, mag, phase) -- tests
         #       whether accuracy survives on event content + graph topology
         #       alone, with no raw-signal information.
-        if feature_ablation not in ("none", "zero_event_features", "zero_channel_embed"):
+        #
+        # 2026-08-17: "none" and "zero_event_features" (which fed raw-signal
+        # channel embeddings to the classifier) are hard-disabled -- this
+        # kept getting switched on unintentionally (default was "none"), so
+        # rather than rely on every call site remembering to opt out, the
+        # capability itself is removed: no value other than
+        # "zero_channel_embed" is accepted, at construction time, regardless
+        # of what any pipeline config passes.
+        if feature_ablation != "zero_channel_embed":
             raise ValueError(
-                "feature_ablation must be 'none', 'zero_event_features', or "
-                f"'zero_channel_embed', got {feature_ablation!r}."
+                "feature_ablation must be 'zero_channel_embed' -- channel "
+                "embeddings are hard-disabled (see 2026-08-17 comment above), "
+                f"got {feature_ablation!r}."
             )
         self.feature_ablation = feature_ablation
 
@@ -3140,11 +3145,12 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         # kernel's parameter count. See ChannelSignalEncoder's docstring.
         channel_encoder_dilation: int = 1,
         # 2026-08-09 ablation, forwarded to SparseEvidenceGNNCore -- see that
-        # class's __init__ docstring for the three modes ("none" (default),
-        # "zero_event_features", "zero_channel_embed"). Does not change
-        # event computation/caching, only what SparseEvidenceGNNCore.forward
-        # feeds sparse_message_mlp.
-        feature_ablation: str = "none",
+        # class's __init__ docstring. 2026-08-17: hard-disabled to
+        # "zero_channel_embed" only (the only value SparseEvidenceGNNCore's
+        # __init__ now accepts) -- channel embeddings kept getting switched
+        # on unintentionally via the old "none" default, so nothing above
+        # this class can turn them back on.
+        feature_ablation: str = "zero_channel_embed",
         # 2026-08-10, forwarded to SparseEvidenceGNNCore -- see that class's
         # __init__ docstring. "mean" (default) is the original behavior;
         # "gated_softmax" lets sparse_message_mlp's events compete for
