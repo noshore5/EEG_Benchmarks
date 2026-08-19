@@ -26,6 +26,9 @@ apt-get update
 apt-get install -y --no-install-recommends cmake build-essential libfftw3-dev
 
 echo "==> Installing Python requirements (this compiles fcwt from source -- can take a few minutes)..."
-pip install -r requirements.txt
+# --break-system-packages: this pod's image PEP-668-protects the system Python
+# (Ubuntu 24.04 base). Safe here -- the container is ephemeral and dedicated
+# to this run, there's no system package manager state to protect.
+pip install --break-system-packages -r requirements.txt
 
 echo "==> Done. Remember: pass --device cuda to every Epilepsy/run_pipelines.py invocation."
