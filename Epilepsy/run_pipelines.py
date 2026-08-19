@@ -185,6 +185,14 @@ PREDICTION_GRU_PARAMS: dict[str, object] = dict(
     _SHARED_ARCH_PARAMS,
     batch_size=32,
     learning_rate=2e-3,
+    # 2026-08-19: overrides _SHARED_ARCH_PARAMS's validation_split=0.0 --
+    # apples-to-apples fix against truong_stft_cnn, which trains with
+    # validation_split=0.2 (TRUONG_STFT_CNN_PARAMS below). Without this,
+    # dense_edge_gru trained on 100% of each fold's training windows while
+    # truong_stft_cnn trained on only 80%, a real (if secondary to window
+    # length) confound in comparing the two on the same task. Detection
+    # mode is untouched (DENSE_EDGE_GRU_PARAMS still inherits 0.0).
+    validation_split=0.2,
 )
 
 DEFAULT_DETECTION_EPOCHS = 20
@@ -978,21 +986,24 @@ def _build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--window-length", type=float, default=None,
         help=(
-            "Window length in seconds. Unset: resolved per --pipeline in main() -- 4.0 for "
-            "dense_edge_gru (untuned), DEFAULT_TRUONG_WINDOW_LENGTH (30.0, the paper's own "
-            "segment length) for truong_stft_cnn."
+            "Window length in seconds. Unset: resolved per --label-mode in main() -- "
+            "DEFAULT_TRUONG_WINDOW_LENGTH (30.0, the paper's own segment length) for "
+            "label_mode=prediction (both pipelines, so dense_edge_gru stays apples-to-apples "
+            "comparable to truong_stft_cnn), 4.0 for label_mode=detection (untuned)."
         ),
     )
     parser.add_argument(
         # 2026-08-16: default raised from 4.0 -- halves window count (and
         # thus both disk caches and per-fold training-set size) at the cost
         # of coarser window overlap. Still untuned -- a deliberate size/speed
-        # tradeoff, not a validated choice of temporal resolution.
+        # tradeoff, not a validated choice of temporal resolution. (Only
+        # applies to label_mode=detection now -- see 2026-08-19 comment in
+        # main() for why prediction mode no longer uses this default.)
         "--step-size", type=float, default=None,
         help=(
-            "Hop between window starts, in seconds. Unset: resolved per --pipeline in main() -- "
-            "8.0 for dense_edge_gru (untuned), DEFAULT_TRUONG_STEP_SIZE (30.0, non-overlapping) "
-            "for truong_stft_cnn."
+            "Hop between window starts, in seconds. Unset: resolved per --label-mode in "
+            "main() -- DEFAULT_TRUONG_STEP_SIZE (30.0, non-overlapping) for "
+            "label_mode=prediction (both pipelines), 8.0 for label_mode=detection (untuned)."
         ),
     )
     parser.add_argument(
@@ -1073,12 +1084,22 @@ def main(args: argparse.Namespace) -> None:
         )
         label_mode = "prediction"
 
+    # 2026-08-19: keyed off label_mode (not pipeline) -- dense_edge_gru's
+    # prediction-mode runs need to be apples-to-apples comparable against
+    # truong_stft_cnn on the SAME task, which means the same window/step
+    # (previously dense_edge_gru defaulted to 4.0s/8.0s regardless of
+    # label_mode: a non-overlapping-with-gaps window that only classifies
+    # ~1/3 of the interictal signal, vs. truong_stft_cnn's contiguous
+    # 30.0s/30.0s -- false_alarms_per_hour and event-level recall from the
+    # two pipelines weren't measuring the same amount of monitored time).
+    # detection mode (dense_edge_gru only -- truong_stft_cnn forces
+    # label_mode="prediction" above) keeps its own untouched 4.0s/8.0s.
     window_length = args.window_length
     if window_length is None:
-        window_length = DEFAULT_TRUONG_WINDOW_LENGTH if pipeline == "truong_stft_cnn" else 4.0
+        window_length = DEFAULT_TRUONG_WINDOW_LENGTH if label_mode == "prediction" else 4.0
     step_size = args.step_size
     if step_size is None:
-        step_size = DEFAULT_TRUONG_STEP_SIZE if pipeline == "truong_stft_cnn" else 8.0
+        step_size = DEFAULT_TRUONG_STEP_SIZE if label_mode == "prediction" else 8.0
     subjects = args.subjects
     if args.epochs is not None:
         epochs = args.epochs
