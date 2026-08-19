@@ -137,6 +137,57 @@ def _window_cache_key(
     return f"{digest}|{sampling_rate}|{highest}|{lowest}|{nfreqs}|{cwt_resample_n_time}"
 
 
+def precompute_window_cache_keys(
+    X_raw: np.ndarray,
+    *,
+    sampling_rate: int,
+    highest: float,
+    lowest: float,
+    nfreqs: int,
+    cwt_resample_n_time: Optional[int],
+) -> np.ndarray:
+    """Runs _window_cache_key over every (sample, channel) in X_raw ONCE,
+    returning a [n_samples, n_channels] object array of key strings, for
+    callers that will look the same X_raw up in the cache repeatedly
+    within one fit() call (see StreamingSparseEvidenceGNNClassifier's
+    _LazyFeatureBatchDataset, cwt_gnn_classifiers.py).
+
+    2026-08-19: that class recomputes CWT tensors from cache every
+    training batch by design (its whole point is bounding memory, not
+    materializing the whole training set -- see its docstring), but
+    compute_cwt_real_imag_tensors_cached's per-(sample, channel) cache
+    lookup was re-running _window_cache_key's SHA256 hash of the raw
+    ~4KB channel on EVERY call, hit or miss -- so a 100%-cache-hit batch
+    still paid full hashing cost. Measured on a Runpod smoke run: ~380-
+    400 hashes/s, 736 (sample, channel) pairs/batch (32 trials x 23
+    channels) -> ~1.9s/batch of pure hashing+Python-loop overhead, x ~24
+    batches/epoch, while the actual CWT/dense-edge compute those hashes
+    gate was a one-time ~2.3s per fold (proved by comparing epoch_time
+    across a batch with real dense-edge compute vs. one with none: both
+    ~22.6-22.8s, i.e. unaffected) -- meaning this hashing, not the
+    wavelet/coherence math, was the dominant real cost.
+
+    A window's content (and therefore its key) never changes within one
+    fit() call, so hashing it once here -- at _LazyFeatureBatchDataset
+    construction, before any batches are drawn -- and passing the result
+    into compute_cwt_real_imag_tensors_cached's `window_keys` makes every
+    per-batch access a pure dict lookup, no rehash, without changing what
+    gets cached or its cross-fold/cross-classifier reuse semantics (the
+    key computed here is byte-for-byte identical to what
+    _window_cache_key would have computed inline).
+    """
+    n_samples, n_channels = int(X_raw.shape[0]), int(X_raw.shape[1])
+    keys = np.empty((n_samples, n_channels), dtype=object)
+    for sample_idx in range(n_samples):
+        for ch_idx in range(n_channels):
+            keys[sample_idx, ch_idx] = _window_cache_key(
+                X_raw[sample_idx, ch_idx, :],
+                sampling_rate=sampling_rate, highest=highest, lowest=lowest,
+                nfreqs=nfreqs, cwt_resample_n_time=cwt_resample_n_time,
+            )
+    return keys
+
+
 def compute_cwt_real_imag_tensors_cached(
     X_raw: np.ndarray,
     *,
@@ -150,6 +201,7 @@ def compute_cwt_real_imag_tensors_cached(
     transform_fn,
     verbose: int,
     cache: dict,
+    window_keys: Optional[np.ndarray] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Drop-in equivalent of common.compute_cwt_real_imag_tensors that takes
     the RAW (pre-normalization, post-channel-subset) window plus this fit
@@ -162,6 +214,17 @@ def compute_cwt_real_imag_tensors_cached(
     `cache` is a plain dict the caller owns -- pass the SAME dict across
     multiple classifier instances (e.g. one per CV fold) to get reuse
     across them; pass a fresh `{}` for no sharing.
+
+    `window_keys`, if given, is a [n_samples, n_channels] array of
+    already-computed _window_cache_key strings (see
+    precompute_window_cache_keys) aligned to X_raw's rows/channels --
+    skips re-hashing each raw channel on this call, for callers that
+    already hashed this exact X_raw once (e.g.
+    StreamingSparseEvidenceGNNClassifier's _LazyFeatureBatchDataset,
+    which would otherwise rehash every batch -- see that function's
+    docstring for the measured cost). None (the default) reproduces the
+    original always-hash-inline behavior, unchanged for every other
+    caller.
     """
     n_samples, n_channels, n_time_orig = X_raw.shape
     n_time = n_time_orig if cwt_resample_n_time is None else int(cwt_resample_n_time)
@@ -192,14 +255,17 @@ def compute_cwt_real_imag_tensors_cached(
             for sample_idx in range(n_samples):
                 for ch_idx in range(n_channels):
                     raw_channel = X_raw[sample_idx, ch_idx, :]
-                    key = _window_cache_key(
-                        raw_channel,
-                        sampling_rate=sampling_rate,
-                        highest=highest,
-                        lowest=lowest,
-                        nfreqs=nfreqs,
-                        cwt_resample_n_time=cwt_resample_n_time,
-                    )
+                    if window_keys is not None:
+                        key = window_keys[sample_idx, ch_idx]
+                    else:
+                        key = _window_cache_key(
+                            raw_channel,
+                            sampling_rate=sampling_rate,
+                            highest=highest,
+                            lowest=lowest,
+                            nfreqs=nfreqs,
+                            cwt_resample_n_time=cwt_resample_n_time,
+                        )
                     cached = cache.get(key)
                     if cached is None:
                         coeffs, _ = transform_fn(raw_channel, sampling_rate, highest, lowest, nfreqs=nfreqs)
