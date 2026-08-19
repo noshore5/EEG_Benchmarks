@@ -29,6 +29,10 @@ echo "==> Installing Python requirements (this compiles fcwt from source -- can 
 # --break-system-packages: this pod's image PEP-668-protects the system Python
 # (Ubuntu 24.04 base). Safe here -- the container is ephemeral and dedicated
 # to this run, there's no system package manager state to protect.
-pip install --break-system-packages -r requirements.txt
+# --ignore-installed: some deps (e.g. pyparsing) are pre-installed via apt/dpkg
+# with no pip RECORD file, so pip can't safely uninstall them in place to
+# upgrade -- ignore-installed makes it shadow-install the pinned version
+# instead of failing on the uninstall step.
+pip install --break-system-packages --ignore-installed -r requirements.txt
 
 echo "==> Done. Remember: pass --device cuda to every Epilepsy/run_pipelines.py invocation."
