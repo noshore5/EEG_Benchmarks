@@ -4279,6 +4279,24 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         # "surrogate"/"surrogate_cluster", which calibrate against
         # raw_x_native directly.
         dense_edge_cache_dir: str | None = None,
+        # 2026-08-19: Runpod deployment finding -- _precompute_sparse_events/
+        # _precompute_dense_edge_inputs both hardcode chunk=min(batch_size,4)
+        # trials per torch call, chosen (see those methods' comments) to keep
+        # peak RSS around ~2GB on a ~16-17GB-RAM reference machine regardless
+        # of batch_size. That's a real, deliberate memory guard, NOT a
+        # parallelism tuning knob -- but on a machine with much more RAM
+        # (measured: a 32-core/192GB Runpod pod), the same fixed chunk=4 cap
+        # also caps how much work compute_dense_edge_input's batched torch
+        # ops get per call, which caps how well torch's intra-op threading
+        # (16-32 threads available, confirmed via torch.get_num_threads())
+        # can actually parallelize -- observed ~1.3/32 cores utilized at
+        # chunk=4. None (default) preserves the original min(batch_size, 4)
+        # behavior unchanged everywhere this isn't explicitly overridden. A
+        # caller on a high-RAM machine can raise this (e.g. to batch_size
+        # itself) to trade memory headroom for CPU utilization; scale peak
+        # RSS roughly linearly from the ~2GB-at-4 reference point when
+        # choosing a value.
+        precompute_chunk_size: int | None = None,
         # Surrogate-data significance gating: replaces the fixed
         # coherence_threshold magnitude cutoff with a per-trial, per-(edge,
         # frequency) threshold calibrated from that trial's own null
@@ -4532,6 +4550,7 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         self.surrogate_cache_dir = surrogate_cache_dir
         self.surrogate_cache_enabled = surrogate_cache_enabled
         self.dense_edge_cache_dir = dense_edge_cache_dir
+        self.precompute_chunk_size = precompute_chunk_size
         if cwt_resample_n_time is not None:
             import warnings
             warnings.warn(
@@ -5015,8 +5034,11 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         # topology -- too close to this machine's ~17GB RAM (now roughly
         # half that, projected, not re-measured, at 36 edges). Capping at 4
         # trials/chunk keeps peak RSS in the ~2GB range regardless of
-        # self.batch_size.
-        chunk = max(1, min(int(self.batch_size), 4))
+        # self.batch_size -- unless precompute_chunk_size raises that cap
+        # (see __init__'s docstring on it): same memory-vs-throughput
+        # tradeoff, opt-in for machines with room to spare.
+        chunk_cap = 4 if self.precompute_chunk_size is None else int(self.precompute_chunk_size)
+        chunk = max(1, min(int(self.batch_size), chunk_cap))
         all_events, all_src, all_dst, all_freq, all_valid = [], [], [], [], []
         chunk_starts = list(range(0, n_samples, chunk))
         # Surrogate/cluster calibration is the expensive path here (full
@@ -5226,7 +5248,11 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
                     f"({100 * n_hits / n_samples:.1f}%)"
                 )
 
-        chunk = max(1, min(int(self.batch_size), 4))
+        # Same memory-vs-throughput cap as _precompute_sparse_events above
+        # (see that method's comment, and precompute_chunk_size's docstring
+        # in __init__) -- chunk=4 by default, raisable per-machine.
+        chunk_cap = 4 if self.precompute_chunk_size is None else int(self.precompute_chunk_size)
+        chunk = max(1, min(int(self.batch_size), chunk_cap))
         chunk_starts = list(range(0, len(miss_indices), chunk))
         # Previously gated to surrogate/surrogate_cluster only, which left
         # this stage silent under coherence_threshold_mode="fixed" -- the

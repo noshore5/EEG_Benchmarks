@@ -1048,6 +1048,18 @@ def _build_argument_parser() -> argparse.ArgumentParser:
     # mps+batch_size=32 vs the cpu+batch_size=8 this was silently running
     # under (see the 2026-08-16 session note).
     parser.add_argument("--device", default="mps")
+    parser.add_argument(
+        "--precompute-chunk-size", type=int, default=None,
+        help=(
+            "--pipeline=dense_edge_gru only: trials-per-torch-call for the CWT/dense-edge "
+            "precompute stage (see SparseEvidenceGNNClassifier's precompute_chunk_size docstring, "
+            "cwt_gnn_classifiers.py). Unset: original min(batch_size, 4) cap, tuned for a "
+            "~16-17GB-RAM machine. On a high-RAM/many-core machine (e.g. a Runpod pod), raising "
+            "this (up to batch_size) lets torch's own CPU intra-op threading actually use the "
+            "extra cores -- measured ~1.3/32 cores utilized at the chunk=4 default on a 32-core "
+            "pod. Pure throughput/memory tradeoff, does not change model output."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--shuffle-labels",
@@ -1223,6 +1235,7 @@ def main(args: argparse.Namespace) -> None:
         clf_params = dict(PREDICTION_GRU_PARAMS)
         clf_params["seed"] = args.seed
         clf_params["device"] = args.device
+        clf_params["precompute_chunk_size"] = args.precompute_chunk_size
 
         print(f"Running leave-one-seizure-out prediction (epochs={epochs}, "
               f"sph={args.sph}s, sop={args.sop}s)...")
@@ -1261,6 +1274,7 @@ def main(args: argparse.Namespace) -> None:
         clf_params = dict(DENSE_EDGE_GRU_PARAMS)
         clf_params["seed"] = args.seed
         clf_params["device"] = args.device
+        clf_params["precompute_chunk_size"] = args.precompute_chunk_size
 
         print(f"Running leave-one-seizure-out detection (epochs={epochs})...")
         results = leave_one_seizure_out_detection(X, y, metadata, clf_params, epochs)
