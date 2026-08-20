@@ -443,11 +443,77 @@ No NaNs, no crashes, no systematic direction bias. This is smoke-scale
 only that the backend swap behaves as expected on real data once the
 cache bug was out of the way.
 
+## Part 10 -- default flip, fcwt removal, pod-image build, and the real
+## bottleneck (dense-edge, not CWT)
+
+Committed as `831695a`: `cwt_backend="torch"` added to `run_pipelines.py`'s
+`_SHARED_ARCH_PARAMS`, so both `DENSE_EDGE_GRU_PARAMS` (detection) and
+`PREDICTION_GRU_PARAMS` (prediction) now default to the torch-native path --
+every real `run_pipelines.py` invocation exercises it, not just the
+scratch eval scripts from Part 9b. `fcwt==0.1.18` and the unused
+`pyFFTW==0.14.0` dropped from `requirements.txt`; the apt
+`cmake build-essential libfftw3-dev` toolchain (existed solely to compile
+fcwt from source) dropped from `setup.sh` and the new `Dockerfile`.
+`cwt_backend="fcwt"` still exists in `cwt_gnn_classifiers.py` as a manual
+revert switch, but reviving it now means reinstalling both fcwt and that
+apt step -- not a default-path concern.
+
+**Pod image**: `Dockerfile` (repo root) bakes in system + Python deps on
+top of `runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404` so a fresh pod
+skips `bash setup.sh`. Built via GitHub Actions
+(`.github/workflows/build-pod-image.yml`), pushed to
+`ghcr.io/noshore5/eeg_benchmarks`. RunPod's own GitHub-integration
+Serverless build was tried first and is a dead end for this: it publishes
+to `registry.runpod.net`, scoped to the Serverless endpoint it built for --
+a plain Pod can't pull it (`Failed to get Hub registry auth` / `No such
+image`, confirmed against a live Pod). See README.md's "RunPod pod image"
+section for the full writeup. Image validated on a live RTX 4090 pod: GPU
+visible, `torch.cuda.is_available() == True`, `fcwt` correctly absent, and
+a real `SparseEvidenceGNNClassifier.fit()`/`predict_proba()` cycle on
+synthetic data ran end-to-end on CUDA.
+
+**The actual Truong-setup eval (30s windows, prediction mode, full chb01,
+real CHB-MIT data via the `physionet-open.s3.amazonaws.com` mirror -- fast,
+~35-40MB/s per file, not the throttled direct-PhysioNet path noted
+earlier) was attempted on a fresh `dense_edge_gru-30s` pod and killed
+partway through once real timing data made the outcome clear, not because
+anything crashed:**
+
+- CWT itself: genuinely fast, batched, ~26 it/s (736 windows*channels in
+  ~29s per batch-of-32 trials).
+- Dense-edge computation (`compute_dense_edge_input`, downstream of CWT):
+  ~39s per 32-window batch, **unaffected by the CWT backend** -- same cost
+  whether the CWT step feeding it took 29s or 5 minutes.
+- Dataset: 4241 windows, 173 preictal (4.1%), chb01. At `batch_size=32`,
+  `negative_to_positive_ratio=5.0`, 7 leave-one-seizure-out folds, 5
+  epochs: **~20 hours projected total -- essentially unchanged from the
+  local CPU estimate in Part 9's lead-up.**
+
+Conclusion: the torch-native-cwt swap itself is complete and validated --
+correct (Parts 0-5), batched and GPU-native (Part 9), wired in as the real
+default (this Part), and genuinely fast at the CWT step specifically. But
+CWT was never the actual bottleneck for `StreamingSparseEvidenceGNNClassifier`
+prediction-mode runs at this scale -- dense-edge computation is, and this
+branch never touched that. Decided (explicit user choice, not a default) to
+stop here rather than optimize dense-edge or run the full ~20hr eval --
+that's separate, pre-existing, out-of-scope work. Pod terminated
+immediately after the finding, per this session's own GPU-cost-consciousness
+rule.
+
 ## Current state
 
-- Branch `torch-native-cwt`, one commit (`1cb911b`): `utils/torch_cwt.py`
-  + `scripts/torch_cwt_parity.py`. Step 6 (Part 9) is implemented and
-  smoke-tested but **not yet committed**.
+- Branch `torch-native-cwt`. Steps 0-6 of the original swap plan are
+  **done, committed, and now the real default** (`ada4995`, `831695a`,
+  plus the pod-image commits `fae9e85`/etc. -- see Part 10). Step 7
+  (remove fcwt as a dependency) is **also done** (Part 10) -- ahead of
+  the original plan's own sequencing, justified by real evidence
+  (`run_pipelines.py` never exercised the fcwt path by default; keeping
+  fcwt in `requirements.txt` was pure dead weight, notably a slow one to
+  build).
+- **Not done, and now known to be a separate problem**: dense-edge
+  computation speed. A full real-data Truong-setup eval was attempted on
+  a live RTX 4090 pod and killed once timing data (~20hr projected) showed
+  GPU-native CWT alone doesn't fix the actual bottleneck. See Part 10.
 - `utils/torch_cwt_plot_demo.py` and its output `utils/torch_cwt_demo.png`
   exist but are **not committed** (untracked). The user independently
   edited `NFREQS` to 300 in that file at one point during this session —
@@ -480,11 +546,18 @@ cache bug was out of the way.
 
 ## Open items
 
-- Step 6's real-data comparison so far is smoke-scale only (Part 9b:
-  epochs=2, subject 1, old 4.0s/30.0s detection-mode windowing). A fuller
-  canonical run, ideally at the corrected 30s-window config (Part 8) not
-  the outdated 4s one, would give a real before/after read rather than a
-  wiring-correctness one. Not committed yet either.
+- **(New, Part 10, the real open item now)** Dense-edge computation is the
+  actual bottleneck for `StreamingSparseEvidenceGNNClassifier`
+  prediction-mode runs at real scale (~39s/32-window batch on an RTX 4090,
+  unaffected by CWT backend) -- confirmed via a killed real-data attempt at
+  the canonical 30s-window config, not a projection. This branch never
+  touched dense-edge computation; making it GPU-native/batched the way CWT
+  now is would be the next real speedup, but is out of scope for
+  torch-native-cwt specifically.
+- Step 6's real-data comparison at SMOKE scale (Part 9b: epochs=2, subject
+  1, old 4.0s/30.0s detection-mode windowing) is superseded by Part 10's
+  real-scale attempt at the actual 30s-window config -- kept here for
+  history, not as an open item anymore.
 - **Cache-key fix (Part 9b) invalidates every pre-existing on-disk
   CWT/dense-edge/surrogate-null cache entry once** (key format changed to
   include `cwt_backend`) -- expect a full recompute on the next run
@@ -507,8 +580,10 @@ cache bug was out of the way.
   actual config constants are a separate, not-yet-made change).
 - `utils/torch_cwt_plot_demo.py` / `utils/torch_cwt_demo.png` not yet
   committed.
-- Step 7 (remove `fcwt`/FFTW as a dependency) explicitly deferred until
-  after Step 6's full run is confirmed clean — not started, correctly.
+- ~~Step 7 (remove `fcwt`/FFTW as a dependency) explicitly deferred until
+  after Step 6's full run is confirmed clean~~ -- **done** (Part 10),
+  ahead of a full clean run, on the evidence that `run_pipelines.py` never
+  exercised the fcwt path by default anyway.
 - The long-signal/CPU (and small-signal/MPS) performance crossover (Part
   7) is real on THIS Mac's hardware but does not reproduce on real CUDA
   (Part 8) — worth keeping in mind only if this ever needs to run well on
