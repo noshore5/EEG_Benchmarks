@@ -887,6 +887,29 @@ def prepare_cwt_tf(
     return np.nan_to_num(coeffs_tf, nan=0.0, posinf=0.0, neginf=0.0)
 
 
+def prepare_cwt_tf_batch(
+    coeffs: np.ndarray,
+    nfreqs: int,
+    n_time: int,
+) -> np.ndarray:
+    """Batched sibling of `prepare_cwt_tf`: same transpose/resample/
+    nan_to_num logic, vectorized over a leading batch axis. `coeffs` is
+    [N, nfreqs, T_orig] (or [N, T_orig, nfreqs]); returns [N, n_time,
+    nfreqs]. Lets a whole batch of torch_cwt.transform_batch output be
+    postprocessed in one call instead of N calls to `prepare_cwt_tf`."""
+    coeffs = np.asarray(coeffs)
+    if coeffs.ndim != 3:
+        raise ValueError(f"Batched CWT coeffs must be 3D, got shape {coeffs.shape}.")
+    coeffs_tf = coeffs.transpose(0, 2, 1) if coeffs.shape[1] == nfreqs else coeffs
+    if coeffs_tf.shape[1] != n_time:
+        coeffs_tf = resample(coeffs_tf, n_time, axis=1)
+    if coeffs_tf.shape[2] != nfreqs:
+        raise ValueError(
+            f"Unexpected batched CWT shape. Expected F={nfreqs}, got {coeffs_tf.shape}."
+        )
+    return np.nan_to_num(coeffs_tf, nan=0.0, posinf=0.0, neginf=0.0)
+
+
 def compute_cwt_real_imag_tensors(
     X: np.ndarray,
     *,
@@ -897,7 +920,19 @@ def compute_cwt_real_imag_tensors(
     cwt_resample_n_time: int | None,
     transform_fn,
     verbose: int,
+    batch_transform_fn=None,
+    batch_size: int = 256,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """`batch_transform_fn`, if given (e.g. utils.torch_cwt.transform_batch
+    bound to a GPU device), replaces the per-(sample, channel) `transform_fn`
+    loop below with `ceil(n_samples*n_channels / batch_size)` calls, each
+    covering up to `batch_size` signals at once -- one host<->device
+    transfer and one batched kernel launch per chunk instead of one of each
+    per signal. `transform_fn` is still always required (used for the one
+    freqs probe call below, and as the fallback when `batch_transform_fn`
+    is None, e.g. the fcwt backend, which has no batched interface to
+    exploit). See `torch_cwt.transform_batch`'s docstring for why this
+    exists at all."""
     n_samples, n_channels, n_time_orig = X.shape
     n_time = n_time_orig if cwt_resample_n_time is None else int(cwt_resample_n_time)
     if n_time <= 0:
@@ -925,25 +960,42 @@ def compute_cwt_real_imag_tensors(
         )
         freqs = torch.from_numpy(freqs).float().expand(n_samples, nfreqs)
 
-        with tqdm(
-            total=n_samples * n_channels,
-            desc="CWT",
-            disable=not show_progress,
-            leave=False,
-        ) as pbar:
-            for sample_idx in range(n_samples):
-                for ch_idx in range(n_channels):
-                    coeffs, _ = transform_fn(
-                        X[sample_idx, ch_idx, :],
-                        sampling_rate,
-                        highest,
-                        lowest,
-                        nfreqs=nfreqs,
+        if batch_transform_fn is not None:
+            flat_X = X.reshape(n_samples * n_channels, n_time_orig)
+            w_real_flat = w_real.reshape(n_samples * n_channels, n_time, nfreqs)
+            w_imag_flat = w_imag.reshape(n_samples * n_channels, n_time, nfreqs)
+            total = flat_X.shape[0]
+            step = max(1, int(batch_size))
+            with tqdm(total=total, desc="CWT(batched)", disable=not show_progress, leave=False) as pbar:
+                for start in range(0, total, step):
+                    end = min(start + step, total)
+                    coeffs_b, _ = batch_transform_fn(
+                        flat_X[start:end], sampling_rate, highest, lowest, nfreqs=nfreqs
                     )
-                    coeffs_tf = prepare_cwt_tf(coeffs, nfreqs=nfreqs, n_time=n_time)
-                    w_real[sample_idx, ch_idx] = np.real(coeffs_tf).astype(np.float32)
-                    w_imag[sample_idx, ch_idx] = np.imag(coeffs_tf).astype(np.float32)
-                    pbar.update(1)
+                    coeffs_tf_b = prepare_cwt_tf_batch(coeffs_b, nfreqs=nfreqs, n_time=n_time)
+                    w_real_flat[start:end] = np.real(coeffs_tf_b).astype(np.float32)
+                    w_imag_flat[start:end] = np.imag(coeffs_tf_b).astype(np.float32)
+                    pbar.update(end - start)
+        else:
+            with tqdm(
+                total=n_samples * n_channels,
+                desc="CWT",
+                disable=not show_progress,
+                leave=False,
+            ) as pbar:
+                for sample_idx in range(n_samples):
+                    for ch_idx in range(n_channels):
+                        coeffs, _ = transform_fn(
+                            X[sample_idx, ch_idx, :],
+                            sampling_rate,
+                            highest,
+                            lowest,
+                            nfreqs=nfreqs,
+                        )
+                        coeffs_tf = prepare_cwt_tf(coeffs, nfreqs=nfreqs, n_time=n_time)
+                        w_real[sample_idx, ch_idx] = np.real(coeffs_tf).astype(np.float32)
+                        w_imag[sample_idx, ch_idx] = np.imag(coeffs_tf).astype(np.float32)
+                        pbar.update(1)
 
     raw_x = resample(X, n_time, axis=2) if n_time != n_time_orig else X
     raw_x = np.nan_to_num(raw_x, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
@@ -1106,6 +1158,8 @@ def compute_paired_cwt_noise_bank(
     transform_fn,
     seed: int,
     verbose: int,
+    batch_transform_fn=None,
+    batch_size: int = 256,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Build matched raw/CWT noise entries from the same white-noise segments."""
 
@@ -1125,6 +1179,8 @@ def compute_paired_cwt_noise_bank(
         cwt_resample_n_time=cwt_resample_n_time,
         transform_fn=transform_fn,
         verbose=verbose,
+        batch_transform_fn=batch_transform_fn,
+        batch_size=batch_size,
     )
     return (
         raw_noise[:, 0, :].contiguous(),

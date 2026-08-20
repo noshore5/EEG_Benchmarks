@@ -293,3 +293,50 @@ def transform(
     coeffs = coeffs_t.detach().cpu().numpy().astype(np.complex64)
     freqs = freqs_t.detach().cpu().numpy().astype(np.float32)
     return coeffs, freqs
+
+
+def transform_batch(
+    signals: np.ndarray,
+    frame_rate: float,
+    highest: float,
+    lowest: float,
+    nfreqs: int = 100,
+    *,
+    device: str | torch.device | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Batched sibling of `transform`. Same params, except `signals` is
+    2-D, [n_signals, T] -- independent 1-D windows/channels stacked along a
+    new leading axis (e.g. every cache-miss (sample, channel) pair from one
+    _prepare_features call) -- instead of a single 1-D array.
+
+    Exists because `cwt_torch` is already batched over arbitrary leading
+    dims, but nothing calling plain `transform()` in a Python loop (the
+    call sites in cwt_window_cache.py / common.py, written against
+    fcwt.cwt()'s inherently single-signal interface) was exercising that.
+    Looping `transform()` with `device="cuda"` there would do one
+    host<->device transfer plus one tiny kernel launch per signal --
+    exactly the overhead-bound regime that erases torch_cwt's measured
+    speedup (see Epilepsy/Session_notes/2026_08_20/
+    torch_native_cwt_module_and_parity_validation.md, Part 8/9). This is
+    the one-call-for-the-whole-batch alternative those call sites use
+    instead when the active transform backend is torch_cwt.
+
+    Returns (coeffs [n_signals, nfreqs, T] complex64, freqs [nfreqs] float32)
+    -- same freqs for every signal in the batch (frame_rate/highest/lowest/
+    nfreqs are shared config, not per-signal), matching what those call
+    sites already assume (they only ever read freqs from an [0, 0]-index
+    probe call).
+    """
+    signals = np.asarray(signals)
+    if signals.ndim != 2:
+        raise ValueError(f"signals must be 2-D, [n_signals, n_time]; got shape {signals.shape}.")
+
+    x = torch.from_numpy(np.ascontiguousarray(signals, dtype=np.float32))
+    if device is not None:
+        x = x.to(device)
+
+    coeffs_t, freqs_t = cwt_torch(x, sampling_rate=frame_rate, f0=lowest, f1=highest, fn=nfreqs)
+
+    coeffs = coeffs_t.detach().cpu().numpy().astype(np.complex64)
+    freqs = freqs_t.detach().cpu().numpy().astype(np.float32)
+    return coeffs, freqs

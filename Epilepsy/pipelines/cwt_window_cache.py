@@ -44,9 +44,9 @@ from scipy.signal import resample
 from tqdm.auto import tqdm
 
 try:
-    from Epilepsy.pipelines.common import cwt_progress_context, prepare_cwt_tf
+    from Epilepsy.pipelines.common import cwt_progress_context, prepare_cwt_tf, prepare_cwt_tf_batch
 except ModuleNotFoundError:
-    from pipelines.common import cwt_progress_context, prepare_cwt_tf
+    from pipelines.common import cwt_progress_context, prepare_cwt_tf, prepare_cwt_tf_batch
 
 
 def default_cwt_cache_root() -> Path:
@@ -130,11 +130,29 @@ def _window_cache_key(
     lowest: float,
     nfreqs: int,
     cwt_resample_n_time: Optional[int],
+    cwt_backend: str = "fcwt",
 ) -> str:
+    """`cwt_backend` (added 2026-08-20, Step 6 of the torch-native-cwt
+    swap): fcwt and torch_cwt compute numerically DIFFERENT (if
+    near-identical -- see utils/torch_cwt.py's parity validation)
+    coefficients for the same raw signal + config, but this cache
+    (in-memory `dict` OR the on-disk DiskCWTCache below, which persists
+    ACROSS separate process runs) is otherwise keyed only on signal
+    content + CWT config, not on which transform computed the cached
+    entry. Without this, switching cwt_backend on a machine/pod that
+    already has a populated disk cache (e.g. from a prior fcwt run)
+    would silently serve stale fcwt-computed values back to a
+    cwt_backend="torch" caller instead of recomputing -- confirmed
+    happening in exactly this way while validating Step 6 (both backends
+    read 100% cache hits from an existing on-disk cache and produced
+    bit-identical eval scores). Defaults to "fcwt" so every disk cache
+    entry written before this param existed keys identically to before
+    -- no silent invalidation of existing fcwt caches.
+    """
     digest = hashlib.sha256(
         np.ascontiguousarray(raw_channel, dtype=np.float32).tobytes()
     ).hexdigest()
-    return f"{digest}|{sampling_rate}|{highest}|{lowest}|{nfreqs}|{cwt_resample_n_time}"
+    return f"{digest}|{sampling_rate}|{highest}|{lowest}|{nfreqs}|{cwt_resample_n_time}|{cwt_backend}"
 
 
 def precompute_window_cache_keys(
@@ -145,6 +163,7 @@ def precompute_window_cache_keys(
     lowest: float,
     nfreqs: int,
     cwt_resample_n_time: Optional[int],
+    cwt_backend: str = "fcwt",
 ) -> np.ndarray:
     """Runs _window_cache_key over every (sample, channel) in X_raw ONCE,
     returning a [n_samples, n_channels] object array of key strings, for
@@ -184,6 +203,7 @@ def precompute_window_cache_keys(
                 X_raw[sample_idx, ch_idx, :],
                 sampling_rate=sampling_rate, highest=highest, lowest=lowest,
                 nfreqs=nfreqs, cwt_resample_n_time=cwt_resample_n_time,
+                cwt_backend=cwt_backend,
             )
     return keys
 
@@ -202,6 +222,9 @@ def compute_cwt_real_imag_tensors_cached(
     verbose: int,
     cache: dict,
     window_keys: Optional[np.ndarray] = None,
+    batch_transform_fn=None,
+    batch_size: int = 256,
+    cwt_backend: str = "fcwt",
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Drop-in equivalent of common.compute_cwt_real_imag_tensors that takes
     the RAW (pre-normalization, post-channel-subset) window plus this fit
@@ -225,6 +248,23 @@ def compute_cwt_real_imag_tensors_cached(
     docstring for the measured cost). None (the default) reproduces the
     original always-hash-inline behavior, unchanged for every other
     caller.
+
+    `batch_transform_fn`, if given, replaces the fallback per-item
+    `transform_fn` call for cache MISSES only (hits never touch either
+    transform) with chunked calls covering up to `batch_size` misses at
+    once -- see common.compute_cwt_real_imag_tensors's docstring for why.
+    Cache keys/lookups/writes are unaffected either way; this only changes
+    how a miss's coefficients get computed.
+
+    `cwt_backend` must match whichever backend `transform_fn`/
+    `batch_transform_fn` actually are (see _window_cache_key's docstring)
+    -- MUST be passed explicitly (not left at the "fcwt" default) whenever
+    the caller is running cwt_backend="torch", or this call will silently
+    read/write fcwt's cache entries under a torch-computed caller (or vice
+    versa on a later fcwt run). Only matters when `window_keys` is None
+    (this function computes its own keys); if `window_keys` was
+    precomputed by the caller, it already baked in whatever cwt_backend
+    that computation used.
     """
     n_samples, n_channels, n_time_orig = X_raw.shape
     n_time = n_time_orig if cwt_resample_n_time is None else int(cwt_resample_n_time)
@@ -248,36 +288,69 @@ def compute_cwt_real_imag_tensors_cached(
         _, freqs = transform_fn(X_raw[0, 0, :], sampling_rate, highest, lowest, nfreqs=nfreqs)
         freqs = torch.from_numpy(freqs).float().expand(n_samples, nfreqs)
 
+        # Pass 1: resolve every (sample, channel)'s cache key and serve hits
+        # immediately -- cheap dict lookups, no transform involved. Misses
+        # are deferred (not computed inline) so they can be run as one
+        # batch below instead of the original per-item loop.
+        keys = np.empty((n_samples, n_channels), dtype=object)
+        miss_indices: list[tuple[int, int]] = []
         n_hits = 0
-        with tqdm(
-            total=n_samples * n_channels, desc="CWT(cached)", disable=not show_progress, leave=False
-        ) as pbar:
-            for sample_idx in range(n_samples):
-                for ch_idx in range(n_channels):
-                    raw_channel = X_raw[sample_idx, ch_idx, :]
-                    if window_keys is not None:
-                        key = window_keys[sample_idx, ch_idx]
-                    else:
-                        key = _window_cache_key(
-                            raw_channel,
-                            sampling_rate=sampling_rate,
-                            highest=highest,
-                            lowest=lowest,
-                            nfreqs=nfreqs,
-                            cwt_resample_n_time=cwt_resample_n_time,
-                        )
-                    cached = cache.get(key)
-                    if cached is None:
-                        coeffs, _ = transform_fn(raw_channel, sampling_rate, highest, lowest, nfreqs=nfreqs)
-                        coeffs_tf = prepare_cwt_tf(coeffs, nfreqs=nfreqs, n_time=n_time)
-                        cached = (
-                            np.real(coeffs_tf).astype(np.float32),
-                            np.imag(coeffs_tf).astype(np.float32),
-                        )
-                        cache[key] = cached
-                    else:
-                        n_hits += 1
+        for sample_idx in range(n_samples):
+            for ch_idx in range(n_channels):
+                if window_keys is not None:
+                    key = window_keys[sample_idx, ch_idx]
+                else:
+                    key = _window_cache_key(
+                        X_raw[sample_idx, ch_idx, :],
+                        sampling_rate=sampling_rate,
+                        highest=highest,
+                        lowest=lowest,
+                        nfreqs=nfreqs,
+                        cwt_resample_n_time=cwt_resample_n_time,
+                        cwt_backend=cwt_backend,
+                    )
+                keys[sample_idx, ch_idx] = key
+                cached = cache.get(key)
+                if cached is None:
+                    miss_indices.append((sample_idx, ch_idx))
+                else:
+                    n_hits += 1
                     real_raw, imag_raw = cached
+                    w_real[sample_idx, ch_idx] = real_raw * scale
+                    w_imag[sample_idx, ch_idx] = imag_raw * scale
+
+        # Pass 2: fill in misses, either one batched call per chunk (torch
+        # backend) or the original one-call-per-item loop (fcwt backend,
+        # which has no batched interface to exploit).
+        if batch_transform_fn is not None and miss_indices:
+            step = max(1, int(batch_size))
+            with tqdm(
+                total=len(miss_indices), desc="CWT(cached,batched)", disable=not show_progress, leave=False
+            ) as pbar:
+                for start in range(0, len(miss_indices), step):
+                    chunk = miss_indices[start : start + step]
+                    flat = np.stack([X_raw[s, c, :] for (s, c) in chunk], axis=0)
+                    coeffs_b, _ = batch_transform_fn(flat, sampling_rate, highest, lowest, nfreqs=nfreqs)
+                    coeffs_tf_b = prepare_cwt_tf_batch(coeffs_b, nfreqs=nfreqs, n_time=n_time)
+                    real_b = np.real(coeffs_tf_b).astype(np.float32)
+                    imag_b = np.imag(coeffs_tf_b).astype(np.float32)
+                    for i, (sample_idx, ch_idx) in enumerate(chunk):
+                        real_raw, imag_raw = real_b[i], imag_b[i]
+                        cache[keys[sample_idx, ch_idx]] = (real_raw, imag_raw)
+                        w_real[sample_idx, ch_idx] = real_raw * scale
+                        w_imag[sample_idx, ch_idx] = imag_raw * scale
+                    pbar.update(len(chunk))
+        elif miss_indices:
+            with tqdm(
+                total=len(miss_indices), desc="CWT(cached)", disable=not show_progress, leave=False
+            ) as pbar:
+                for sample_idx, ch_idx in miss_indices:
+                    raw_channel = X_raw[sample_idx, ch_idx, :]
+                    coeffs, _ = transform_fn(raw_channel, sampling_rate, highest, lowest, nfreqs=nfreqs)
+                    coeffs_tf = prepare_cwt_tf(coeffs, nfreqs=nfreqs, n_time=n_time)
+                    real_raw = np.real(coeffs_tf).astype(np.float32)
+                    imag_raw = np.imag(coeffs_tf).astype(np.float32)
+                    cache[keys[sample_idx, ch_idx]] = (real_raw, imag_raw)
                     w_real[sample_idx, ch_idx] = real_raw * scale
                     w_imag[sample_idx, ch_idx] = imag_raw * scale
                     pbar.update(1)

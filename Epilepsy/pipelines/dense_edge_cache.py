@@ -66,6 +66,7 @@ def dense_edge_cache_key(
     scale_adaptive_smoothing: bool,
     scale_adaptive_cycles,
     scale_adaptive_max_kernel,
+    cwt_backend: str = "fcwt",
 ) -> str:
     """`raw_trial` is one trial's FULL [n_channels, n_time] raw (pre-
     normalization, post-channel-subset) window -- the whole trial in one
@@ -76,7 +77,14 @@ def dense_edge_cache_key(
     Every argument that changes what compute_dense_edge_input actually
     computes is included (mirrors the same completeness discipline as
     cwt_gnn_classifiers.surrogate_null_cache_key) -- anything
-    left out here would risk silently serving a stale-config entry."""
+    left out here would risk silently serving a stale-config entry.
+
+    `cwt_backend` (added 2026-08-20, Step 6 of the torch-native-cwt swap):
+    this cache sits downstream of the CWT step -- see
+    cwt_window_cache.py's `_window_cache_key` docstring for why an entry
+    must be keyed on which transform produced it, not just on (raw
+    trial, config). Defaults to "fcwt" so existing on-disk entries key
+    identically to before this param existed."""
     hasher = hashlib.sha256()
     hasher.update(np.ascontiguousarray(raw_trial, dtype=np.float32).tobytes())
     config_tuple = (
@@ -86,7 +94,7 @@ def dense_edge_cache_key(
         tuple(smooth_kernel_size), tuple(smooth_kernel_sigma),
         bool(coi_enabled), int(dense_edge_time_downsample), bool(time_averaged_graph),
         bool(scale_adaptive_smoothing), float(scale_adaptive_cycles),
-        int(scale_adaptive_max_kernel),
+        int(scale_adaptive_max_kernel), str(cwt_backend),
     )
     hasher.update(repr(config_tuple).encode("utf-8"))
     return hasher.hexdigest()

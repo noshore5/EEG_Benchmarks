@@ -29,9 +29,11 @@ null-cache section it introduces, so nothing written there is lost.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import math
 import os
+import sys
 from pathlib import Path
 from typing import Callable, Literal, Sequence
 
@@ -118,6 +120,26 @@ except ModuleNotFoundError:
 # classifiers.") -- XWTPhaseGNNCore, _BaseCWTGNNClassifier,
 # XWTPhaseGNNClassifier, XWTPhaseGNNV2Core, XWTPhaseGNNV2Classifier.
 # ============================================================================
+
+
+def _resolve_torch_cwt():
+    """Imports utils/torch_cwt.py (torch.fft-native CWT, drop-in-signature
+    replacement for coherence_utils.transform -- see that module's own
+    docstring) the same way resolve_coherence_utils (common.py) resolves
+    utils/coherence_utils.py: repo_root/utils sits alongside
+    Coherent_Multiplex, so getting repo_root onto sys.path once is enough.
+    No fallback-root search (unlike resolve_coherence_utils) -- torch_cwt.py
+    is this repo's own module, not a vendored external one, so there's only
+    ever one place it can live.
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    repo_root_str = str(repo_root)
+    if repo_root_str not in sys.path:
+        sys.path.insert(0, repo_root_str)
+    from utils import torch_cwt  # type: ignore
+
+    return torch_cwt
+
 
 class XWTPhaseGNNCore(nn.Module):
     """Torch core for level-0 phase-gated XWT message passing."""
@@ -374,6 +396,24 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
         # None (default) gives this instance its own private cache, i.e. no
         # behavior change from before this existed.
         cwt_cache: dict | None = None,
+        # Step 6 (torch-native-cwt branch): selects which CWT implementation
+        # self.transform_/self.batch_transform_ resolve to in
+        # _prepare_features. "fcwt" (default) is the original FFTW/fcwt.cwt()
+        # path, unchanged -- exists so the old path stays trivially
+        # revertable (per that branch's plan) without a git revert: just
+        # don't pass cwt_backend="torch". "torch" resolves to
+        # utils/torch_cwt.py (torch.fft, GPU-native, batched -- see
+        # _resolve_torch_cwt / torch_cwt.py's own docstring for the
+        # correctness validation this rests on).
+        cwt_backend: Literal["fcwt", "torch"] = "fcwt",
+        # torch backend only: caps how many (sample, channel) windows one
+        # batched torch_cwt.transform_batch call covers at once (see
+        # compute_cwt_real_imag_tensors_cached's batch_transform_fn param).
+        # Bounds peak device memory (roughly linear in this times nfreqs
+        # times padded window length -- see the 2026-08-20 session notes'
+        # Part 8 for the sizing math) independent of how many windows/
+        # channels a given fit() call sees. Unused when cwt_backend="fcwt".
+        torch_cwt_batch_size: int = 256,
         verbose: int = 0,
     ) -> None:
         self.cwt_cache = cwt_cache if cwt_cache is not None else {}
@@ -391,7 +431,12 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
         # NEW
         self.channel_subset = channel_subset
         self.channel_names_: list[str] | None = None
+        if cwt_backend not in ("fcwt", "torch"):
+            raise ValueError(f"cwt_backend must be 'fcwt' or 'torch', got {cwt_backend!r}.")
+        self.cwt_backend = cwt_backend
+        self.torch_cwt_batch_size = int(torch_cwt_batch_size)
         self.transform_ = None
+        self.batch_transform_ = None
         self.X_mean_: float | None = None
         self.X_std_: float | None = None
         self.noise_bank_: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
@@ -458,6 +503,29 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
             )
         return X[:, idx, :]
 
+    def _resolve_transform_fns(self) -> None:
+        """Sets self.transform_ (always, single-signal, numpy in/out --
+        the interface every call site was originally written against) and
+        self.batch_transform_ (only for cwt_backend="torch" -- see
+        compute_cwt_real_imag_tensors's batch_transform_fn param for why a
+        separate batched entry point exists at all instead of just calling
+        transform_ in a loop with device="cuda").
+
+        Runs the transform on self.device_ when it's been resolved already
+        (mid/post-fit(); see TorchEEGClassifier.fit, common.py, which sets
+        it before the first _prepare_features call) -- CPU otherwise (e.g.
+        a bare _prepare_features() probe call before fit(), which fcwt's
+        own path also implicitly runs on CPU).
+        """
+        if self.cwt_backend == "fcwt":
+            self.transform_, _ = resolve_coherence_utils()
+            self.batch_transform_ = None
+            return
+        torch_cwt = _resolve_torch_cwt()
+        device = getattr(self, "device_", None)
+        self.transform_ = functools.partial(torch_cwt.transform, device=device)
+        self.batch_transform_ = functools.partial(torch_cwt.transform_batch, device=device)
+
     def _prepare_features(self, X: np.ndarray, *, fit: bool, train_idx=None, window_keys=None):
         # NEW: slice channels first, before normalization/CWT/anything else
         # touches X, so every downstream step (z-score stats, CWT tensors,
@@ -477,7 +545,7 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
             mean, std = 0.0, 1.0
 
         if self.transform_ is None:
-            self.transform_, _ = resolve_coherence_utils()
+            self._resolve_transform_fns()
         # Epilepsy fork only: cached in place of compute_cwt_real_imag_tensors
         # -- X here is still RAW (pre-normalization); the cache applies the
         # mean/std rescale on retrieval instead (see cwt_window_cache.py's
@@ -499,6 +567,9 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
             verbose=self.verbose,
             cache=self.cwt_cache,
             window_keys=window_keys,
+            batch_transform_fn=self.batch_transform_,
+            batch_size=self.torch_cwt_batch_size,
+            cwt_backend=self.cwt_backend,
         )
         if fit:
             X_normalized = apply_global_zscore(X, mean, std) if self.normalize_input else X
@@ -561,6 +632,8 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
             transform_fn=self.transform_,
             seed=bank_seed,
             verbose=self.verbose,
+            batch_transform_fn=self.batch_transform_,
+            batch_size=self.torch_cwt_batch_size,
         )
 
     def _prepare_training_state_on_device(self) -> None:
@@ -1195,6 +1268,7 @@ def surrogate_null_cache_key(
     scale_adaptive_smoothing: bool = False,
     scale_adaptive_cycles: float = 1.5,
     scale_adaptive_max_kernel: int = 101,
+    cwt_backend: str = "fcwt",
 ) -> str:
     """Deterministic cache key covering every input that affects the null
     coherence distribution -- deliberately NOT surrogate_percentile, since
@@ -1202,6 +1276,13 @@ def surrogate_null_cache_key(
     the trial's own signal or to these config values changes the hash, so
     there's no separate invalidation logic needed: a stale cache entry is
     simply unreachable under its old key.
+
+    `cwt_backend` (added 2026-08-20, Step 6 of the torch-native-cwt swap):
+    the null distribution is built from `compute_cwt_real_imag_tensors`
+    output, so it needs the same backend-in-the-key fix as
+    cwt_window_cache.py's `_window_cache_key` / dense_edge_cache.py's
+    `dense_edge_cache_key` -- see the former's docstring. Defaults to
+    "fcwt" so existing on-disk entries key identically to before.
 
     `edge_topology` (2026-08-09): distinguishes the cached grid's edge axis
     layout -- e.g. "directed_ij_ji" (the original 2*C(n,2) directed-pair
@@ -1232,7 +1313,7 @@ def surrogate_null_cache_key(
         bool(coi_enabled), int(surrogate_count), int(surrogate_seed),
         str(edge_topology),
         bool(scale_adaptive_smoothing), float(scale_adaptive_cycles),
-        int(scale_adaptive_max_kernel),
+        int(scale_adaptive_max_kernel), str(cwt_backend),
     )
     hasher.update(repr(config_tuple).encode("utf-8"))
     return hasher.hexdigest()
@@ -4390,6 +4471,11 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         # None (default) resolves to <mne_data_root>/surrogate_null_cache.
         surrogate_cache_dir: str | None = None,
         surrogate_cache_enabled: bool = True,
+        # Step 6 (torch-native-cwt branch) -- see
+        # _BaseCWTGNNClassifier._init_cwt_gnn_classifier's matching params
+        # for the full rationale. "fcwt" (default) changes nothing.
+        cwt_backend: Literal["fcwt", "torch"] = "fcwt",
+        torch_cwt_batch_size: int = 256,
         verbose: int = 0,
     ) -> None:
         self.coherence_threshold = coherence_threshold
@@ -4610,6 +4696,8 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
             channel_subset=channel_subset,
             use_class_weights=use_class_weights,
             cwt_cache=cwt_cache,
+            cwt_backend=cwt_backend,
+            torch_cwt_batch_size=torch_cwt_batch_size,
             verbose=verbose,
         )
 
@@ -4721,6 +4809,7 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
                 scale_adaptive_smoothing=self.scale_adaptive_smoothing,
                 scale_adaptive_cycles=self.scale_adaptive_cycles,
                 scale_adaptive_max_kernel=self.scale_adaptive_max_kernel,
+                cwt_backend=self.cwt_backend,
             )
             cached = load_surrogate_null_cache(
                 cache_dir, cache_key, phase_threshold_deg=self.phase_threshold_deg,
@@ -4770,6 +4859,8 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
                 cwt_resample_n_time=self.cwt_resample_n_time,
                 transform_fn=self.transform_,
                 verbose=0,
+                batch_transform_fn=self.batch_transform_,
+                batch_size=self.torch_cwt_batch_size,
             )
             w_real_s = w_real_s.to(device)
             w_imag_s = w_imag_s.to(device)
@@ -5282,6 +5373,7 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
                     scale_adaptive_smoothing=self.scale_adaptive_smoothing,
                     scale_adaptive_cycles=self.scale_adaptive_cycles,
                     scale_adaptive_max_kernel=self.scale_adaptive_max_kernel,
+                    cwt_backend=self.cwt_backend,
                 )
                 for i in range(n_samples)
             ]
@@ -5559,6 +5651,7 @@ class _LazyFeatureBatchDataset(Dataset):
             lowest=classifier.lowest,
             nfreqs=classifier.nfreqs,
             cwt_resample_n_time=classifier.cwt_resample_n_time,
+            cwt_backend=classifier.cwt_backend,
         )
 
     def __getitem__(self, indices: Sequence[int]):
