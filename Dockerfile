@@ -48,3 +48,15 @@ RUN pip install --break-system-packages --ignore-installed -r /tmp/requirements.
 # passed explicitly; its defaults are hardcoded to "mps" for the
 # author's Mac.
 RUN echo "Reminder: pass --device cuda to every Epilepsy/run_pipelines.py invocation." > /etc/motd
+
+# handler.py + the CMD below exist only so RunPod's GitHub-integration
+# build (a queue-based Serverless endpoint under the hood) accepts this
+# repo at all -- it requires a runpod.serverless.start() entrypoint at
+# container startup, even though this image's real use is as a Pod base,
+# not a live queue worker. See handler.py's own docstring. This is the
+# one deliberate exception to "no repo code baked into this image" --
+# it's a throwaway stub, not the pipeline code the rest of that policy
+# is about.
+RUN pip install --break-system-packages --ignore-installed runpod
+COPY handler.py /workspace/handler.py
+CMD ["python3", "-u", "handler.py"]
