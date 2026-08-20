@@ -164,6 +164,14 @@ _SHARED_ARCH_PARAMS: dict[str, object] = dict(
     dense_conv_pool_size=4,
     time_averaged_graph=False,
     verbose=1,
+    # 2026-08-20: flipped from the classifier's own "fcwt" default now that
+    # torch-native-cwt (utils/torch_cwt.py, batched via
+    # compute_cwt_real_imag_tensors_cached's batch_transform_fn) is stress-
+    # tested on-pod. fcwt runs one signal at a time on CPU; this is the
+    # actual fix for hours-long pod runs, not just a dependency cleanup --
+    # see cwt_gnn_classifiers.py's cwt_backend param for the revert switch
+    # if this ever needs to go back ("fcwt", no code change required).
+    cwt_backend="torch",
 )
 
 # label_mode="detection" training dynamics (device × batch-size × epochs

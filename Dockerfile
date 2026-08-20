@@ -24,12 +24,16 @@ FROM runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404
 
 WORKDIR /workspace
 
-# Same apt packages setup.sh installs: build toolchain fcwt needs to
-# compile from source (PyPI only ships a macOS wheel for fcwt==0.1.18,
-# so `pip install` falls back to building the sdist).
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends cmake build-essential libfftw3-dev && \
-    rm -rf /var/lib/apt/lists/*
+# 2026-08-20: no apt build-toolchain step here anymore. It used to install
+# cmake/build-essential/libfftw3-dev so pip could compile fcwt from source
+# (PyPI only ships a macOS wheel for it) -- fcwt has since been dropped
+# from requirements.txt entirely now that cwt_backend="torch"
+# (utils/torch_cwt.py) is the default CWT path (see run_pipelines.py's
+# _SHARED_ARCH_PARAMS). That apt step was the single biggest chunk of
+# build time for a dependency nothing exercises by default anymore.
+# cwt_backend="fcwt" still exists in cwt_gnn_classifiers.py as a manual
+# revert switch, but using it again means `pip install fcwt` (and this
+# apt block) coming back too -- not a default-path concern.
 
 # Only requirements.txt is copied in at this stage, not the rest of the
 # repo -- keeps this layer cached across code-only commits.
