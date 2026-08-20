@@ -121,15 +121,27 @@ def save_dense_edge(cache_dir: Path, key: str, tensor: torch.Tensor) -> None:
     different fold's process, if ever run in parallel) never observes a
     half-written file.
 
-    Compressed (2026-08-16): this tensor is ~40% exact zero (COI-masked --
-    see this module's docstring / the 2026-08-15 session note's measured
-    fraction), so np.savez_compressed's DEFLATE pass finds real structure to
-    exploit -- measured 8.23MB -> 3.76MB (~54% smaller) on an actual cached
-    tensor, not a guess. Costs write-time CPU; on a machine where disk space
-    is the binding constraint (not CPU), that trade is the whole point.
+    Uncompressed (2026-08-20, reverting the 2026-08-16 compressed write):
+    this call sits inside _precompute_dense_edge_inputs's per-chunk GPU
+    loop, so its cost is directly added to real training wall time, not
+    paid off-line. Measured on real chb01 data/GPU while investigating why
+    dense-edge precompute was slow despite compute_dense_edge_input itself
+    being genuine vectorized torch (batched cross-spectrum + separable-conv
+    smoothing, confirmed no hidden loops): np.savez_compressed's DEFLATE
+    pass cost 499ms/trial for only an 11% size reduction on this pipeline's
+    actual prediction-mode tensors (13.73MB -> 15.51MB uncompressed) --
+    nowhere near the 2026-08-16 note's 54%-smaller figure, which came from
+    a different (dense-edge-GRU, larger T) config's tensors, not these.
+    That 499ms dwarfed the GPU compute it sat next to (117ms for an entire
+    4-trial chunk) -- 95% of total precompute wall time was this DEFLATE
+    pass, not the tensor math. np.savez (no compression) measured 6.6ms for
+    the same tensor -- disk space cost is real but modest (this cache is
+    fully regenerable, not source data) and utterly dominated by the
+    write-time-CPU cost on the hot path. See the 2026-08-20 session note's
+    "dense-edge, not CWT" section for the full before/after numbers.
     """
     cache_dir.mkdir(parents=True, exist_ok=True)
     final_path = cache_dir / f"{key}.npz"
     tmp_path = cache_dir / f".{key}.{os.getpid()}.tmp.npz"
-    np.savez_compressed(tmp_path, dense=tensor.detach().cpu().numpy())
+    np.savez(tmp_path, dense=tensor.detach().cpu().numpy())
     os.replace(tmp_path, final_path)

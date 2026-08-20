@@ -544,16 +544,74 @@ rule.
   batched-IFFT losing to fcwt's algorithmic edge at long signals/high
   nfreqs) does not materialize on GPU.
 
+## Part 11 -- dense-edge bottleneck root-caused and fixed: it was the compressed cache write, not the GPU math
+
+Direct follow-up to Part 10's finding, prompted by a challenge that the
+dense-edge slowness must be fixable since the computation is "a
+convolution over a matrix product" and GPU should do that fast. Read
+`_build_dense_edge_input`/`_full_edge_wct_maps`/`_smooth_wct_maps` in full
+first (`cwt_gnn_classifiers.py`) to confirm that premise before measuring
+anything: all three are genuinely vectorized torch (elementwise
+cross-spectrum via `index_select`+multiply, separable `conv2d` Gaussian
+smoothing, `avg_pool2d` downsampling) with no hidden per-item Python
+loops -- the premise was correct.
+
+`_precompute_dense_edge_inputs`'s per-chunk loop, however, calls
+`save_dense_edge(cache_dir, cache_keys[i], dense[j])` once per trial
+*inside* the same loop the GPU compute is timed in, and `save_dense_edge`
+(`dense_edge_cache.py`) used `np.savez_compressed` -- synchronous,
+single-threaded DEFLATE compression. `run_pipelines.py` passes a real
+`dense_edge_cache_dir` by default, so every trial in a fresh-cache run
+(0% hit rate, as Part 10's killed eval showed throughout) paid this cost.
+
+Measured directly (not projected) on a fresh RTX 3090 pod, real chb01
+data, real `PREDICTION_GRU_PARAMS`, `torch.cuda.synchronize()` wrapped
+around `compute_dense_edge_input` so the GPU-only interval is exact:
+
+| | before (compressed) | after (uncompressed `np.savez`) |
+|---|---|---|
+| GPU compute (6 chunks of 4 trials) | 0.70s (117ms/chunk) | 0.50s (83ms/chunk) |
+| disk cache write (24 trials) | 12.73s (530ms/trial) | 0.26s (11ms/trial) |
+| write as % of (compute+write) | 94.8% | 34.4% |
+| `fit()` wall time, this slice | 16.08s | 3.24s |
+| dense-edge chunk throughput | 0.45 chunk/s | 6.53 chunk/s (~14x) |
+
+Isolated single-tensor A/B on the actual cached shape
+(`(4, 253, 479, 8)` float32, `PREDICTION_GRU_PARAMS`'s dense-edge shape):
+`np.savez_compressed` = 499ms for 13.73MB; `np.savez` (raw) = 6.6ms for
+15.51MB -- an 11% size reduction bought at 75x the write time. This is
+nowhere near the 2026-08-16 note's cited "8.23MB -> 3.76MB (~54%
+smaller)" figure -- that number came from a different (dense-edge-GRU,
+larger `T`) config's tensors, not `PREDICTION_GRU_PARAMS`'s, and was never
+re-validated against the actual config real runs use before being trusted
+as justification for paying this cost on every trial.
+
+**Fix**: `dense_edge_cache.py`'s `save_dense_edge` now uses `np.savez`
+instead of `np.savez_compressed` (commit follows this note). No cache-key
+or on-disk-format change -- `np.load` reads both transparently, so
+existing cached entries (compressed, from before this fix) remain valid
+hits; only new writes stop compressing. Disk space cost is real but
+modest (11-54% larger depending on config) and this cache is fully
+regenerable, not source data -- the write-time-CPU cost it was buying
+against was, on the pipeline's actual hot path, far more expensive than
+the disk space it saved.
+
+Not yet re-run: the full real Truong-setup eval that Part 10 killed after
+projecting ~20hr. With dense-edge's disk-write cost now ~14x cheaper (and
+GPU compute itself already fast and unaffected), the dense-edge stage
+should no longer be the dominant cost -- but that's a projection from a
+24-window slice, not a re-measurement of the full config. Left for a
+future session/explicit request per the same cost-consciousness that
+stopped Part 10's run rather than letting it run overnight.
+
 ## Open items
 
-- **(New, Part 10, the real open item now)** Dense-edge computation is the
-  actual bottleneck for `StreamingSparseEvidenceGNNClassifier`
-  prediction-mode runs at real scale (~39s/32-window batch on an RTX 4090,
-  unaffected by CWT backend) -- confirmed via a killed real-data attempt at
-  the canonical 30s-window config, not a projection. This branch never
-  touched dense-edge computation; making it GPU-native/batched the way CWT
-  now is would be the next real speedup, but is out of scope for
-  torch-native-cwt specifically.
+- **(Superseded by Part 11)** ~~Dense-edge computation is the actual
+  bottleneck...~~ -- root-caused (compressed disk-cache write, not the
+  GPU math) and fixed in Part 11. The real open item now: the full
+  Truong-setup eval hasn't been re-run end-to-end since the fix, so the
+  ~20hr projection from Part 10 is stale but not yet replaced by a new
+  measured number.
 - Step 6's real-data comparison at SMOKE scale (Part 9b: epochs=2, subject
   1, old 4.0s/30.0s detection-mode windowing) is superseded by Part 10's
   real-scale attempt at the actual 30s-window config -- kept here for
