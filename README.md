@@ -14,25 +14,29 @@ on a RunPod Network Volume / downloads on first pipeline run, never in the
 image.
 
 **Building it:** RunPod pods can't run a Docker daemon themselves (they're
-unprivileged containers, no `cap_sys_admin`), and RunPod's GitHub-connected
-build is a Serverless-endpoint feature, not a plain-Pod one -- there's no
-"build from GitHub" option scoped to Pods directly. One-time manual step
-(RunPod dashboard, not scriptable via the API/MCP tools): Settings →
-Connections → connect the `noshore5/EEG_Benchmarks` GitHub repo, then
-Serverless → New Endpoint → Import Git Repository → pick the branch → deploy
-(min workers = 0 so the endpoint itself doesn't idle-bill). That's why
-`handler.py` exists at repo root: a throwaway `runpod.serverless.start()`
-stub satisfying the queue-endpoint handler requirement so the build runs at
-all -- nothing in the repo calls it. RunPod builds and hosts the resulting
-image in its own registry; no external registry (Docker Hub/GHCR) needed.
-**Rebuild whenever `requirements.txt` or `Dockerfile` changes** by pushing to
-the connected branch (auto-triggers a build), and tag/label it with the date
-+ short commit hash, e.g. `2026-08-20-ada4995`, so old/new builds stay
-distinguishable.
+unprivileged containers, no `cap_sys_admin`), so the image is built by GitHub
+Actions (`.github/workflows/build-pod-image.yml`) on a real Docker daemon and
+pushed to GHCR (`ghcr.io/noshore5/eeg_benchmarks`). Triggers automatically on
+any push to `torch-native-cwt` that touches `Dockerfile` or
+`requirements.txt` (repo code isn't baked into the image, so code-only
+commits don't need a rebuild), or manually via `workflow_dispatch`. Tagged
+with date + short commit hash (e.g. `20260820-831695a`) plus a floating
+`latest`.
 
-**Using it:** once built, pass the resulting image name as `imageName` when
-creating a pod (or bake it into a Runpod template) in place of the stock
-`runpod/pytorch:...` image, and skip `bash setup.sh` entirely.
+RunPod's own GitHub-integration build (Settings → Connections → GitHub, then
+Serverless → New Endpoint → Import Git Repository) was tried first and is a
+dead end for this use case: it publishes to RunPod's internal
+`registry.runpod.net`, scoped to the Serverless endpoint it built for -- a
+plain Pod can't pull it (`Failed to get Hub registry auth` / `No such image`,
+confirmed against a live Pod, not a guess). It also requires a queue-endpoint
+handler (`runpod.serverless.start()`) to build at all, which doesn't fit a
+Pod-based repo like this one. Not used.
+
+**Using it:** once built, pass `ghcr.io/noshore5/eeg_benchmarks:latest` (or a
+specific date-commit tag) as `imageName` when creating a pod (or bake it into
+a Runpod template) in place of the stock `runpod/pytorch:...` image, and skip
+`bash setup.sh` entirely. Public GHCR package, no registry credential needed
+to pull.
 
 **Fallback:** `setup.sh` (manual bootstrap on a stock pod) is still the
 documented path until a few real runs have gone through the new image

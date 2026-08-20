@@ -53,14 +53,18 @@ RUN pip install --break-system-packages --ignore-installed -r /tmp/requirements.
 # author's Mac.
 RUN echo "Reminder: pass --device cuda to every Epilepsy/run_pipelines.py invocation." > /etc/motd
 
-# handler.py + the CMD below exist only so RunPod's GitHub-integration
-# build (a queue-based Serverless endpoint under the hood) accepts this
-# repo at all -- it requires a runpod.serverless.start() entrypoint at
-# container startup, even though this image's real use is as a Pod base,
-# not a live queue worker. See handler.py's own docstring. This is the
-# one deliberate exception to "no repo code baked into this image" --
-# it's a throwaway stub, not the pipeline code the rest of that policy
-# is about.
-RUN pip install --break-system-packages --ignore-installed runpod
-COPY handler.py /workspace/handler.py
-CMD ["python3", "-u", "handler.py"]
+# 2026-08-20: deliberately no CMD/ENTRYPOINT override here. An earlier
+# version of this file added one (running handler.py, a throwaway
+# runpod.serverless.start() stub) to satisfy RunPod's GitHub-integration
+# Serverless build, which was being used as a build mechanism for this
+# image. That mechanism turned out to be a dead end: images it produces
+# live in RunPod's internal registry.runpod.net scoped to their
+# originating Serverless endpoint, and a plain Pod can't pull them
+# ("Failed to get Hub registry auth" / "No such image" -- confirmed
+# against a live Pod, not a guess). Building/pushing to GHCR via GitHub
+# Actions instead (see .github/workflows/) -- a real registry a Pod CAN
+# pull from -- so this image keeps the base runpod/pytorch image's own
+# ENTRYPOINT/CMD intact (sshd + PUBLIC_KEY setup), which a Pod actually
+# needs. handler.py still exists at repo root in case the Serverless
+# endpoint that build mechanism created is still around, but nothing in
+# this Dockerfile references it anymore.
