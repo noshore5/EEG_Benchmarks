@@ -86,8 +86,6 @@ from Epilepsy.pipelines.cwt_gnn_classifiers import (
     SparseEvidenceGNNClassifier,
     StreamingSparseEvidenceGNNClassifier,
 )
-from Epilepsy.pipelines.cwt_window_cache import DISABLE_CWT_CACHE, DiskCWTCache, default_cwt_cache_root
-from Epilepsy.pipelines.dense_edge_cache import default_dense_edge_cache_root
 from Epilepsy.pipelines.truong_stft_cnn_classifier import TruongSTFTCNNClassifier, k_of_n_alarm
 
 
@@ -417,25 +415,14 @@ def leave_one_seizure_out_detection(
     seizure's worth of ictal windows plus that recording's interictal
     windows. Trains on every other recording, tests on the held-out one.
 
-    Folds share a single dense-edge-input cache (see dense_edge_cache.py):
-    each fold excludes only one recording, so most windows appear in most
-    folds' training sets -- without sharing, every fold would recompute the
-    same coherence/phase dense-edge stack (coherence_threshold_mode="fixed")
-    for the same physical windows from scratch. Disk-backed (default root:
-    <mne_data>/dense_edge_cache) so it also persists across separate
-    invocations of this script, not just across folds within one run.
-
-    CWT itself is NOT cached when cwt_backend="torch" (2026-08-21,
-    reopened -- see DISABLE_CWT_CACHE's docstring, cwt_window_cache.py):
-    now that it's confirmed fast and GPU-batched, recomputing it fresh
-    every access is cheaper overall than the cache's own SHA256-hashing/
-    disk I/O. cwt_backend="fcwt" keeps the disk cache (unbatched, so
-    caching still matters there).
+    No CWT or dense-edge caching (2026-08-21, explicit user decision --
+    see cwt_window_cache.py's module docstring): both stages are fast,
+    GPU-batched torch ops now, so every fold just recomputes them fresh
+    for whatever windows it sees. No disk I/O, no hashing, nothing shared
+    across folds.
     """
     groups = list(zip(metadata["subject"], metadata["run"]))
     unique_groups = sorted(set(groups), key=lambda g: (g[0], g[1]))
-    shared_cwt_cache = DISABLE_CWT_CACHE if clf_params.get("cwt_backend") == "torch" else DiskCWTCache(default_cwt_cache_root())
-    shared_dense_edge_cache_dir = default_dense_edge_cache_root()
 
     rows = []
     for group in unique_groups:
@@ -450,8 +437,6 @@ def leave_one_seizure_out_detection(
 
         clf = SparseEvidenceGNNClassifier(
             epochs=epochs,
-            cwt_cache=shared_cwt_cache,
-            dense_edge_cache_dir=shared_dense_edge_cache_dir,
             **clf_params,
         )
         clf.fit(X_train, y_train)
@@ -491,10 +476,6 @@ def leave_one_seizure_out_detection(
             f"f1={row['f1']:.3f} auc_pr={row['average_precision']:.3f}"
         )
 
-    if shared_cwt_cache is DISABLE_CWT_CACHE:
-        print("  CWT cache: disabled (cwt_backend=\"torch\" -- recomputed every access, see DISABLE_CWT_CACHE)")
-    else:
-        print(f"  CWT cache: {len(shared_cwt_cache)} unique (window, channel) transforms on disk")
     return pd.DataFrame(rows)
 
 
@@ -577,11 +558,8 @@ def leave_one_seizure_out_prediction(
             "leave-one-seizure-out over."
         )
 
-    # CWT caching: see leave_one_seizure_out_detection's docstring for why
-    # cwt_backend="torch" disables it (DISABLE_CWT_CACHE) while "fcwt" keeps
-    # the disk cache.
-    shared_cwt_cache = DISABLE_CWT_CACHE if clf_params.get("cwt_backend") == "torch" else DiskCWTCache(default_cwt_cache_root())
-    shared_dense_edge_cache_dir = default_dense_edge_cache_root()
+    # No CWT or dense-edge caching -- see leave_one_seizure_out_detection's
+    # docstring.
 
     subject_arr = metadata["subject"].to_numpy()
     run_arr = metadata["run"].to_numpy()
@@ -655,8 +633,6 @@ def leave_one_seizure_out_prediction(
         # StreamingSparseEvidenceGNNClassifier for the full rationale).
         clf = StreamingSparseEvidenceGNNClassifier(
             epochs=epochs,
-            cwt_cache=shared_cwt_cache,
-            dense_edge_cache_dir=shared_dense_edge_cache_dir,
             **clf_params,
         )
         clf.fit(X_train, y_train)
@@ -761,10 +737,6 @@ def leave_one_seizure_out_prediction(
             gaps.append(float((same_run["seizure_onset_s"] - r["seizure_onset_s"]).abs().min()))
     per_seizure_df["gap_to_nearest_seizure_same_recording_s"] = gaps
 
-    if shared_cwt_cache is DISABLE_CWT_CACHE:
-        print("  CWT cache: disabled (cwt_backend=\"torch\" -- recomputed every access, see DISABLE_CWT_CACHE)")
-    else:
-        print(f"  CWT cache: {len(shared_cwt_cache)} unique (window, channel) transforms on disk")
     return pd.DataFrame(fold_rows), per_seizure_df
 
 

@@ -69,16 +69,7 @@ try:
         validation_groups_from_metadata,
     )
     from Epilepsy.pipelines.common import _count_eligible_tensor_batches, _min_accepted_batch_size
-    from Epilepsy.pipelines.cwt_window_cache import (
-        DISABLE_CWT_CACHE,
-        compute_cwt_real_imag_tensors_cached,
-        precompute_window_cache_keys,
-    )
-    from Epilepsy.pipelines.dense_edge_cache import (
-        dense_edge_cache_key,
-        load_dense_edge,
-        save_dense_edge,
-    )
+    from Epilepsy.pipelines.cwt_window_cache import compute_cwt_real_imag_tensors_cached
 except ModuleNotFoundError:
     from pipelines.common import (
         TorchEEGClassifier,
@@ -105,16 +96,7 @@ except ModuleNotFoundError:
         validation_groups_from_metadata,
     )
     from pipelines.common import _count_eligible_tensor_batches, _min_accepted_batch_size
-    from pipelines.cwt_window_cache import (
-        DISABLE_CWT_CACHE,
-        compute_cwt_real_imag_tensors_cached,
-        precompute_window_cache_keys,
-    )
-    from pipelines.dense_edge_cache import (
-        dense_edge_cache_key,
-        load_dense_edge,
-        save_dense_edge,
-    )
+    from pipelines.cwt_window_cache import compute_cwt_real_imag_tensors_cached
 
 
 # ============================================================================
@@ -391,18 +373,6 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
         # inverse-class-frequency weighting; this just stops discarding it.
         # Default True since that's this fork's whole reason to exist.
         use_class_weights: bool = True,
-        # Epilepsy fork only -- see cwt_window_cache.py's docstring. A plain
-        # dict the caller owns; pass the SAME dict into multiple classifier
-        # instances (e.g. one per leave-one-seizure-out fold) to reuse CWT
-        # work for windows they share instead of recomputing per fold.
-        # None (default) gives this instance its own private cache, i.e. no
-        # behavior change from before this existed. Pass the DISABLE_CWT_CACHE
-        # sentinel (cwt_window_cache.py) to skip CWT caching entirely --
-        # reopened 2026-08-21 for cwt_backend="torch" specifically, once
-        # its batched GPU compute was confirmed fast enough that the
-        # cache's own hashing/disk I/O could cost more than just
-        # recomputing (see that sentinel's docstring).
-        cwt_cache: dict | None = None,
         # Step 6 (torch-native-cwt branch): selects which CWT implementation
         # self.transform_/self.batch_transform_ resolve to in
         # _prepare_features. "fcwt" (default) is the original FFTW/fcwt.cwt()
@@ -423,7 +393,6 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
         torch_cwt_batch_size: int = 256,
         verbose: int = 0,
     ) -> None:
-        self.cwt_cache = cwt_cache if cwt_cache is not None else {}
         self.sampling_rate = sampling_rate
         self.lowest = lowest
         self.highest = highest
@@ -533,7 +502,7 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
         self.transform_ = functools.partial(torch_cwt.transform, device=device)
         self.batch_transform_ = functools.partial(torch_cwt.transform_batch, device=device)
 
-    def _prepare_features(self, X: np.ndarray, *, fit: bool, train_idx=None, window_keys=None):
+    def _prepare_features(self, X: np.ndarray, *, fit: bool, train_idx=None):
         # NEW: slice channels first, before normalization/CWT/anything else
         # touches X, so every downstream step (z-score stats, CWT tensors,
         # noise bank, n_channels inference) only ever sees the subset.
@@ -553,14 +522,11 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
 
         if self.transform_ is None:
             self._resolve_transform_fns()
-        # Epilepsy fork only: cached in place of compute_cwt_real_imag_tensors
-        # -- X here is still RAW (pre-normalization); the cache applies the
-        # mean/std rescale on retrieval instead (see cwt_window_cache.py's
-        # docstring for why that's exact, not approximate). This is what
-        # lets separate CV folds -- each a new classifier instance, each
-        # with its own fold-specific mean/std -- reuse CWT work for windows
-        # they have in common instead of recomputing the wavelet transform
-        # from scratch every fold.
+        # Epilepsy fork only: X here is still RAW (pre-normalization); the
+        # mean/std rescale is applied on the way out instead (see
+        # cwt_window_cache.py's docstring for why that's exact, not
+        # approximate). No caching -- every call recomputes (2026-08-21,
+        # explicit user decision -- see that module's docstring).
         features = compute_cwt_real_imag_tensors_cached(
             X,
             mean=mean,
@@ -572,17 +538,8 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
             cwt_resample_n_time=self.cwt_resample_n_time,
             transform_fn=self.transform_,
             verbose=self.verbose,
-            # DISABLE_CWT_CACHE -> real None: the sentinel is an identity
-            # marker at this class's level (distinguishing "disabled" from
-            # the constructor's own cwt_cache=None default, which means
-            # "private per-instance dict" -- see _init_cwt_gnn_classifier's
-            # cwt_cache param docstring); compute_cwt_real_imag_tensors_cached
-            # (cwt_window_cache.py) is what actually treats None specially.
-            cache=None if self.cwt_cache is DISABLE_CWT_CACHE else self.cwt_cache,
-            window_keys=window_keys,
             batch_transform_fn=self.batch_transform_,
             batch_size=self.torch_cwt_batch_size,
-            cwt_backend=self.cwt_backend,
         )
         if fit:
             X_normalized = apply_global_zscore(X, mean, std) if self.normalize_input else X
@@ -1292,10 +1249,13 @@ def surrogate_null_cache_key(
 
     `cwt_backend` (added 2026-08-20, Step 6 of the torch-native-cwt swap):
     the null distribution is built from `compute_cwt_real_imag_tensors`
-    output, so it needs the same backend-in-the-key fix as
-    cwt_window_cache.py's `_window_cache_key` / dense_edge_cache.py's
-    `dense_edge_cache_key` -- see the former's docstring. Defaults to
-    "fcwt" so existing on-disk entries key identically to before.
+    output, so switching backends must not silently serve a stale entry
+    computed under the other one. Defaults to "fcwt" so existing on-disk
+    entries key identically to before. (The CWT-window and dense-edge
+    caches this originally cross-referenced were removed 2026-08-21 --
+    this surrogate-null cache is a separate, opt-in mechanism, not on the
+    default `coherence_threshold_mode="fixed"` path, and was left in
+    place.)
 
     `edge_topology` (2026-08-09): distinguishes the cached grid's edge axis
     layout -- e.g. "directed_ij_ji" (the original 2*C(n,2) directed-pair
@@ -4366,20 +4326,6 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         # docstring (xwt_phase_gnn_classifier.py) for why this defaults to
         # True here instead of upstream's hardcoded False.
         use_class_weights: bool = True,
-        # Epilepsy fork only -- see cwt_window_cache.py's docstring / this
-        # param's matching one on _init_cwt_gnn_classifier.
-        cwt_cache: dict | None = None,
-        # Epilepsy fork only, 2026-08-15 -- see dense_edge_cache.py's
-        # docstring. Disk directory for the coherence_threshold_mode="fixed"
-        # dense-edge-input cache ([4, E, T, F] per trial, keyed by raw
-        # window content + config). None (default) disables it -- every
-        # trial recomputed fresh, same as before this param existed. Only
-        # ever consulted when coherence_threshold_mode == "fixed" (see
-        # _precompute_dense_edge_inputs): the invariance-to-per-fold-
-        # normalization proof this cache relies on doesn't cover
-        # "surrogate"/"surrogate_cluster", which calibrate against
-        # raw_x_native directly.
-        dense_edge_cache_dir: str | None = None,
         # 2026-08-19: Runpod deployment finding -- _precompute_sparse_events/
         # _precompute_dense_edge_inputs both hardcode chunk=min(batch_size,4)
         # trials per torch call, chosen (see those methods' comments) to keep
@@ -4655,7 +4601,6 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         self.surrogate_device = surrogate_device
         self.surrogate_cache_dir = surrogate_cache_dir
         self.surrogate_cache_enabled = surrogate_cache_enabled
-        self.dense_edge_cache_dir = dense_edge_cache_dir
         self.precompute_chunk_size = precompute_chunk_size
         if cwt_resample_n_time is not None:
             import warnings
@@ -4708,13 +4653,12 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
             optimizer_step_remainder_policy=optimizer_step_remainder_policy,
             channel_subset=channel_subset,
             use_class_weights=use_class_weights,
-            cwt_cache=cwt_cache,
             cwt_backend=cwt_backend,
             torch_cwt_batch_size=torch_cwt_batch_size,
             verbose=verbose,
         )
 
-    def _prepare_features(self, X, *, fit: bool, train_idx=None, window_keys=None):
+    def _prepare_features(self, X, *, fit: bool, train_idx=None):
         # Channel-subset-applied but NOT z-score-normalized -- passed to
         # _precompute_sparse_events as raw_x_native so the surrogate cache
         # key hashes something that depends only on the physical trial +
@@ -4724,7 +4668,7 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         # below reassigns its own local copy without mutating this one.
         raw_x_native = self._apply_channel_subset(np.asarray(X, dtype=np.float32))
         raw_x, w_real, w_imag, freqs = super()._prepare_features(
-            X, fit=fit, train_idx=train_idx, window_keys=window_keys
+            X, fit=fit, train_idx=train_idx
         )
         # Sparse events are computed from w_real/w_imag/freqs alone (see
         # compute_events -- raw_x never enters that path), so resampling
@@ -5357,60 +5301,13 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         helper._freq_hi = float(freqs.max().item())
         freqs_1d_np = freqs[0].detach().cpu().numpy()
 
-        # Disk cache -- see dense_edge_cache.py's docstring. Restricted to
-        # coherence_threshold_mode="fixed": that's the only mode where this
-        # method's output is provably a pure function of (raw window,
-        # config), independent of which fold's normalization stats produced
-        # w_real/w_imag. self.dense_edge_cache_dir is None by default (opt-
-        # in, same convention as cwt_cache/surrogate_cache_dir), so this is
-        # a no-op unless a caller (e.g. run_pipelines.py) supplies a
-        # directory.
-        cache_dir = None
-        cache_keys: list[str] | None = None
-        if mode_label == "fixed" and self.dense_edge_cache_dir is not None:
-            cache_dir = Path(self.dense_edge_cache_dir)
-            raw_for_keys = (
-                raw_x_native if raw_x_native is not None else raw_x.detach().cpu().numpy()
-            )
-            cache_keys = [
-                dense_edge_cache_key(
-                    raw_for_keys[i],
-                    sampling_rate=self.sampling_rate, highest=self.highest, lowest=self.lowest,
-                    nfreqs=self.nfreqs, cwt_resample_n_time=self.cwt_resample_n_time,
-                    coherence_threshold=self.coherence_threshold,
-                    smooth_kernel_size=self.smooth_kernel_size,
-                    smooth_kernel_sigma=self.smooth_kernel_sigma,
-                    coi_enabled=self.coi_enabled,
-                    dense_edge_time_downsample=self.dense_edge_time_downsample,
-                    time_averaged_graph=self.time_averaged_graph,
-                    scale_adaptive_smoothing=self.scale_adaptive_smoothing,
-                    scale_adaptive_cycles=self.scale_adaptive_cycles,
-                    scale_adaptive_max_kernel=self.scale_adaptive_max_kernel,
-                    cwt_backend=self.cwt_backend,
-                )
-                for i in range(n_samples)
-            ]
-
-        # results[i] is filled in from disk (cache hit) or computed below
-        # (cache miss, or caching disabled entirely -- every trial is then a
-        # "miss" and this reduces to the original always-compute behavior).
+        # No disk cache (2026-08-21, explicit user decision -- see
+        # cwt_window_cache.py's module docstring for the equivalent CWT-side
+        # removal and its rationale; the same applies here: this stage's GPU
+        # compute is fast, the disk write was the actual cost). Every trial
+        # is computed fresh, every call.
         results: list[torch.Tensor | None] = [None] * n_samples
         miss_indices = list(range(n_samples))
-        if cache_keys is not None:
-            miss_indices = []
-            n_hits = 0
-            for i, key in enumerate(cache_keys):
-                cached = load_dense_edge(cache_dir, key)
-                if cached is not None:
-                    results[i] = cached
-                    n_hits += 1
-                else:
-                    miss_indices.append(i)
-            if self.verbose >= 1 and n_samples > 0:
-                print(
-                    f"[dense-edge cache] {n_hits}/{n_samples} trials reused from disk "
-                    f"({100 * n_hits / n_samples:.1f}%)"
-                )
 
         # Same memory-vs-throughput cap as _precompute_sparse_events above
         # (see that method's comment, and precompute_chunk_size's docstring
@@ -5467,10 +5364,8 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
             # own surrogate_torch_device; fixed: fixed_torch_device, set
             # above -- see that branch's comment on why this is safe) --
             # `dense = dense.cpu()` below always brings the result back,
-            # regardless of mode, since `results`/the disk cache/the final
-            # torch.stack all expect CPU tensors (cache-hit tensors loaded
-            # via load_dense_edge are CPU too; mixing devices in that stack
-            # would error).
+            # regardless of mode, since `results`/the final torch.stack all
+            # expect CPU tensors.
             compute_device = surrogate_torch_device if (surrogate_mode or cluster_mode) else fixed_torch_device
             chunk_w_real = w_real[idx_chunk].to(compute_device)
             chunk_w_imag = w_imag[idx_chunk].to(compute_device)
@@ -5483,8 +5378,6 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
             dense = dense.cpu()
             for j, i in enumerate(idx_chunk):
                 results[i] = dense[j]
-                if cache_dir is not None:
-                    save_dense_edge(cache_dir, cache_keys[i], dense[j])
 
         return torch.stack(results, dim=0)
 
@@ -5645,49 +5538,16 @@ class _LazyFeatureBatchDataset(Dataset):
         self.classifier = classifier
         self.X_raw = X_raw
         self.y_idx = y_idx
-        # 2026-08-19: precompute this fit() call's CWT cache keys ONCE
-        # here, instead of __getitem__ re-hashing every raw channel on
-        # every batch (~24x/epoch) -- see precompute_window_cache_keys's
-        # docstring (cwt_window_cache.py) for the measured cost this
-        # removes. Same _apply_channel_subset applied here as
-        # _prepare_features applies internally to X before hashing/CWT
-        # (cwt_gnn_classifiers.py's base _prepare_features), so these keys
-        # line up 1:1 with what compute_cwt_real_imag_tensors_cached sees
-        # per batch -- subsetting channels (axis 1) and selecting rows via
-        # `idx` (axis 0) are independent and commute, so
-        # _apply_channel_subset(X_raw)[idx] == _apply_channel_subset(X_raw[idx]).
-        # DISABLE_CWT_CACHE (2026-08-21): skip this hashing pass entirely --
-        # it exists only to save re-hashing on every batch for a cache that,
-        # here, isn't being used at all (see DISABLE_CWT_CACHE's own
-        # docstring, cwt_window_cache.py). window_keys=None below reproduces
-        # compute_cwt_real_imag_tensors_cached's original always-hash-inline
-        # signature, but that function itself skips hashing outright when
-        # cache=None (which _prepare_features passes whenever
-        # self.cwt_cache is this sentinel) -- so nothing gets hashed either way.
-        if classifier.cwt_cache is DISABLE_CWT_CACHE:
-            self._window_keys = None
-        else:
-            X_subset = self.classifier._apply_channel_subset(X_raw)
-            self._window_keys = precompute_window_cache_keys(
-                X_subset,
-                sampling_rate=classifier.sampling_rate,
-                highest=classifier.highest,
-                lowest=classifier.lowest,
-                nfreqs=classifier.nfreqs,
-                cwt_resample_n_time=classifier.cwt_resample_n_time,
-                cwt_backend=classifier.cwt_backend,
-            )
 
     def __getitem__(self, indices: Sequence[int]):
         idx = np.asarray(indices, dtype=np.int64)
         X_batch = self.X_raw[idx]
-        batch_keys = None if self._window_keys is None else self._window_keys[idx]
         # fit=False: reuses self.X_mean_/self.X_std_ already fit ONCE on
         # the whole training set in fit() below -- must NOT refit per
         # batch, which would normalize each batch by its own, different,
         # wrong mean/std instead of a single consistent training-set one.
         raw_x, dense_edge_raw = self.classifier._prepare_features(
-            X_batch, fit=False, window_keys=batch_keys
+            X_batch, fit=False
         )
         y_batch = torch.from_numpy(self.y_idx[idx]).long()
         return raw_x, dense_edge_raw, y_batch

@@ -137,7 +137,7 @@ export_params = dict(DENSE_EDGE_GRU_PARAMS)
 export_params["lowest"] = 8.0
 export_params["coherence_threshold"] = 0.90
 export_params["nfreqs"] = 40
-clf = SparseEvidenceGNNClassifier(epochs=1, cwt_cache={}, dense_edge_cache_dir=None, **export_params)
+clf = SparseEvidenceGNNClassifier(epochs=1, **export_params)
 clf._init_cwt_gnn_classifier(
     sampling_rate=clf.sampling_rate,
     lowest=clf.lowest,
