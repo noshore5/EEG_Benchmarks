@@ -49,6 +49,23 @@ except ModuleNotFoundError:
     from pipelines.common import cwt_progress_context, prepare_cwt_tf, prepare_cwt_tf_batch
 
 
+class _DisableCWTCacheSentinel:
+    """Identity marker for `cwt_cache=DISABLE_CWT_CACHE` at the classifier
+    constructor level (cwt_gnn_classifiers.py's _init_cwt_gnn_classifier).
+
+    Distinct from that constructor's own `cwt_cache=None` default, which
+    means "give me a private, per-instance, per-fit-call dict" (unchanged
+    behavior from before this sentinel existed) -- this means "never cache
+    at all, not even within one fit() call." _prepare_features translates
+    this sentinel into the real `cache=None` that
+    compute_cwt_real_imag_tensors_cached (this module) treats specially:
+    skip the key-hashing/lookup loop outright, not just guarantee a miss.
+    """
+
+
+DISABLE_CWT_CACHE = _DisableCWTCacheSentinel()
+
+
 def default_cwt_cache_root() -> Path:
     """Mirrors cwt_gnn_classifiers.default_surrogate_cache_root's
     own convention (same env-var precedence, same "just a subfolder under
@@ -220,7 +237,7 @@ def compute_cwt_real_imag_tensors_cached(
     cwt_resample_n_time: Optional[int],
     transform_fn,
     verbose: int,
-    cache: dict,
+    cache: Optional[dict],
     window_keys: Optional[np.ndarray] = None,
     batch_transform_fn=None,
     batch_size: int = 256,
@@ -237,6 +254,24 @@ def compute_cwt_real_imag_tensors_cached(
     `cache` is a plain dict the caller owns -- pass the SAME dict across
     multiple classifier instances (e.g. one per CV fold) to get reuse
     across them; pass a fresh `{}` for no sharing.
+
+    2026-08-21: `cache=None` disables caching entirely -- every
+    (sample, channel) is treated as a miss (Pass 1's key/lookup loop is
+    skipped outright, not just guaranteed to miss) and nothing gets
+    written back, not even for reuse within this one call. Reopened by
+    the user specifically for cwt_backend="torch" on a Runpod pod: the
+    disk-cache design (DiskCWTCache) exists to avoid re-running the actual
+    wavelet transform, which mattered when that transform was slow
+    (fcwt's per-item CPU loop) or when its own compressed writes/reads
+    dominated (both since fixed -- see cwt_window_cache.py/
+    dense_edge_cache.py's own 2026-08-20 notes). With cwt_backend="torch"
+    genuinely fast and GPU-batched (measured 0.16ms/transform in
+    isolation, Epilepsy/Session_notes/2026_08_20/
+    torch_native_cwt_module_and_parity_validation.md Part 8), recomputing
+    on every access and never touching disk or Python-level SHA256 hashing
+    can be faster overall than the cache's own CPU-side bookkeeping --
+    not assumed, see run_pipelines.py's cwt_cache wiring and the
+    2026-08-21 session note for the measured before/after.
 
     `window_keys`, if given, is a [n_samples, n_channels] array of
     already-computed _window_cache_key strings (see
@@ -292,32 +327,40 @@ def compute_cwt_real_imag_tensors_cached(
         # immediately -- cheap dict lookups, no transform involved. Misses
         # are deferred (not computed inline) so they can be run as one
         # batch below instead of the original per-item loop.
+        #
+        # cache=None (2026-08-21, see this function's docstring): skips
+        # this loop's hashing/lookups entirely instead of just guaranteeing
+        # every lookup misses -- every (sample, channel) goes straight into
+        # miss_indices below, no _window_cache_key/SHA256 call at all.
         keys = np.empty((n_samples, n_channels), dtype=object)
-        miss_indices: list[tuple[int, int]] = []
         n_hits = 0
-        for sample_idx in range(n_samples):
-            for ch_idx in range(n_channels):
-                if window_keys is not None:
-                    key = window_keys[sample_idx, ch_idx]
-                else:
-                    key = _window_cache_key(
-                        X_raw[sample_idx, ch_idx, :],
-                        sampling_rate=sampling_rate,
-                        highest=highest,
-                        lowest=lowest,
-                        nfreqs=nfreqs,
-                        cwt_resample_n_time=cwt_resample_n_time,
-                        cwt_backend=cwt_backend,
-                    )
-                keys[sample_idx, ch_idx] = key
-                cached = cache.get(key)
-                if cached is None:
-                    miss_indices.append((sample_idx, ch_idx))
-                else:
-                    n_hits += 1
-                    real_raw, imag_raw = cached
-                    w_real[sample_idx, ch_idx] = real_raw * scale
-                    w_imag[sample_idx, ch_idx] = imag_raw * scale
+        if cache is None:
+            miss_indices = [(s, c) for s in range(n_samples) for c in range(n_channels)]
+        else:
+            miss_indices = []
+            for sample_idx in range(n_samples):
+                for ch_idx in range(n_channels):
+                    if window_keys is not None:
+                        key = window_keys[sample_idx, ch_idx]
+                    else:
+                        key = _window_cache_key(
+                            X_raw[sample_idx, ch_idx, :],
+                            sampling_rate=sampling_rate,
+                            highest=highest,
+                            lowest=lowest,
+                            nfreqs=nfreqs,
+                            cwt_resample_n_time=cwt_resample_n_time,
+                            cwt_backend=cwt_backend,
+                        )
+                    keys[sample_idx, ch_idx] = key
+                    cached = cache.get(key)
+                    if cached is None:
+                        miss_indices.append((sample_idx, ch_idx))
+                    else:
+                        n_hits += 1
+                        real_raw, imag_raw = cached
+                        w_real[sample_idx, ch_idx] = real_raw * scale
+                        w_imag[sample_idx, ch_idx] = imag_raw * scale
 
         # Pass 2: fill in misses, either one batched call per chunk (torch
         # backend) or the original one-call-per-item loop (fcwt backend,
@@ -336,7 +379,8 @@ def compute_cwt_real_imag_tensors_cached(
                     imag_b = np.imag(coeffs_tf_b).astype(np.float32)
                     for i, (sample_idx, ch_idx) in enumerate(chunk):
                         real_raw, imag_raw = real_b[i], imag_b[i]
-                        cache[keys[sample_idx, ch_idx]] = (real_raw, imag_raw)
+                        if cache is not None:
+                            cache[keys[sample_idx, ch_idx]] = (real_raw, imag_raw)
                         w_real[sample_idx, ch_idx] = real_raw * scale
                         w_imag[sample_idx, ch_idx] = imag_raw * scale
                     pbar.update(len(chunk))
@@ -350,16 +394,20 @@ def compute_cwt_real_imag_tensors_cached(
                     coeffs_tf = prepare_cwt_tf(coeffs, nfreqs=nfreqs, n_time=n_time)
                     real_raw = np.real(coeffs_tf).astype(np.float32)
                     imag_raw = np.imag(coeffs_tf).astype(np.float32)
-                    cache[keys[sample_idx, ch_idx]] = (real_raw, imag_raw)
+                    if cache is not None:
+                        cache[keys[sample_idx, ch_idx]] = (real_raw, imag_raw)
                     w_real[sample_idx, ch_idx] = real_raw * scale
                     w_imag[sample_idx, ch_idx] = imag_raw * scale
                     pbar.update(1)
 
     if verbose >= 1 and n_samples * n_channels > 0:
-        print(
-            f"[CWT cache] {n_hits}/{n_samples * n_channels} windows*channels "
-            f"reused from cache ({100 * n_hits / (n_samples * n_channels):.1f}%)"
-        )
+        if cache is None:
+            print(f"[CWT cache] disabled -- recomputed all {n_samples * n_channels} windows*channels")
+        else:
+            print(
+                f"[CWT cache] {n_hits}/{n_samples * n_channels} windows*channels "
+                f"reused from cache ({100 * n_hits / (n_samples * n_channels):.1f}%)"
+            )
 
     raw_x = (X_raw - mean) / (std + 1e-8)
     raw_x = resample(raw_x, n_time, axis=2) if n_time != n_time_orig else raw_x

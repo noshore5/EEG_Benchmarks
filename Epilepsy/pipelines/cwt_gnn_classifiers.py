@@ -70,6 +70,7 @@ try:
     )
     from Epilepsy.pipelines.common import _count_eligible_tensor_batches, _min_accepted_batch_size
     from Epilepsy.pipelines.cwt_window_cache import (
+        DISABLE_CWT_CACHE,
         compute_cwt_real_imag_tensors_cached,
         precompute_window_cache_keys,
     )
@@ -105,6 +106,7 @@ except ModuleNotFoundError:
     )
     from pipelines.common import _count_eligible_tensor_batches, _min_accepted_batch_size
     from pipelines.cwt_window_cache import (
+        DISABLE_CWT_CACHE,
         compute_cwt_real_imag_tensors_cached,
         precompute_window_cache_keys,
     )
@@ -394,7 +396,12 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
         # instances (e.g. one per leave-one-seizure-out fold) to reuse CWT
         # work for windows they share instead of recomputing per fold.
         # None (default) gives this instance its own private cache, i.e. no
-        # behavior change from before this existed.
+        # behavior change from before this existed. Pass the DISABLE_CWT_CACHE
+        # sentinel (cwt_window_cache.py) to skip CWT caching entirely --
+        # reopened 2026-08-21 for cwt_backend="torch" specifically, once
+        # its batched GPU compute was confirmed fast enough that the
+        # cache's own hashing/disk I/O could cost more than just
+        # recomputing (see that sentinel's docstring).
         cwt_cache: dict | None = None,
         # Step 6 (torch-native-cwt branch): selects which CWT implementation
         # self.transform_/self.batch_transform_ resolve to in
@@ -565,7 +572,13 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
             cwt_resample_n_time=self.cwt_resample_n_time,
             transform_fn=self.transform_,
             verbose=self.verbose,
-            cache=self.cwt_cache,
+            # DISABLE_CWT_CACHE -> real None: the sentinel is an identity
+            # marker at this class's level (distinguishing "disabled" from
+            # the constructor's own cwt_cache=None default, which means
+            # "private per-instance dict" -- see _init_cwt_gnn_classifier's
+            # cwt_cache param docstring); compute_cwt_real_imag_tensors_cached
+            # (cwt_window_cache.py) is what actually treats None specially.
+            cache=None if self.cwt_cache is DISABLE_CWT_CACHE else self.cwt_cache,
             window_keys=window_keys,
             batch_transform_fn=self.batch_transform_,
             batch_size=self.torch_cwt_batch_size,
@@ -5643,21 +5656,32 @@ class _LazyFeatureBatchDataset(Dataset):
         # per batch -- subsetting channels (axis 1) and selecting rows via
         # `idx` (axis 0) are independent and commute, so
         # _apply_channel_subset(X_raw)[idx] == _apply_channel_subset(X_raw[idx]).
-        X_subset = self.classifier._apply_channel_subset(X_raw)
-        self._window_keys = precompute_window_cache_keys(
-            X_subset,
-            sampling_rate=classifier.sampling_rate,
-            highest=classifier.highest,
-            lowest=classifier.lowest,
-            nfreqs=classifier.nfreqs,
-            cwt_resample_n_time=classifier.cwt_resample_n_time,
-            cwt_backend=classifier.cwt_backend,
-        )
+        # DISABLE_CWT_CACHE (2026-08-21): skip this hashing pass entirely --
+        # it exists only to save re-hashing on every batch for a cache that,
+        # here, isn't being used at all (see DISABLE_CWT_CACHE's own
+        # docstring, cwt_window_cache.py). window_keys=None below reproduces
+        # compute_cwt_real_imag_tensors_cached's original always-hash-inline
+        # signature, but that function itself skips hashing outright when
+        # cache=None (which _prepare_features passes whenever
+        # self.cwt_cache is this sentinel) -- so nothing gets hashed either way.
+        if classifier.cwt_cache is DISABLE_CWT_CACHE:
+            self._window_keys = None
+        else:
+            X_subset = self.classifier._apply_channel_subset(X_raw)
+            self._window_keys = precompute_window_cache_keys(
+                X_subset,
+                sampling_rate=classifier.sampling_rate,
+                highest=classifier.highest,
+                lowest=classifier.lowest,
+                nfreqs=classifier.nfreqs,
+                cwt_resample_n_time=classifier.cwt_resample_n_time,
+                cwt_backend=classifier.cwt_backend,
+            )
 
     def __getitem__(self, indices: Sequence[int]):
         idx = np.asarray(indices, dtype=np.int64)
         X_batch = self.X_raw[idx]
-        batch_keys = self._window_keys[idx]
+        batch_keys = None if self._window_keys is None else self._window_keys[idx]
         # fit=False: reuses self.X_mean_/self.X_std_ already fit ONCE on
         # the whole training set in fit() below -- must NOT refit per
         # batch, which would normalize each batch by its own, different,
