@@ -86,6 +86,16 @@ else
 fi
 echo "stop_after=$STOP_AFTER (hard cap, enforced by Runpod regardless of this script)"
 
+# set +e around this call: a --wait timeout (bad machine draw -- confirmed
+# happens, see runpod-usage's own gotchas.md) makes `runpodctl pod create`
+# exit non-zero, which under `set -e` would abort the script on this line
+# BEFORE POD_ID (below) is ever parsed -- orphaning a pod the trap can't
+# see (found 2026-08-21: a --wait-timeout left a pod running,
+# un-stoppable by this script, because POD_ID was still ""). The timeout
+# error JSON still carries the pod's id (`runpodctl pod create --help`'s
+# own --wait doc: "on timeout the pod is kept and the error carries its
+# id"), so parse it either way and only THEN decide whether to bail.
+set +e
 CREATE_JSON="$(runpodctl pod create \
   --name "$POD_NAME" \
   --image "$IMAGE" \
@@ -95,8 +105,22 @@ CREATE_JSON="$(runpodctl pod create \
   --container-disk-in-gb "$CONTAINER_DISK_GB" \
   --stop-after "$STOP_AFTER" \
   --wait --wait-timeout 10m)"
+CREATE_EXIT=$?
+set -e
 
-POD_ID="$(echo "$CREATE_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
+POD_ID="$(echo "$CREATE_JSON" | python3 -c 'import json,sys
+try:
+    print(json.load(sys.stdin).get("id",""))
+except Exception:
+    print("")' 2>/dev/null || true)"
+
+if [ "$CREATE_EXIT" -ne 0 ]; then
+  echo "ERROR: pod create/wait failed (exit $CREATE_EXIT): $CREATE_JSON" >&2
+  if [ -n "$POD_ID" ]; then
+    echo "Pod $POD_ID was created despite the failure (likely a bad machine draw) -- the trap above will stop it on exit, not orphan it." >&2
+  fi
+  exit 1
+fi
 echo "pod created: $POD_ID"
 
 echo "== Connecting =="
