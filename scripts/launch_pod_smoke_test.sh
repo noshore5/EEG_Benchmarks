@@ -2,14 +2,16 @@
 #
 # Bounded RunPod session for the Epilepsy pipelines: launch a pod from the
 # baked-dataset image -> verify it (Step 4 of tonight's plan) -> run the
-# existing --smoke fast-path (Step 6) -> report real output -> ALWAYS tear
-# the pod down, no matter how this script ends.
+# existing --smoke fast-path (Step 6) -> report real output -> ALWAYS stop
+# the pod (not delete -- 2026-08-21 request), no matter how this script ends.
 #
 # Deliberately does NOT run the full-scale eval -- that's a separate,
 # explicitly-approved follow-up (see this file's own final echo). This
 # script's whole point is to be the safety net Step 5 asked for: one bounded
-# pod lifecycle, cleaned up automatically, so nothing is left running and
-# billing idle even if something above errors out or the session drops.
+# pod lifecycle, with GPU billing always cut off automatically (via stop,
+# not delete) so nothing is left running and billing idle even if something
+# above errors out or the session drops. The pod itself -- and its disk --
+# survives; delete it manually when you're actually done with it.
 #
 # Usage: bash scripts/launch_pod_smoke_test.sh
 # Override any of the config vars below via env, e.g.:
@@ -35,19 +37,26 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EXPECTED_COMMIT="$(git -C "$REPO_ROOT" rev-parse HEAD)"
 
 # ---- Step 5 safety net, layer 1: local trap, fires on ANY exit ------------
-# (success, error, Ctrl-C/SIGINT, or SIGTERM). Best-effort: if the pod is
-# already gone (e.g. its own --terminate-after already fired) the delete
-# call just fails harmlessly.
+# (success, error, Ctrl-C/SIGINT, or SIGTERM). STOPS the pod, does not
+# delete it (2026-08-21, user request: keep the pod around -- inspectable,
+# resumable via `runpodctl pod start <id>` -- instead of destroying it
+# every run). Cost note: a stopped pod bills for its container disk (and
+# any network volume) but not GPU/vCPU compute -- not fully zero like a
+# deleted pod, so this trades a little idle disk cost for not having to
+# re-provision from scratch next time. Delete manually
+# (`runpodctl pod delete <id>`) once you're actually done with a pod.
+# Best-effort: if the pod is already gone (e.g. its own --stop-after
+# backstop already fired) the stop call just fails harmlessly.
 POD_ID=""
 cleanup() {
   local exit_code=$?
   if [ -n "$POD_ID" ]; then
-    echo "[cleanup] tearing down pod $POD_ID (script exit code $exit_code)..." >&2
-    if runpodctl pod delete "$POD_ID" >/dev/null 2>&1; then
-      echo "[cleanup] pod $POD_ID deleted." >&2
+    echo "[cleanup] stopping pod $POD_ID (script exit code $exit_code)..." >&2
+    if runpodctl pod stop "$POD_ID" >/dev/null 2>&1; then
+      echo "[cleanup] pod $POD_ID stopped (not deleted -- 'runpodctl pod start $POD_ID' resumes it, 'runpodctl pod delete $POD_ID' removes it for good)." >&2
     else
-      echo "[cleanup] WARNING: delete call failed -- check the console for pod $POD_ID," \
-           "or wait for its --terminate-after backstop." >&2
+      echo "[cleanup] WARNING: stop call failed -- check the console for pod $POD_ID," \
+           "or wait for its --stop-after backstop." >&2
     fi
   fi
   exit "$exit_code"
@@ -64,14 +73,18 @@ ssh_exec() {
 echo "== Step 3: launching pod (image=$IMAGE gpu=$GPU_ID min_cuda=$MIN_CUDA_VERSION) =="
 
 # ---- Step 5 safety net, layer 2: pod-side wall-clock cap -------------------
-# Enforced by Runpod itself (--terminate-after), independent of whether this
-# script or the orchestrating Claude Code session is even still running.
+# Enforced by Runpod itself (--stop-after, not --terminate-after -- 2026-08-21,
+# same "stop don't delete" request as the cleanup trap above), independent of
+# whether this script or the orchestrating Claude Code session is even still
+# running. Cost note: a stopped pod still bills for disk (--terminate-after
+# would fully zero that out by deleting the pod instead) -- accepted tradeoff
+# for keeping the pod around.
 if date -v+1H >/dev/null 2>&1; then
-  TERMINATE_AFTER="$(date -u -v+"${WALL_CLOCK_HOURS}"H '+%Y-%m-%dT%H:%M:%SZ')"   # BSD date (macOS)
+  STOP_AFTER="$(date -u -v+"${WALL_CLOCK_HOURS}"H '+%Y-%m-%dT%H:%M:%SZ')"   # BSD date (macOS)
 else
-  TERMINATE_AFTER="$(date -u -d "+${WALL_CLOCK_HOURS} hours" '+%Y-%m-%dT%H:%M:%SZ')"  # GNU date
+  STOP_AFTER="$(date -u -d "+${WALL_CLOCK_HOURS} hours" '+%Y-%m-%dT%H:%M:%SZ')"  # GNU date
 fi
-echo "terminate_after=$TERMINATE_AFTER (hard cap, enforced by Runpod regardless of this script)"
+echo "stop_after=$STOP_AFTER (hard cap, enforced by Runpod regardless of this script)"
 
 CREATE_JSON="$(runpodctl pod create \
   --name "$POD_NAME" \
@@ -80,7 +93,7 @@ CREATE_JSON="$(runpodctl pod create \
   --min-cuda-version "$MIN_CUDA_VERSION" \
   --ports "22/tcp" \
   --container-disk-in-gb "$CONTAINER_DISK_GB" \
-  --terminate-after "$TERMINATE_AFTER" \
+  --stop-after "$STOP_AFTER" \
   --wait --wait-timeout 10m)"
 
 POD_ID="$(echo "$CREATE_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
@@ -112,7 +125,7 @@ except Exception:
 done
 if [ -z "$SSH_HOST" ] || ! ssh_exec "echo ok" >/dev/null 2>&1; then
   echo "ERROR: pod never became SSH-reachable within ${SSH_TIMEOUT_S}s -- likely a bad-machine draw." >&2
-  echo "Not retrying automatically; the trap above will delete pod $POD_ID on exit." >&2
+  echo "Not retrying automatically; the trap above will stop pod $POD_ID on exit." >&2
   exit 1
 fi
 
@@ -159,5 +172,5 @@ else
   echo "== Smoke test FAILED (exit $SMOKE_EXIT). See output above. =="
 fi
 
-# trap fires here regardless of $SMOKE_EXIT -- pod is deleted either way.
+# trap fires here regardless of $SMOKE_EXIT -- pod is stopped either way.
 exit "$SMOKE_EXIT"
