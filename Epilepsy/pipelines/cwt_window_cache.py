@@ -105,12 +105,12 @@ class DiskCWTCache:
         self._cache_dir.mkdir(parents=True, exist_ok=True)
         final_path = self._cache_dir / f"{key}.npz"
         tmp_path = self._cache_dir / f".{key}.{os.getpid()}.tmp.npz"
-        # Compressed (2026-08-16): measured ~54% smaller on the matching
-        # dense-edge cache's tensors (see dense_edge_cache.py's save_dense_edge);
-        # CWT coefficients are less sparse (no COI-zeroing at this stage) so
-        # the ratio here is expected to be worse, but any reduction helps the
-        # same disk budget both caches share.
-        np.savez_compressed(tmp_path, real=real, imag=imag)
+        # Uncompressed (2026-08-20): same tradeoff as dense_edge_cache.py's
+        # save_dense_edge -- np.savez_compressed's DEFLATE pass dominated
+        # write time for a modest size win, so this switched to plain
+        # np.savez. np.load reads both formats transparently, so any
+        # existing compressed cache entries on disk still hit fine.
+        np.savez(tmp_path, real=real, imag=imag)
         os.replace(tmp_path, final_path)
 
     def __len__(self) -> int:

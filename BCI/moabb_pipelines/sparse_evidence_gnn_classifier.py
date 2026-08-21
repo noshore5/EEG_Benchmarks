@@ -316,7 +316,7 @@ def save_surrogate_null_cache(
         save_kwargs["cluster_null"] = cluster_null
         save_kwargs["cluster_null_phase_threshold_deg"] = float(cluster_null_phase_threshold_deg)
         save_kwargs["cluster_null_forming_percentile"] = float(cluster_null_forming_percentile)
-    np.savez_compressed(tmp_path, **save_kwargs)
+    np.savez(tmp_path, **save_kwargs)
     os.replace(tmp_path, final_path)
 
 

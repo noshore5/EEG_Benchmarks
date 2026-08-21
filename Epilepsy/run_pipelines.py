@@ -953,7 +953,7 @@ def _build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--label-mode",
         choices=["detection", "prediction"],
-        default="detection",
+        default="prediction",
         help=(
             "'detection': binary ictal/interictal (original behavior). "
             "'prediction': SPH/SOP-style preictal/interictal, a harder and "

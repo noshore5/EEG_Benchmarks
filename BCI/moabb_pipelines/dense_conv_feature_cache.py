@@ -160,7 +160,7 @@ def save_dense_conv_feature_cache(
     cache_dir.mkdir(parents=True, exist_ok=True)
     final_path = cache_dir / f"{key}.npz"
     tmp_path = cache_dir / f".{key}.{os.getpid()}.tmp.npz"
-    np.savez_compressed(
+    np.savez(
         tmp_path,
         features=np.ascontiguousarray(features, dtype=np.float32),
         trial_hashes=np.asarray(trial_hashes, dtype="<U64"),
