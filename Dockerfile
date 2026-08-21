@@ -22,7 +22,54 @@
 # specifically, not a multi-hundred-MB download.
 FROM runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404
 
+# RUN steps below use bash-only syntax (set -euo pipefail); Docker's
+# default /bin/sh -c doesn't support pipefail.
+SHELL ["/bin/bash", "-c"]
+
 WORKDIR /workspace
+
+# 2026-08-21: CHB-MIT subject chb01 (~1.6GB), baked into the image --
+# matches DEFAULT_SUBJECTS = [1] in Epilepsy/run_pipelines.py, the only
+# subject actually exercised by default. Placed as the very first layer
+# (before requirements.txt, which changes far more often) so it's never
+# invalidated by a dependency bump, and before any code sync so a
+# code-only pod launch never needs to touch the network for data.
+#
+# Downloaded from the same public, no-auth S3 mirror
+# datasets/epilepsy/chb_mit.py itself uses (BASE_URL) -- PhysioNet's own
+# HTTPS server throttles to ~180KB/s/connection; this mirror doesn't (see
+# that module's own comment). File list is read from chb01's own
+# -summary.txt (same "File Name: <name>" regex chb_mit.py's parse_summary
+# uses) rather than hardcoded, so it can't drift from what the pipeline
+# actually expects to find.
+#
+# Lands at /root/mne_data/MNE-chbmit-data/chbmit/1.0.0/chb01/, MNE's
+# get_dataset_path("CHBMIT", ...) convention for this dataset (verified
+# against the author's own local cache) -- MNE_DATA is set explicitly
+# below so this doesn't depend on HOME resolving to /root.
+#
+# CHB-MIT is distributed under ODC-By 1.0 (Open Data Commons Attribution
+# License), which requires attribution on redistribution -- see
+# THIRD_PARTY_NOTICES.md, baked into the image alongside the data, and
+# README.md.
+ENV MNE_DATA=/root/mne_data
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends curl ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+COPY THIRD_PARTY_NOTICES.md /workspace/THIRD_PARTY_NOTICES.md
+RUN set -euo pipefail; \
+    BASE_URL="https://physionet-open.s3.amazonaws.com/chbmit/1.0.0/chb01"; \
+    DEST="/root/mne_data/MNE-chbmit-data/chbmit/1.0.0/chb01"; \
+    mkdir -p "$DEST"; \
+    curl -fSL --retry 5 --retry-delay 2 -o "$DEST/chb01-summary.txt" \
+        "$BASE_URL/chb01-summary.txt"; \
+    grep -oP 'File Name:\s*\K\S+' "$DEST/chb01-summary.txt" | while read -r fname; do \
+        echo "Downloading $fname"; \
+        curl -fSL --retry 5 --retry-delay 2 -o "$DEST/$fname" "$BASE_URL/$fname"; \
+    done; \
+    n_edf=$(find "$DEST" -name '*.edf' | wc -l); \
+    echo "Downloaded $n_edf .edf files for chb01"; \
+    [ "$n_edf" -ge 40 ]
 
 # 2026-08-20: no apt build-toolchain step here anymore. It used to install
 # cmake/build-essential/libfftw3-dev so pip could compile fcwt from source

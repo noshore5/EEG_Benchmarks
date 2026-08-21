@@ -8,17 +8,24 @@ install -r requirements.txt`, no apt build toolchain needed anymore -- see
 "fcwt" below) on top of `runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404`
 (confirmed 2026-08-20 against a live RTX 4090 pod: driver 570.133.20, CUDA
 12.8, `torch==2.8.0+cu128` with `torch.cuda.is_available() == True`). It
-deliberately does **not** bake in the repo's pipeline code or any dataset --
-code is synced to the pod at launch (rsync/git clone), and CHB-MIT data lives
-on a RunPod Network Volume / downloads on first pipeline run, never in the
-image.
+deliberately does **not** bake in the repo's pipeline code -- code is synced
+to the pod at launch (rsync/git clone) since it changes on nearly every
+commit. As of 2026-08-21 the image **does** bake in CHB-MIT subject `chb01`
+(~1.6GB, downloaded from the same public S3 mirror
+`datasets/epilepsy/chb_mit.py` uses), landing at
+`/root/mne_data/MNE-chbmit-data/chbmit/1.0.0/chb01/` -- the only subject
+`Epilepsy/run_pipelines.py`'s `DEFAULT_SUBJECTS` exercises by default, so a
+fresh pod never needs a first-run download for the common case. Other
+subjects still download on demand the same way they always have. CHB-MIT is
+distributed under ODC-By 1.0 (attribution-required) -- see
+`THIRD_PARTY_NOTICES.md`, baked into the image alongside the data.
 
 **Building it:** RunPod pods can't run a Docker daemon themselves (they're
 unprivileged containers, no `cap_sys_admin`), so the image is built by GitHub
 Actions (`.github/workflows/build-pod-image.yml`) on a real Docker daemon and
 pushed to GHCR (`ghcr.io/noshore5/eeg_benchmarks`). Triggers automatically on
-any push to `torch-native-cwt` that touches `Dockerfile` or
-`requirements.txt` (repo code isn't baked into the image, so code-only
+any push to `main` that touches `Dockerfile`, `requirements.txt`, or
+`THIRD_PARTY_NOTICES.md` (repo code isn't baked into the image, so code-only
 commits don't need a rebuild), or manually via `workflow_dispatch`. Tagged
 with date + short commit hash (e.g. `20260820-831695a`) plus a floating
 `latest`.

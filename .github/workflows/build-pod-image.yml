@@ -18,10 +18,11 @@ name: Build and push RunPod pod image
 # other reason.
 on:
   push:
-    branches: [torch-native-cwt]
+    branches: [main]
     paths:
       - "Dockerfile"
       - "requirements.txt"
+      - "THIRD_PARTY_NOTICES.md"
       - ".github/workflows/build-pod-image.yml"
   workflow_dispatch: {}
 
