@@ -86,6 +86,8 @@ from Epilepsy.pipelines.cwt_gnn_classifiers import (
     SparseEvidenceGNNClassifier,
     StreamingSparseEvidenceGNNClassifier,
 )
+from Epilepsy.pipelines.cwt_window_cache import DISABLE_CWT_CACHE, DiskCWTCache, default_cwt_cache_root
+from Epilepsy.pipelines.dense_edge_cache import default_dense_edge_cache_root
 from Epilepsy.pipelines.truong_stft_cnn_classifier import TruongSTFTCNNClassifier, k_of_n_alarm
 
 
@@ -176,7 +178,7 @@ _SHARED_ARCH_PARAMS: dict[str, object] = dict(
 # measured, see the 2026-08-16 session notes).
 DENSE_EDGE_GRU_PARAMS: dict[str, object] = dict(
     _SHARED_ARCH_PARAMS,
-    batch_size=32,
+    batch_size=736,
     learning_rate=2e-3,
 )
 
@@ -406,6 +408,7 @@ def leave_one_seizure_out_detection(
     metadata: pd.DataFrame,
     clf_params: dict,
     epochs: int,
+    disable_disk_cache: bool = False,
 ) -> pd.DataFrame:
     """Leave-one-seizure-out CV for label_mode="detection": hold out one
     recording's windows at a time.
@@ -415,14 +418,29 @@ def leave_one_seizure_out_detection(
     seizure's worth of ictal windows plus that recording's interictal
     windows. Trains on every other recording, tests on the held-out one.
 
-    No CWT or dense-edge caching (2026-08-21, explicit user decision --
-    see cwt_window_cache.py's module docstring): both stages are fast,
-    GPU-batched torch ops now, so every fold just recomputes them fresh
-    for whatever windows it sees. No disk I/O, no hashing, nothing shared
-    across folds.
+    Folds share a single dense-edge-input cache (see dense_edge_cache.py):
+    each fold excludes only one recording, so most windows appear in most
+    folds' training sets -- without sharing, every fold would recompute the
+    same coherence/phase dense-edge stack (coherence_threshold_mode="fixed")
+    for the same physical windows from scratch. Disk-backed (default root:
+    <mne_data>/dense_edge_cache) so it also persists across separate
+    invocations of this script, not just across folds within one run.
+
+    2026-08-22: both caches restored and enabled unconditionally (including
+    cwt_backend="torch", unlike the pre-2026-08-21 wiring, which disabled
+    CWT caching specifically for the torch backend via DISABLE_CWT_CACHE --
+    see cwt_window_cache.py's module docstring). This is a deliberate
+    re-test on a different machine (this session's Windows/WDDM CUDA box)
+    than the Linux/Runpod pod the 2026-08-21 removal was measured on; not
+    yet re-validated as a net win here. If this ever runs again on a
+    machine/config where recompute wins (e.g. a fast Linux GPU pod), revert
+    to not passing cwt_cache/dense_edge_cache_dir here rather than assuming
+    this default still holds.
     """
     groups = list(zip(metadata["subject"], metadata["run"]))
     unique_groups = sorted(set(groups), key=lambda g: (g[0], g[1]))
+    shared_cwt_cache = DISABLE_CWT_CACHE if disable_disk_cache else DiskCWTCache(default_cwt_cache_root())
+    shared_dense_edge_cache_dir = None if disable_disk_cache else default_dense_edge_cache_root()
 
     rows = []
     for group in unique_groups:
@@ -437,6 +455,8 @@ def leave_one_seizure_out_detection(
 
         clf = SparseEvidenceGNNClassifier(
             epochs=epochs,
+            cwt_cache=shared_cwt_cache,
+            dense_edge_cache_dir=shared_dense_edge_cache_dir,
             **clf_params,
         )
         clf.fit(X_train, y_train)
@@ -476,6 +496,10 @@ def leave_one_seizure_out_detection(
             f"f1={row['f1']:.3f} auc_pr={row['average_precision']:.3f}"
         )
 
+    if shared_cwt_cache is DISABLE_CWT_CACHE:
+        print("  CWT cache: disabled (--disable-disk-cache)")
+    else:
+        print(f"  CWT cache: {len(shared_cwt_cache)} unique (window, channel) transforms on disk")
     return pd.DataFrame(rows)
 
 
@@ -488,6 +512,7 @@ def leave_one_seizure_out_prediction(
     window_length: float,
     negative_to_positive_ratio: float | None = None,
     subsample_seed: int = 42,
+    disable_disk_cache: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Leave-one-seizure-out CV for label_mode="prediction".
 
@@ -558,8 +583,10 @@ def leave_one_seizure_out_prediction(
             "leave-one-seizure-out over."
         )
 
-    # No CWT or dense-edge caching -- see leave_one_seizure_out_detection's
-    # docstring.
+    # CWT/dense-edge caching -- see leave_one_seizure_out_detection's
+    # docstring for the full rationale and the 2026-08-22 restoration note.
+    shared_cwt_cache = DISABLE_CWT_CACHE if disable_disk_cache else DiskCWTCache(default_cwt_cache_root())
+    shared_dense_edge_cache_dir = None if disable_disk_cache else default_dense_edge_cache_root()
 
     subject_arr = metadata["subject"].to_numpy()
     run_arr = metadata["run"].to_numpy()
@@ -633,6 +660,8 @@ def leave_one_seizure_out_prediction(
         # StreamingSparseEvidenceGNNClassifier for the full rationale).
         clf = StreamingSparseEvidenceGNNClassifier(
             epochs=epochs,
+            cwt_cache=shared_cwt_cache,
+            dense_edge_cache_dir=shared_dense_edge_cache_dir,
             **clf_params,
         )
         clf.fit(X_train, y_train)
@@ -737,6 +766,10 @@ def leave_one_seizure_out_prediction(
             gaps.append(float((same_run["seizure_onset_s"] - r["seizure_onset_s"]).abs().min()))
     per_seizure_df["gap_to_nearest_seizure_same_recording_s"] = gaps
 
+    if shared_cwt_cache is DISABLE_CWT_CACHE:
+        print("  CWT cache: disabled (--disable-disk-cache)")
+    else:
+        print(f"  CWT cache: {len(shared_cwt_cache)} unique (window, channel) transforms on disk")
     return pd.DataFrame(fold_rows), per_seizure_df
 
 
@@ -1054,6 +1087,54 @@ def _build_argument_parser() -> argparse.ArgumentParser:
             "pod. Pure throughput/memory tradeoff, does not change model output."
         ),
     )
+    parser.add_argument(
+        "--compile-dense-edge-helper",
+        action="store_true",
+        help=(
+            "--pipeline=dense_edge_gru only: torch.compile(backend='cudagraphs') the "
+            "dense-edge helper's compute_dense_edge_input -- see that constructor param's "
+            "2026-08-22 docstring in cwt_gnn_classifiers.py. CUDA only; no-op elsewhere. "
+            "Measured 2026-08-22: no net win on a Windows/no-Triton box."
+        ),
+    )
+    parser.add_argument(
+        "--dense-edge-amp-bf16",
+        action="store_true",
+        help=(
+            "--pipeline=dense_edge_gru only: torch.autocast(dtype=torch.bfloat16) around "
+            "the non-trainable dense-edge helper's compute_dense_edge_input call -- see "
+            "that constructor param's 2026-08-22 docstring in cwt_gnn_classifiers.py. "
+            "CUDA only; no-op elsewhere."
+        ),
+    )
+    parser.add_argument(
+        "--verbose", type=int, default=None,
+        help=(
+            "Override clf_params['verbose'] (baked in at 1). 2 turns on "
+            "SparseEvidenceGNNClassifier._precompute_dense_edge_inputs's per-chunk "
+            "phase-timing breakdown (threshold/transfer/compute/copy_back, synced "
+            "so CUDA/MPS numbers are real -- see that method's 2026-08-22 comment) "
+            "-- use this to see where a slow --pipeline=dense_edge_gru run's time "
+            "actually goes before changing --precompute-chunk-size/--device blind. "
+            "Unset: leaves clf_params's own default untouched."
+        ),
+    )
+    parser.add_argument(
+        "--disable-disk-cache",
+        action="store_true",
+        help=(
+            "--pipeline=dense_edge_gru only: skip the disk-backed CWT/dense-edge "
+            "cache (restored 2026-08-22, on by default in leave_one_seizure_out_"
+            "detection/leave_one_seizure_out_prediction -- see cwt_window_cache.py's "
+            "module docstring). Use this on a machine/config where recompute "
+            "measured faster (e.g. the Linux/Runpod pod the 2026-08-21 removal was "
+            "validated on) instead of assuming this session's re-enable still holds "
+            "there. No effect on --label-mode=prediction when the real config's "
+            "keep_on_device path is active (StreamingSparseEvidenceGNNClassifier "
+            "with cwt_backend='torch'/device='cuda' -- the common case), since that "
+            "path bypasses caching entirely regardless of this flag."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--shuffle-labels",
@@ -1193,6 +1274,8 @@ def main(args: argparse.Namespace) -> None:
         clf_params = dict(TRUONG_STFT_CNN_PARAMS)
         clf_params["seed"] = args.seed
         clf_params["device"] = args.device
+        if args.verbose is not None:
+            clf_params["verbose"] = args.verbose
 
         print(f"Running leave-one-seizure-out (Truong STFT+CNN, epochs={epochs}, sph={args.sph}s, sop={args.sop}s)...")
         results, per_seizure = leave_one_seizure_out_truong(
@@ -1230,12 +1313,17 @@ def main(args: argparse.Namespace) -> None:
         clf_params["seed"] = args.seed
         clf_params["device"] = args.device
         clf_params["precompute_chunk_size"] = args.precompute_chunk_size
+        clf_params["compile_dense_edge_helper"] = args.compile_dense_edge_helper
+        clf_params["dense_edge_amp_bf16"] = args.dense_edge_amp_bf16
+        if args.verbose is not None:
+            clf_params["verbose"] = args.verbose
 
         print(f"Running leave-one-seizure-out prediction (epochs={epochs}, "
               f"sph={args.sph}s, sop={args.sop}s)...")
         results, per_seizure = leave_one_seizure_out_prediction(
             X, y, metadata, clf_params, epochs, window_length,
             negative_to_positive_ratio=negative_to_positive_ratio,
+            disable_disk_cache=args.disable_disk_cache,
         )
 
         # Separate output path (task 6, bullet 1): never pooled with
@@ -1269,9 +1357,16 @@ def main(args: argparse.Namespace) -> None:
         clf_params["seed"] = args.seed
         clf_params["device"] = args.device
         clf_params["precompute_chunk_size"] = args.precompute_chunk_size
+        clf_params["compile_dense_edge_helper"] = args.compile_dense_edge_helper
+        clf_params["dense_edge_amp_bf16"] = args.dense_edge_amp_bf16
+        if args.verbose is not None:
+            clf_params["verbose"] = args.verbose
 
         print(f"Running leave-one-seizure-out detection (epochs={epochs})...")
-        results = leave_one_seizure_out_detection(X, y, metadata, clf_params, epochs)
+        results = leave_one_seizure_out_detection(
+            X, y, metadata, clf_params, epochs,
+            disable_disk_cache=args.disable_disk_cache,
+        )
 
         # --shuffle-labels: same separate-subdirectory reasoning as the
         # prediction branch above -- a null-control run must never land in

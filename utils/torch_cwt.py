@@ -303,7 +303,8 @@ def transform_batch(
     nfreqs: int = 100,
     *,
     device: str | torch.device | None = None,
-) -> tuple[np.ndarray, np.ndarray]:
+    return_tensor: bool = False,
+) -> tuple[np.ndarray, np.ndarray] | tuple[torch.Tensor, torch.Tensor]:
     """Batched sibling of `transform`. Same params, except `signals` is
     2-D, [n_signals, T] -- independent 1-D windows/channels stacked along a
     new leading axis (e.g. every cache-miss (sample, channel) pair from one
@@ -326,6 +327,15 @@ def transform_batch(
     nfreqs are shared config, not per-signal), matching what those call
     sites already assume (they only ever read freqs from an [0, 0]-index
     probe call).
+
+    `return_tensor=True` (2026-08-22) skips the unconditional `.cpu().numpy()`
+    below and returns the still-`device`-resident torch tensors instead --
+    for cwt_window_cache.py's device-resident precompute path
+    (StreamingSparseEvidenceGNNClassifier only; see that module's
+    `keep_on_device` docstring), which needs the whole CWT->dense-edge->
+    train chain to stay on one device instead of bouncing to host and back
+    between every stage. Default False preserves the original numpy-out
+    contract for every other caller unchanged.
     """
     signals = np.asarray(signals)
     if signals.ndim != 2:
@@ -336,6 +346,9 @@ def transform_batch(
         x = x.to(device)
 
     coeffs_t, freqs_t = cwt_torch(x, sampling_rate=frame_rate, f0=lowest, f1=highest, fn=nfreqs)
+
+    if return_tensor:
+        return coeffs_t, freqs_t
 
     coeffs = coeffs_t.detach().cpu().numpy().astype(np.complex64)
     freqs = freqs_t.detach().cpu().numpy().astype(np.float32)

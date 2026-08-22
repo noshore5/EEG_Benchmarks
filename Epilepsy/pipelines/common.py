@@ -442,13 +442,41 @@ def _batch_meets_min_size(batch, min_batch_size: int) -> bool:
     return _batch_sample_count(batch) >= int(min_batch_size)
 
 
+def _divmod_batch_count(total: int, batch_size: int, min_batch_size: int) -> int:
+    full_batches, remainder = divmod(int(total), int(batch_size))
+    return full_batches + (1 if remainder >= int(min_batch_size) else 0)
+
+
 def _count_eligible_tensor_batches(loader: DataLoader, min_batch_size: int) -> int:
     dataset_size = len(loader.dataset)
     batch_size = loader.batch_size
     if batch_size is None:
+        # batch_size=None means a custom sampler decides batch composition
+        # (see _BatchIndexSampler / StreamingSparseEvidenceGNNClassifier's
+        # lazy per-batch DataLoader) -- it does NOT mean "there's no way to
+        # know the batch count without iterating." When that sampler
+        # exposes the same (n, batch_size) shape info the branch below
+        # already uses to compute this cheaply (duck-typed on two int
+        # attributes, not an isinstance check, so any sampler shaped like
+        # _BatchIndexSampler qualifies), reuse that arithmetic instead of
+        # materializing every batch's features just to count them.
+        #
+        # 2026-08-22: this used to unconditionally `sum(1 for batch in
+        # loader ...)`, which for the lazy dataset meant computing
+        # CWT+dense-edge for the ENTIRE training set once before epoch 1
+        # even started -- doubling that classifier's real per-fit cost end
+        # to end, and (with _keep_features_on_device's GPU-resident
+        # batches no longer freed via an intermediate .cpu() between
+        # DataLoader iterations) capable of exhausting VRAM outright on
+        # this pass alone at a large precompute_chunk_size -- see the
+        # 2026-08-22 session notes.
+        sampler = getattr(loader, "sampler", None)
+        sampler_n = getattr(sampler, "n", None)
+        sampler_batch_size = getattr(sampler, "batch_size", None)
+        if isinstance(sampler_n, int) and isinstance(sampler_batch_size, int):
+            return _divmod_batch_count(sampler_n, sampler_batch_size, min_batch_size)
         return sum(1 for batch in loader if _batch_meets_min_size(batch, min_batch_size))
-    full_batches, remainder = divmod(int(dataset_size), int(batch_size))
-    return full_batches + (1 if remainder >= int(min_batch_size) else 0)
+    return _divmod_batch_count(dataset_size, batch_size, min_batch_size)
 
 
 def _optimizer_parameters(optimizer) -> list[nn.Parameter]:

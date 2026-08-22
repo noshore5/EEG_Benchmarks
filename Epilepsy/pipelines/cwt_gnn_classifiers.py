@@ -29,11 +29,13 @@ null-cache section it introduces, so nothing written there is lost.
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import hashlib
 import math
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Callable, Literal, Sequence
 
@@ -69,7 +71,16 @@ try:
         validation_groups_from_metadata,
     )
     from Epilepsy.pipelines.common import _count_eligible_tensor_batches, _min_accepted_batch_size
-    from Epilepsy.pipelines.cwt_window_cache import compute_cwt_real_imag_tensors_cached
+    from Epilepsy.pipelines.cwt_window_cache import (
+        DISABLE_CWT_CACHE,
+        compute_cwt_real_imag_tensors_cached,
+        precompute_window_cache_keys,
+    )
+    from Epilepsy.pipelines.dense_edge_cache import (
+        dense_edge_cache_key,
+        load_dense_edge,
+        save_dense_edge,
+    )
 except ModuleNotFoundError:
     from pipelines.common import (
         TorchEEGClassifier,
@@ -96,7 +107,16 @@ except ModuleNotFoundError:
         validation_groups_from_metadata,
     )
     from pipelines.common import _count_eligible_tensor_batches, _min_accepted_batch_size
-    from pipelines.cwt_window_cache import compute_cwt_real_imag_tensors_cached
+    from pipelines.cwt_window_cache import (
+        DISABLE_CWT_CACHE,
+        compute_cwt_real_imag_tensors_cached,
+        precompute_window_cache_keys,
+    )
+    from pipelines.dense_edge_cache import (
+        dense_edge_cache_key,
+        load_dense_edge,
+        save_dense_edge,
+    )
 
 
 # ============================================================================
@@ -332,6 +352,14 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
     _estimator_type = "classifier"
     model_label = "CWT-GNN"
 
+    # 2026-08-22: when True, _prepare_features keeps CWT (and, via
+    # SparseEvidenceGNNClassifier._precompute_dense_edge_inputs, dense-edge)
+    # output resident on self.device_ instead of the CPU numpy round trip
+    # every other subclass uses -- see StreamingSparseEvidenceGNNClassifier's
+    # override docstring for why only it sets this. False here so every
+    # eager (whole-training-set-at-once) subclass is completely unaffected.
+    _keep_features_on_device = False
+
     def _init_cwt_gnn_classifier(
         self,
         *,
@@ -373,6 +401,15 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
         # inverse-class-frequency weighting; this just stops discarding it.
         # Default True since that's this fork's whole reason to exist.
         use_class_weights: bool = True,
+        # Epilepsy fork only -- see cwt_window_cache.py's docstring. A plain
+        # dict the caller owns; pass the SAME dict into multiple classifier
+        # instances (e.g. one per leave-one-seizure-out fold) to reuse CWT
+        # work for windows they share instead of recomputing per fold.
+        # None (default) gives this instance its own private cache, i.e. no
+        # behavior change from before this existed. Pass the
+        # DISABLE_CWT_CACHE sentinel (cwt_window_cache.py) to skip CWT
+        # caching entirely.
+        cwt_cache: dict | None = None,
         # Step 6 (torch-native-cwt branch): selects which CWT implementation
         # self.transform_/self.batch_transform_ resolve to in
         # _prepare_features. "fcwt" (default) is the original FFTW/fcwt.cwt()
@@ -393,6 +430,7 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
         torch_cwt_batch_size: int = 256,
         verbose: int = 0,
     ) -> None:
+        self.cwt_cache = cwt_cache if cwt_cache is not None else {}
         self.sampling_rate = sampling_rate
         self.lowest = lowest
         self.highest = highest
@@ -502,7 +540,7 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
         self.transform_ = functools.partial(torch_cwt.transform, device=device)
         self.batch_transform_ = functools.partial(torch_cwt.transform_batch, device=device)
 
-    def _prepare_features(self, X: np.ndarray, *, fit: bool, train_idx=None):
+    def _prepare_features(self, X: np.ndarray, *, fit: bool, train_idx=None, window_keys=None):
         # NEW: slice channels first, before normalization/CWT/anything else
         # touches X, so every downstream step (z-score stats, CWT tensors,
         # noise bank, n_channels inference) only ever sees the subset.
@@ -522,11 +560,32 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
 
         if self.transform_ is None:
             self._resolve_transform_fns()
-        # Epilepsy fork only: X here is still RAW (pre-normalization); the
-        # mean/std rescale is applied on the way out instead (see
-        # cwt_window_cache.py's docstring for why that's exact, not
-        # approximate). No caching -- every call recomputes (2026-08-21,
-        # explicit user decision -- see that module's docstring).
+        # Epilepsy fork only: cached in place of compute_cwt_real_imag_tensors
+        # -- X here is still RAW (pre-normalization); the cache applies the
+        # mean/std rescale on retrieval instead (see cwt_window_cache.py's
+        # docstring for why that's exact, not approximate). This is what
+        # lets separate CV folds -- each a new classifier instance, each
+        # with its own fold-specific mean/std -- reuse CWT work for windows
+        # they have in common instead of recomputing the wavelet transform
+        # from scratch every fold. self.cwt_cache is a private per-instance
+        # {} by default (no cross-instance reuse unless a caller shares one
+        # dict across fold instances -- see _init_cwt_gnn_classifier's
+        # cwt_cache param); DISABLE_CWT_CACHE -> real None below.
+        #
+        # keep_on_device (2026-08-22): only StreamingSparseEvidenceGNNClassifier
+        # sets _keep_features_on_device, and even there only actually takes
+        # effect when the torch backend is active (batch_transform_ is None
+        # under cwt_backend="fcwt") and cwt_resample_n_time is unset (the
+        # real pipeline's own default) -- both required by
+        # _compute_cwt_real_imag_tensors_device_resident, see its docstring.
+        # Falls back to the always-correct CPU-numpy path otherwise, same as
+        # before this existed.
+        keep_on_device = (
+            bool(self._keep_features_on_device)
+            and self.batch_transform_ is not None
+            and self.cwt_resample_n_time is None
+            and getattr(self, "device_", None) is not None
+        )
         features = compute_cwt_real_imag_tensors_cached(
             X,
             mean=mean,
@@ -538,8 +597,20 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
             cwt_resample_n_time=self.cwt_resample_n_time,
             transform_fn=self.transform_,
             verbose=self.verbose,
+            # DISABLE_CWT_CACHE -> real None: the sentinel is an identity
+            # marker at this class's level (distinguishing "disabled" from
+            # the constructor's own cwt_cache=None default, which means
+            # "private per-instance dict"); compute_cwt_real_imag_tensors_cached
+            # (cwt_window_cache.py) is what actually treats None specially.
+            # Not passed at all on the keep_on_device path -- that path
+            # never touches the cache (see cwt_window_cache.py's docstring).
+            cache=None if keep_on_device else (None if self.cwt_cache is DISABLE_CWT_CACHE else self.cwt_cache),
+            window_keys=None if keep_on_device else window_keys,
             batch_transform_fn=self.batch_transform_,
             batch_size=self.torch_cwt_batch_size,
+            cwt_backend=self.cwt_backend,
+            keep_on_device=keep_on_device,
+            device=self.device_ if keep_on_device else None,
         )
         if fit:
             X_normalized = apply_global_zscore(X, mean, std) if self.normalize_input else X
@@ -1081,6 +1152,23 @@ class XWTPhaseGNNV2Classifier(_BaseCWTGNNClassifier):
 # docstring, preserved verbatim as a comment (see this file's own module
 # docstring above for why):
 #
+# 2026-08-22 correction (Epilepsy fork): the verbatim BCI/moabb_pipelines text
+# below repeatedly says "36 canonical edges" (and "9-channel subset") as if
+# that were a fixed constant of this code. It never was -- edge count is
+# always C(n_channels, 2) (upper_pair_indices/_ordered_pair_indices), and 36
+# was only ever true for the MOTOR-IMAGERY paradigm's specific 9-channel
+# montage this file was ported from. This Epilepsy fork's actual default
+# (channel_subset=None over CHB-MIT's 23-channel montage) gives
+# C(23, 2) = 253 edges -- confirmed directly against a real run's own printed
+# config ("n_channels=23 edges=253 nfreqs=8 ..."), not 36. Several of the same
+# comments also assume nfreqs=16, halved to nfreqs=8 for this fork on
+# 2026-08-16 (see run_pipelines.py's _SHARED_ARCH_PARAMS). Take any concrete
+# cell-count/memory-size arithmetic in the historical text below as
+# illustrating the METHOD (how to reason about scaling), not this fork's
+# actual current numbers -- it was wrong once already (an earlier session
+# reading this file cited "36 edges" as fact instead of checking the live
+# config, and had to be corrected).
+#
 # Sparse/event-based WCT evidence GNN classifier.
 #
 # Instead of pooling coherence into fixed time windows (as WCTEvidenceGNN
@@ -1456,6 +1544,24 @@ def resolve_best_available_device(device: str) -> torch.device:
     if torch.backends.mps.is_available() and torch.backends.mps.is_built():
         return torch.device("mps")
     return torch.device("cpu")
+
+
+def _sync_device(device: torch.device) -> None:
+    """Blocks until all queued work on `device` has actually finished.
+
+    Needed anywhere a `time.perf_counter()` window is meant to measure real
+    GPU work: CUDA/MPS kernel launches return to Python immediately (the
+    work is only queued), so an un-synced timer mostly measures launch
+    overhead and silently attributes the real compute time to whatever
+    later call happens to block (e.g. a `.cpu()` or `.item()`) -- see
+    _precompute_dense_edge_inputs's phase-timing block, added specifically
+    to stop guessing at where that stage's CUDA time goes (2026-08-22,
+    following up on the unresolved profiling question in the 2026-08-21
+    session notes)."""
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    elif device.type == "mps":
+        torch.mps.synchronize()
 
 
 def _interp_percentile_grid(
@@ -2708,6 +2814,26 @@ class SparseEvidenceGNNCore(nn.Module):
 
         out_time, out_freq = smoothed.shape[-2:]
         smoothed = smoothed.view(batch_size, num_edges, 4, out_time, out_freq)
+        # 2026-08-22: torch.complex() only accepts Half/Float/Double --
+        # confirmed directly (RuntimeError) that it rejects BFloat16. This
+        # is the actual blocker for dense_edge_amp_bf16 (see that
+        # constructor param's docstring): wrapping compute_dense_edge_input
+        # in torch.autocast(dtype=torch.bfloat16) casts this method's
+        # conv2d output (`smoothed`) to bf16, and the very next line then
+        # crashes here (this is the scale_adaptive_smoothing=False path --
+        # the default and this pipeline's actual config; see
+        # _smooth_wct_maps_scale_adaptive below for the same issue on the
+        # scale_adaptive_smoothing=True path). A future attempt at bf16
+        # for this stage would need to force `smoothed` (or at minimum
+        # smoothed[:, :, 0:2], the two slices feeding torch.complex) back
+        # to float32 right at this boundary -- e.g.
+        # `smoothed[:, :, :2].float()` -- before constructing smooth_cross,
+        # then decide separately whether smooth_auto1/smooth_auto2 and the
+        # coh division below stay bf16 or also get upcast. Not attempted
+        # yet: real surgery inside this method, a bigger change than the
+        # flag-gated call-site wrapping every other 2026-08-22 optimization
+        # used (re-verify numerically against fp32 output before trusting
+        # it, same as this flag's own verification did).
         smooth_cross = torch.complex(smoothed[:, :, 0], smoothed[:, :, 1])
         smooth_auto1 = smoothed[:, :, 2]
         smooth_auto2 = smoothed[:, :, 3]
@@ -2853,6 +2979,13 @@ class SparseEvidenceGNNCore(nn.Module):
 
         out_time, out_freq = smoothed.shape[-2:]
         smoothed = smoothed.view(batch_size, num_edges, 4, out_time, out_freq)
+        # 2026-08-22: same torch.complex()-rejects-BFloat16 blocker as
+        # _smooth_wct_maps's identical line (see that method's comment for
+        # the full explanation and what a fix would need) -- this is the
+        # scale_adaptive_smoothing=True path, not this pipeline's actual
+        # config (scale_adaptive_smoothing=False), but dense_edge_amp_bf16
+        # would hit the same crash here if that option were ever combined
+        # with bf16.
         smooth_cross = torch.complex(smoothed[:, :, 0], smoothed[:, :, 1])
         smooth_auto1 = smoothed[:, :, 2]
         smooth_auto2 = smoothed[:, :, 3]
@@ -4326,6 +4459,27 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         # docstring (xwt_phase_gnn_classifier.py) for why this defaults to
         # True here instead of upstream's hardcoded False.
         use_class_weights: bool = True,
+        # Epilepsy fork only -- see cwt_window_cache.py's docstring / this
+        # param's matching one on _init_cwt_gnn_classifier. Restored
+        # 2026-08-22 (removed 2026-08-21, see cwt_window_cache.py's module
+        # docstring for that removal's rationale and this restoration's
+        # own reasoning -- the earlier removal was measured on a fast
+        # Linux/Runpod GPU pod where recompute won; this reopens the
+        # question for a different (Windows/WDDM) machine where disk I/O
+        # and recompute cost may trade off differently).
+        cwt_cache: dict | None = None,
+        # Epilepsy fork only, 2026-08-15 (restored 2026-08-22) -- see
+        # dense_edge_cache.py's docstring. Disk directory for the
+        # coherence_threshold_mode="fixed" dense-edge-input cache
+        # ([4, E, T, F] per trial, keyed by raw window content + config).
+        # None (default) disables it -- every trial recomputed fresh, same
+        # as before this param existed. Only ever consulted when
+        # coherence_threshold_mode == "fixed" (see
+        # _precompute_dense_edge_inputs): the invariance-to-per-fold-
+        # normalization proof this cache relies on doesn't cover
+        # "surrogate"/"surrogate_cluster", which calibrate against
+        # raw_x_native directly.
+        dense_edge_cache_dir: str | None = None,
         # 2026-08-19: Runpod deployment finding -- _precompute_sparse_events/
         # _precompute_dense_edge_inputs both hardcode chunk=min(batch_size,4)
         # trials per torch call, chosen (see those methods' comments) to keep
@@ -4344,6 +4498,63 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         # RSS roughly linearly from the ~2GB-at-4 reference point when
         # choosing a value.
         precompute_chunk_size: int | None = None,
+        # 2026-08-22: opt-in torch.compile of the throwaway dense-edge
+        # helper's compute_dense_edge_input, backend="cudagraphs" --
+        # captures the fixed-shape per-chunk kernel sequence and replays it
+        # without re-dispatching through the CPU/WDDM driver each call,
+        # directly targeting the many-small-ops launch overhead profiling
+        # measured on this pipeline (see _sync_device's docstring and the
+        # 2026-08-22 session notes). NOT the default mode="reduce-overhead"
+        # (Inductor) path -- that needs Triton for its kernel-fusion codegen
+        # (torch._inductor.exc.TritonMissing, confirmed on this Windows
+        # box, no working wheel here), so this gets the launch-overhead win
+        # (CUDA graph replay) without the fusion win (no Triton available to
+        # do it). CUDA only (self.device resolves to "cuda") -- the
+        # cudagraphs backend isn't meaningfully supported on MPS/CPU; False
+        # there regardless of this flag. Off by default: first-call
+        # compilation/graph capture is a real, one-time cost. A captured
+        # graph is also locked to the exact input shape it was captured
+        # for -- NOT a graceful recompile on a shape change, confirmed
+        # directly (RuntimeError inside cudagraph_trees._copy_inputs_and_
+        # remove_from_src when a short final chunk hit the graph captured
+        # for a full one) -- so _precompute_dense_edge_inputs only routes
+        # full-size chunks through the compiled path and always uses the
+        # plain method for a short remainder chunk (routine here: the last
+        # batch of a fold is rarely an exact multiple of the chunk size).
+        compile_dense_edge_helper: bool = False,
+        # 2026-08-22: opt-in torch.autocast(dtype=torch.bfloat16) around the
+        # non-trainable dense-edge helper's compute_dense_edge_input call
+        # (already under torch.no_grad() -- this only affects numerical
+        # precision of the coherence/cross-spectrum math, never gradients).
+        # Targets the OTHER lever compile_dense_edge_helper doesn't: most of
+        # this stage (_full_edge_wct_maps's elementwise products,
+        # _smooth_wct_maps's conv2d, COI masking, the stack) is memory-
+        # bandwidth-bound on tensors shaped [chunk, edges, T, F] -- halving
+        # bytes/element halves that traffic, and halves the per-chunk VRAM
+        # footprint that made precompute_chunk_size=8/16/32 OOM earlier
+        # (2026-08-22 session). bf16 (not fp16): full fp32 exponent range,
+        # so no overflow/underflow risk on `coh`'s auto1*auto2 denominator
+        # the way fp16's narrow range would risk -- see this pipeline's own
+        # cwt_resample_n_time history for why a performance change here
+        # gets verified numerically before being trusted, not just timed.
+        # CUDA only; no-op elsewhere.
+        #
+        # STATUS (2026-08-22): does not currently work, and this flag has
+        # NOT been shown to speed anything up -- verified numerically
+        # before ever timing it (per this docstring's own stated plan),
+        # and that verification hit a hard crash, not a precision
+        # question: torch.complex() (in both _smooth_wct_maps and
+        # _smooth_wct_maps_scale_adaptive -- see their own comments at the
+        # torch.complex() call) rejects BFloat16 outright
+        # ("RuntimeError: Expected both inputs to be Half, Float or Double
+        # tensors but got BFloat16 and BFloat16"). Left in place, off by
+        # default, as a flagged future option: fixing it means forcing the
+        # conv2d output back to float32 right before torch.complex() (see
+        # those methods' comments for exactly where), which is real
+        # surgery inside the core math, not just wrapping this call site --
+        # re-run the fp32-vs-bf16 numerical comparison (not just epoch
+        # timing) before trusting any future attempt.
+        dense_edge_amp_bf16: bool = False,
         # Surrogate-data significance gating: replaces the fixed
         # coherence_threshold magnitude cutoff with a per-trial, per-(edge,
         # frequency) threshold calibrated from that trial's own null
@@ -4601,7 +4812,10 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         self.surrogate_device = surrogate_device
         self.surrogate_cache_dir = surrogate_cache_dir
         self.surrogate_cache_enabled = surrogate_cache_enabled
+        self.dense_edge_cache_dir = dense_edge_cache_dir
         self.precompute_chunk_size = precompute_chunk_size
+        self.compile_dense_edge_helper = compile_dense_edge_helper
+        self.dense_edge_amp_bf16 = dense_edge_amp_bf16
         if cwt_resample_n_time is not None:
             import warnings
             warnings.warn(
@@ -4653,12 +4867,13 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
             optimizer_step_remainder_policy=optimizer_step_remainder_policy,
             channel_subset=channel_subset,
             use_class_weights=use_class_weights,
+            cwt_cache=cwt_cache,
             cwt_backend=cwt_backend,
             torch_cwt_batch_size=torch_cwt_batch_size,
             verbose=verbose,
         )
 
-    def _prepare_features(self, X, *, fit: bool, train_idx=None):
+    def _prepare_features(self, X, *, fit: bool, train_idx=None, window_keys=None):
         # Channel-subset-applied but NOT z-score-normalized -- passed to
         # _precompute_sparse_events as raw_x_native so the surrogate cache
         # key hashes something that depends only on the physical trial +
@@ -4668,7 +4883,7 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         # below reassigns its own local copy without mutating this one.
         raw_x_native = self._apply_channel_subset(np.asarray(X, dtype=np.float32))
         raw_x, w_real, w_imag, freqs = super()._prepare_features(
-            X, fit=fit, train_idx=train_idx
+            X, fit=fit, train_idx=train_idx, window_keys=window_keys
         )
         # Sparse events are computed from w_real/w_imag/freqs alone (see
         # compute_events -- raw_x never enters that path), so resampling
@@ -4680,11 +4895,15 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         ) != int(raw_x.shape[2]):
             from scipy.signal import resample
 
-            raw_np = resample(raw_x.numpy(), int(self.raw_x_resample_n_time), axis=2)
+            # .cpu() no-ops (no copy) when raw_x is already on CPU -- the
+            # common case -- and only actually matters for the
+            # keep_on_device=True path (StreamingSparseEvidenceGNNClassifier),
+            # where raw_x can be GPU-resident and plain .numpy() would raise.
+            raw_np = resample(raw_x.detach().cpu().numpy(), int(self.raw_x_resample_n_time), axis=2)
             raw_np = np.nan_to_num(raw_np, nan=0.0, posinf=0.0, neginf=0.0).astype(
                 np.float32
             )
-            raw_x = torch.from_numpy(raw_np).float()
+            raw_x = torch.from_numpy(raw_np).float().to(raw_x.device)
         if self.event_mode in ("dense", "temporal_graph"):
             # "temporal_graph" reuses the exact same precomputed [B, 4, E,
             # T, F] stack "dense" does (see SparseEvidenceGNNCore's
@@ -5184,6 +5403,8 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         valid_mask = torch.cat([pad(t, fill=False) for t in all_valid], dim=0)
         return events_padded, src_padded, dst_padded, freq_idx_padded, valid_mask
 
+
+
     def _precompute_dense_edge_inputs(self, raw_x, w_real, w_imag, freqs, raw_x_native=None):
         """event_mode="dense" counterpart to _precompute_sparse_events:
         SAME once-per-trial, chunked, non-trainable precompute discipline
@@ -5228,25 +5449,81 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
 
         surrogate_mode = self.coherence_threshold_mode == "surrogate"
         cluster_mode = self.coherence_threshold_mode == "surrogate_cluster"
-        mode_label = "surrogate_cluster" if cluster_mode else "surrogate" if surrogate_mode else "fixed"
+        mode_label = (
+            "surrogate_cluster"
+            if cluster_mode
+            else "surrogate"
+            if surrogate_mode
+            else "fixed"
+        )
+
+        # 2026-08-22: skip the unconditional final .cpu() below when the
+        # caller already wants this stage's output resident on self.device_
+        # (StreamingSparseEvidenceGNNClassifier's per-batch path -- see
+        # _keep_features_on_device) AND w_real/w_imag/raw_x already ARE on
+        # that device (_prepare_features only sets keep_on_device=True in
+        # that same case, so this should always hold when the flag is set;
+        # checked directly here rather than trusted, since a mismatch would
+        # otherwise silently do the .to(compute_device) transfers below for
+        # nothing while still paying a needless .cpu() at the end). Scoped
+        # to "fixed" mode only: surrogate/cluster mode's compute_device is
+        # surrogate_torch_device, which need not equal self.device_, and
+        # isn't used by this pipeline's actual configs anyway (see this
+        # method's docstring).
+        # .type-only comparison, not full device equality: an allocated
+        # CUDA tensor's .device always carries a concrete index
+        # (device(type='cuda', index=0)), while self.device_ here is
+        # whatever resolve_torch_device(self.device) returned -- typically
+        # the index-less device(type='cuda') -- and torch.device.__eq__
+        # treats those as UNEQUAL even though every actual .to()/allocation
+        # call resolves them to the same real device. Confirmed empirically
+        # (2026-08-22): comparing the full device objects here silently
+        # kept this False in every real run, so the .cpu() below never
+        # actually got skipped despite keep_on_device's other conditions
+        # all holding. This pipeline never runs multi-GPU-indexed configs,
+        # so .type equality is exactly what "same device" means here.
+        keep_on_device = (
+            bool(getattr(self, "_keep_features_on_device", False))
+            and not (surrogate_mode or cluster_mode)
+            and w_real.device.type == getattr(self, "device_", torch.device("cpu")).type
+        )
+
         if surrogate_mode or cluster_mode:
             with torch.random.fork_rng(devices=[]):
                 helper = self._build_model(n_channels=n_channels, n_classes=2)
             helper.eval()
-            surrogate_torch_device = resolve_best_available_device(self.surrogate_device)
+
+            surrogate_torch_device = resolve_best_available_device(
+                self.surrogate_device
+            )
             helper = helper.to(surrogate_torch_device)
+
             rng = np.random.default_rng(
-                int(self.surrogate_seed if self.surrogate_seed is not None else self.seed)
+                int(
+                    self.surrogate_seed
+                    if self.surrogate_seed is not None
+                    else self.seed
+                )
             )
+
             smooth_kernel_and_pad = make_gaussian_weight2d(
-                kernel_size=self.smooth_kernel_size, sigma=self.smooth_kernel_sigma,
-                pad_h=0, device=surrogate_torch_device, dtype=w_real.dtype,
+                kernel_size=self.smooth_kernel_size,
+                sigma=self.smooth_kernel_sigma,
+                pad_h=0,
+                device=surrogate_torch_device,
+                dtype=w_real.dtype,
             )
+
             raw_x_np = (
                 raw_x_native
                 if raw_x_native is not None
                 else raw_x.detach().cpu().numpy()
             )
+            # compile_dense_edge_helper is scoped to "fixed" mode only (see
+            # that flag's docstring) -- surrogate/cluster mode always uses
+            # the plain, uncompiled method.
+            compute_dense_edge_input_fn = helper.compute_dense_edge_input
+
         else:
             # 2026-08-19: "fixed" mode (what DENSE_EDGE_GRU_PARAMS/
             # PREDICTION_GRU_PARAMS actually use) previously never moved
@@ -5258,128 +5535,317 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
             # tensor ops that infer their device from their input tensors
             # (make_gaussian_weight2d(device=w_real.device, ...) inside
             # compute_dense_edge_input, _coi_valid_mask's
-            # device=freqs_batched.device, avg_pool2d) -- verified by
-            # reading each one, no .numpy()/scipy/forced .cpu() anywhere in
-            # that path -- so there's no correctness reason this couldn't
-            # already run on CUDA. Measured cause of the CPU-only path
-            # being slow (Runpod deployment, 2026-08-19): ~1.3 of a pod's
-            # ~6.8 real cores in use, ~2.4s/trial: batched complex
-            # cross-spectrum + Gaussian-kernel convolution across ~253
-            # channel-pair edges is exactly the workload a GPU is built
-            # for, and it was sitting idle for this whole stage.
+            # device=freqs_batched.device, avg_pool2d). There is no
+            # .numpy()/scipy/forced .cpu() operation anywhere in that path.
             #
             # 2026-08-19 (part 2): naively moving to CUDA made things
-            # SLOWER (epoch_time went up, not down) -- root-caused by
-            # measuring: raising the inner chunk size (fewer, bigger
-            # transfers) made it WORSE, not better, which rules out
-            # per-chunk transfer overhead as the cause. The real cost is
-            # `helper = self._build_model(...)` + `.to(device)` running
-            # fresh on EVERY call to this method -- cheap when it stayed on
-            # CPU (small tensor allocations), expensive once it means a
-            # fresh CUDA transfer. StreamingSparseEvidenceGNNClassifier
-            # calls this once per training BATCH (not per epoch/fold), so
-            # that's 20+ rebuild-and-transfer cycles per epoch. Fixed by
-            # caching the GPU-resident helper on `self`, keyed by
-            # (n_channels, device) -- it's explicitly a non-trainable
-            # "throwaway" model (see this method's/its sparse-events
-            # counterpart's docstring) used only for its forward-computation
-            # methods, never optimized, so reusing the same instance across
-            # calls within one fit() is safe.
+            # SLOWER (epoch_time went up, not down). Raising the inner chunk
+            # size made it WORSE rather than better, ruling out per-chunk
+            # transfer overhead as the primary cause. The actual cost was
+            # `helper = self._build_model(...)` + `.to(device)` running fresh
+            # on EVERY call to this method. StreamingSparseEvidenceGNNClassifier
+            # calls this once per training BATCH (not per epoch/fold), so that
+            # created 20+ rebuild-and-transfer cycles per epoch.
+            #
+            # Fixed by caching the GPU-resident helper on `self`, keyed by
+            # (n_channels, device). It is explicitly a non-trainable
+            # "throwaway" model used only for forward-computation methods and
+            # is never optimized, so reusing the same instance across calls
+            # within one fit() is safe.
             fixed_torch_device = resolve_torch_device(self.device)
             cache_key = (n_channels, str(fixed_torch_device))
+
             cached_helper = getattr(self, "_dense_edge_helper_cache", None)
+
             if cached_helper is not None and cached_helper[0] == cache_key:
                 helper = cached_helper[1]
             else:
                 with torch.random.fork_rng(devices=[]):
-                    helper = self._build_model(n_channels=n_channels, n_classes=2)
+                    helper = self._build_model(
+                        n_channels=n_channels,
+                        n_classes=2,
+                    )
+
                 helper.eval()
                 helper = helper.to(fixed_torch_device)
+
                 self._dense_edge_helper_cache = (cache_key, helper)
+                # New helper instance -> any previously compiled callable
+                # was compiled against the OLD instance's bound method and
+                # is stale (torch.compile'd callables aren't shared across
+                # different Python objects even with identical weights).
+                self._dense_edge_compiled_fn_cache = None
+
+            compute_dense_edge_input_fn = helper.compute_dense_edge_input
+            if bool(self.compile_dense_edge_helper) and fixed_torch_device.type == "cuda":
+                cached_compiled = getattr(self, "_dense_edge_compiled_fn_cache", None)
+                if cached_compiled is not None and cached_compiled[0] == cache_key:
+                    compute_dense_edge_input_fn = cached_compiled[1]
+                else:
+                    # 2026-08-22: mode="reduce-overhead" (the default
+                    # Inductor backend) needs Triton for its kernel-fusion
+                    # codegen -- unavailable on this Windows box
+                    # (torch._inductor.exc.TritonMissing, confirmed
+                    # directly). backend="cudagraphs" instead: captures and
+                    # replays the fixed-shape kernel sequence without any
+                    # Triton-based fusion, which is the specific overhead
+                    # (per-launch CPU/WDDM-driver dispatch, not raw kernel
+                    # fusion) this flag targets in the first place -- see
+                    # this class's compile_dense_edge_helper docstring.
+                    compute_dense_edge_input_fn = torch.compile(
+                        helper.compute_dense_edge_input, backend="cudagraphs"
+                    )
+                    self._dense_edge_compiled_fn_cache = (cache_key, compute_dense_edge_input_fn)
 
         helper._freq_lo = float(freqs.min().item())
         helper._freq_hi = float(freqs.max().item())
         freqs_1d_np = freqs[0].detach().cpu().numpy()
 
-        # No disk cache (2026-08-21, explicit user decision -- see
-        # cwt_window_cache.py's module docstring for the equivalent CWT-side
-        # removal and its rationale; the same applies here: this stage's GPU
-        # compute is fast, the disk write was the actual cost). Every trial
-        # is computed fresh, every call.
+        # Disk cache -- see dense_edge_cache.py's docstring. Restricted to
+        # coherence_threshold_mode="fixed": that's the only mode where this
+        # method's output is provably a pure function of (raw window,
+        # config), independent of which fold's normalization stats produced
+        # w_real/w_imag. self.dense_edge_cache_dir is None by default (opt-
+        # in, same convention as cwt_cache/surrogate_cache_dir), so this is
+        # a no-op unless a caller (e.g. run_pipelines.py) supplies a
+        # directory. Also gated off whenever keep_on_device applies
+        # (StreamingSparseEvidenceGNNClassifier's per-batch path): that path
+        # deliberately never brings `dense` back to CPU (see keep_on_device
+        # above), and this cache's read/write is CPU-numpy-only -- the two
+        # optimizations target different classifiers and were never asked
+        # to compose (same reasoning as compute_cwt_real_imag_tensors_cached's
+        # cache/keep_on_device interaction, cwt_window_cache.py).
+        cache_dir = None
+        cache_keys: list[str] | None = None
+        if mode_label == "fixed" and not keep_on_device and self.dense_edge_cache_dir is not None:
+            cache_dir = Path(self.dense_edge_cache_dir)
+            raw_for_keys = (
+                raw_x_native if raw_x_native is not None else raw_x.detach().cpu().numpy()
+            )
+            cache_keys = [
+                dense_edge_cache_key(
+                    raw_for_keys[i],
+                    sampling_rate=self.sampling_rate, highest=self.highest, lowest=self.lowest,
+                    nfreqs=self.nfreqs, cwt_resample_n_time=self.cwt_resample_n_time,
+                    coherence_threshold=self.coherence_threshold,
+                    smooth_kernel_size=self.smooth_kernel_size,
+                    smooth_kernel_sigma=self.smooth_kernel_sigma,
+                    coi_enabled=self.coi_enabled,
+                    dense_edge_time_downsample=self.dense_edge_time_downsample,
+                    time_averaged_graph=self.time_averaged_graph,
+                    scale_adaptive_smoothing=self.scale_adaptive_smoothing,
+                    scale_adaptive_cycles=self.scale_adaptive_cycles,
+                    scale_adaptive_max_kernel=self.scale_adaptive_max_kernel,
+                    cwt_backend=self.cwt_backend,
+                )
+                for i in range(n_samples)
+            ]
+
+        # results[i] is filled in from disk (cache hit) or computed below
+        # (cache miss, or caching disabled entirely -- every trial is then a
+        # "miss" and this reduces to the original always-compute behavior).
         results: list[torch.Tensor | None] = [None] * n_samples
         miss_indices = list(range(n_samples))
+        if cache_keys is not None:
+            miss_indices = []
+            n_hits = 0
+            for i, key in enumerate(cache_keys):
+                cached = load_dense_edge(cache_dir, key)
+                if cached is not None:
+                    results[i] = cached
+                    n_hits += 1
+                else:
+                    miss_indices.append(i)
+            if self.verbose >= 1 and n_samples > 0:
+                print(
+                    f"[dense-edge cache] {n_hits}/{n_samples} trials reused from disk "
+                    f"({100 * n_hits / n_samples:.1f}%)"
+                )
 
         # Same memory-vs-throughput cap as _precompute_sparse_events above
         # (see that method's comment, and precompute_chunk_size's docstring
         # in __init__) -- chunk=4 by default, raisable per-machine.
-        chunk_cap = 4 if self.precompute_chunk_size is None else int(self.precompute_chunk_size)
+        chunk_cap = (
+            4
+            if self.precompute_chunk_size is None
+            else int(self.precompute_chunk_size)
+        )
         chunk = max(1, min(int(self.batch_size), chunk_cap))
         chunk_starts = list(range(0, len(miss_indices), chunk))
+
         # Previously gated to surrogate/surrogate_cluster only, which left
-        # this stage silent under coherence_threshold_mode="fixed" -- the
-        # mode DENSE_EDGE_GRU_PARAMS actually uses. That silence is why this
-        # stage's cost went unnoticed during the CWT-caching investigation
-        # (see the 2026-08-15 session note): no progress bar meant no visible
-        # per-chunk timing to compare against the CWT cache's hit-rate
-        # logging. Pure visibility change -- surrogate_count is irrelevant to
-        # "fixed" mode so it's dropped from that branch's message instead of
-        # printed as a misleading always-100 placeholder.
+        # this stage silent under coherence_threshold_mode="fixed" -- the mode
+        # DENSE_EDGE_GRU_PARAMS actually uses. That silence meant there was no
+        # visible per-chunk timing to compare against the CWT cache logging.
         show_progress = self.verbose >= 1
+
         if show_progress and miss_indices:
-            extra = f", surrogate_count={self.surrogate_count}" if (surrogate_mode or cluster_mode) else ""
+            extra = (
+                f", surrogate_count={self.surrogate_count}"
+                if (surrogate_mode or cluster_mode)
+                else ""
+            )
+
             print(
                 f"[SparseEvidenceGNN] Precomputing dense edge inputs "
-                f"(coherence_threshold_mode={mode_label!r}): {len(miss_indices)}/{n_samples} "
-                f"trial(s) need compute, chunk_size={chunk}{extra}...",
+                f"(coherence_threshold_mode={mode_label!r}): "
+                f"{len(miss_indices)}/{n_samples} trial(s) need compute, "
+                f"chunk_size={chunk}{extra}...",
                 flush=True,
             )
+
+        # Per-phase timing breakdown (2026-08-22): the 2026-08-21 session
+        # notes flagged "get a real CWT-vs-dense-edge-vs-model-step
+        # breakdown" as unfinished, unresolved work -- this is that
+        # breakdown for the dense-edge stage specifically. Every phase
+        # boundary is bracketed by _sync_device so these numbers reflect
+        # actual device work, not async kernel-launch return time (without
+        # that, CUDA/MPS would silently misattribute real compute time to
+        # whichever call happens to block next, e.g. the final .cpu()).
+        # Gated at verbose>=2 (one level above the existing chunk-count
+        # progress line above) since this adds a _sync_device call per
+        # chunk -- a real, if small, cost of its own -- so it's opt-in, not
+        # part of every run's overhead.
+        profile = self.verbose >= 2
+        t_transfer = 0.0
+        t_compute = 0.0
+        t_copy_back = 0.0
+        t_threshold = 0.0
+
         for start in tqdm(
-            chunk_starts, desc=f"dense-edges[{mode_label}]", unit="chunk",
-            disable=not show_progress, leave=False,
+            chunk_starts,
+            desc=f"dense-edges[{mode_label}]",
+            unit="chunk",
+            disable=not show_progress,
+            leave=False,
         ):
             idx_chunk = miss_indices[start:start + chunk]
             override = None
+
+            if profile:
+                t0 = time.perf_counter()
+
             if surrogate_mode:
                 per_trial = [
                     self._surrogate_coherence_threshold(
-                        helper, raw_x_np[trial_idx], smooth_kernel_and_pad, rng,
-                        surrogate_torch_device, freqs_1d=freqs_1d_np,
+                        helper,
+                        raw_x_np[trial_idx],
+                        smooth_kernel_and_pad,
+                        rng,
+                        surrogate_torch_device,
+                        freqs_1d=freqs_1d_np,
                     )
                     for trial_idx in idx_chunk
                 ]
-                override = torch.cat(per_trial, dim=0)  # [chunk, E, 1, F] on surrogate_torch_device
+
+                override = torch.cat(per_trial, dim=0)
+
             elif cluster_mode:
                 # Only the forming threshold is usable here -- see this
                 # method's docstring on why the cluster-mass cutoff has no
                 # dense-mode counterpart.
                 per_trial = [
                     self._surrogate_cluster_thresholds(
-                        helper, raw_x_np[trial_idx], smooth_kernel_and_pad, rng,
-                        surrogate_torch_device, freqs_1d=freqs_1d_np,
+                        helper,
+                        raw_x_np[trial_idx],
+                        smooth_kernel_and_pad,
+                        rng,
+                        surrogate_torch_device,
+                        freqs_1d=freqs_1d_np,
                     )[0]
                     for trial_idx in idx_chunk
                 ]
+
                 override = torch.cat(per_trial, dim=0)
-            # Both branches now move to a device (surrogate/cluster: their
-            # own surrogate_torch_device; fixed: fixed_torch_device, set
-            # above -- see that branch's comment on why this is safe) --
-            # `dense = dense.cpu()` below always brings the result back,
-            # regardless of mode, since `results`/the final torch.stack all
-            # expect CPU tensors.
-            compute_device = surrogate_torch_device if (surrogate_mode or cluster_mode) else fixed_torch_device
+
+            # Both surrogate/cluster and fixed modes now compute on their
+            # selected device. The final dense result is moved back to CPU
+            # because `results` and the final torch.stack are CPU tensors --
+            # UNLESS keep_on_device (above) applies, in which case it stays
+            # on `compute_device` and `results`/the final stack end up
+            # GPU-resident instead (StreamingSparseEvidenceGNNClassifier
+            # only; see that flag's docstring).
+            compute_device = (
+                surrogate_torch_device
+                if (surrogate_mode or cluster_mode)
+                else fixed_torch_device
+            )
+
+            if profile:
+                _sync_device(compute_device)
+                t1 = time.perf_counter()
+                t_threshold += t1 - t0
+
             chunk_w_real = w_real[idx_chunk].to(compute_device)
             chunk_w_imag = w_imag[idx_chunk].to(compute_device)
             chunk_freqs = freqs[idx_chunk].to(compute_device)
-            with torch.no_grad():
-                dense = helper.compute_dense_edge_input(
-                    chunk_w_real, chunk_w_imag, chunk_freqs,
+
+            if profile:
+                _sync_device(compute_device)
+                t2 = time.perf_counter()
+                t_transfer += t2 - t1
+
+            # 2026-08-22: the compiled (backend="cudagraphs") path captures
+            # a graph for one fixed input shape and crashes -- not
+            # gracefully recompiles -- when handed a different one
+            # (RuntimeError: tensor size mismatch inside
+            # cudagraph_trees._copy_inputs_and_remove_from_src; confirmed
+            # directly). A short final chunk (n_samples % chunk != 0 --
+            # routine here, e.g. the last training batch of a fold is
+            # rarely an exact multiple of chunk) is exactly that case, so
+            # only full-size chunks go through the compiled path; a short
+            # remainder chunk always uses the plain helper method instead.
+            active_compute_fn = (
+                compute_dense_edge_input_fn
+                if len(idx_chunk) == chunk
+                else helper.compute_dense_edge_input
+            )
+            amp_ctx = (
+                torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+                if (bool(self.dense_edge_amp_bf16) and compute_device.type == "cuda")
+                else contextlib.nullcontext()
+            )
+            with amp_ctx, torch.no_grad():
+                dense = active_compute_fn(
+                    chunk_w_real,
+                    chunk_w_imag,
+                    chunk_freqs,
                     coherence_threshold_override=override,
                 )
-            dense = dense.cpu()
+
+            if profile:
+                _sync_device(compute_device)
+                t3 = time.perf_counter()
+                t_compute += t3 - t2
+
+            if not keep_on_device:
+                dense = dense.cpu()
+
+            if profile:
+                t_copy_back += time.perf_counter() - t3
+
             for j, i in enumerate(idx_chunk):
                 results[i] = dense[j]
+                if cache_dir is not None:
+                    save_dense_edge(cache_dir, cache_keys[i], dense[j])
+
+        if profile and chunk_starts:
+            n_chunks = len(chunk_starts)
+            total = t_threshold + t_transfer + t_compute + t_copy_back
+            self._vprint(
+                2,
+                f"[SparseEvidenceGNN] dense-edges[{mode_label}] phase timing "
+                f"over {n_chunks} chunk(s) of <= {chunk} trial(s) "
+                f"(device={compute_device}): "
+                f"threshold={t_threshold:.3f}s transfer={t_transfer:.3f}s "
+                f"compute={t_compute:.3f}s copy_back={t_copy_back:.3f}s "
+                f"total={total:.3f}s "
+                f"({total / n_chunks * 1000:.2f}ms/chunk, "
+                f"{total / max(1, len(miss_indices)) * 1000:.2f}ms/trial)",
+            )
 
         return torch.stack(results, dim=0)
+
 
     def _build_model_from_features(self, features, n_classes: int, **kwargs) -> SparseEvidenceGNNCore:
         raw_x = features[0] if isinstance(features, tuple) else features
@@ -5538,16 +6004,59 @@ class _LazyFeatureBatchDataset(Dataset):
         self.classifier = classifier
         self.X_raw = X_raw
         self.y_idx = y_idx
+        # Precompute this fit() call's CWT cache keys ONCE here, instead of
+        # __getitem__ re-hashing every raw channel on every batch (~24x/
+        # epoch) -- see precompute_window_cache_keys's docstring
+        # (cwt_window_cache.py) for the measured cost this removes. Same
+        # _apply_channel_subset applied here as _prepare_features applies
+        # internally to X before hashing/CWT (cwt_gnn_classifiers.py's base
+        # _prepare_features), so these keys line up 1:1 with what
+        # compute_cwt_real_imag_tensors_cached sees per batch -- subsetting
+        # channels (axis 1) and selecting rows via `idx` (axis 0) are
+        # independent and commute, so
+        # _apply_channel_subset(X_raw)[idx] == _apply_channel_subset(X_raw[idx]).
+        #
+        # Skipped (window_keys left None) in two cases: DISABLE_CWT_CACHE
+        # (nothing would ever consult these keys -- see that sentinel's
+        # docstring), and whenever this classifier's keep_on_device
+        # condition already holds for every batch (StreamingSparseEvidence-
+        # GNNClassifier's default real-pipeline config: torch backend,
+        # cwt_resample_n_time=None, device_ resolved) -- _prepare_features's
+        # keep_on_device path forces cache=None/window_keys=None regardless
+        # (caching and GPU-residency were never asked to compose, see that
+        # method's comment), so hashing here would be pure waste in that
+        # case. Recomputed as a plain bool check, not cached, since it's
+        # cheap and this only runs once per fit() call.
+        keep_on_device_always = (
+            bool(getattr(classifier, "_keep_features_on_device", False))
+            and classifier.batch_transform_ is not None
+            and classifier.cwt_resample_n_time is None
+            and getattr(classifier, "device_", None) is not None
+        )
+        if classifier.cwt_cache is DISABLE_CWT_CACHE or keep_on_device_always:
+            self._window_keys = None
+        else:
+            X_subset = self.classifier._apply_channel_subset(X_raw)
+            self._window_keys = precompute_window_cache_keys(
+                X_subset,
+                sampling_rate=classifier.sampling_rate,
+                highest=classifier.highest,
+                lowest=classifier.lowest,
+                nfreqs=classifier.nfreqs,
+                cwt_resample_n_time=classifier.cwt_resample_n_time,
+                cwt_backend=classifier.cwt_backend,
+            )
 
     def __getitem__(self, indices: Sequence[int]):
         idx = np.asarray(indices, dtype=np.int64)
         X_batch = self.X_raw[idx]
+        batch_keys = None if self._window_keys is None else self._window_keys[idx]
         # fit=False: reuses self.X_mean_/self.X_std_ already fit ONCE on
         # the whole training set in fit() below -- must NOT refit per
         # batch, which would normalize each batch by its own, different,
         # wrong mean/std instead of a single consistent training-set one.
         raw_x, dense_edge_raw = self.classifier._prepare_features(
-            X_batch, fit=False
+            X_batch, fit=False, window_keys=batch_keys
         )
         y_batch = torch.from_numpy(self.y_idx[idx]).long()
         return raw_x, dense_edge_raw, y_batch
@@ -5564,7 +6073,29 @@ class StreamingSparseEvidenceGNNClassifier(SparseEvidenceGNNClassifier):
     eager path is fine for them; only training needed changing), same
     underlying _train_loop. Only fit()'s feature-materialization strategy
     differs. See this section's header comment for the full rationale.
+
+    2026-08-22: overrides `_keep_features_on_device` to True -- unlike
+    SparseEvidenceGNNClassifier's whole-training-set-at-once precompute
+    (where holding every trial's CWT/dense-edge tensors in VRAM
+    simultaneously would blow it), this class's `_LazyFeatureBatchDataset`
+    already computes just ONE training batch (tens of trials) at a time,
+    so there's no memory reason for that batch's features to ever touch
+    host memory between CWT, dense-edge, and the trainable forward pass.
+    Measured without this (2026-08-22 session): GPU utilization bursting
+    to 90-100% then idling near 0% between chunks, ~86% of a 32-trial
+    batch's wall time in CWT+dense-edge recompute alone even though the
+    device compute inside each stage is fast -- the CPU<->GPU bounce
+    between stages (a hard requirement of the eager classifier's own
+    memory budget, inherited here for free even though it buys nothing)
+    was the actual cost. See _prepare_features's `keep_on_device` gating
+    and _compute_cwt_real_imag_tensors_device_resident's docstring
+    (cwt_window_cache.py) for what this does and doesn't cover (torch
+    backend + cwt_resample_n_time=None only -- both this pipeline's actual
+    config; falls back to the original CPU-bounce path otherwise, same
+    result either way, just slower).
     """
+
+    _keep_features_on_device = True
 
     def fit(self, X, y, validation_groups: np.ndarray | None = None, metadata=None):
         X = validate_eeg_X(X)
