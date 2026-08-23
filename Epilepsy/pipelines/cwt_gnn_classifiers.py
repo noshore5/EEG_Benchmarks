@@ -5558,6 +5558,29 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         untested against real cluster-mode runs; flagged here rather than
         silently ignored.
         """
+
+        from Epilepsy.pipelines.channel_subset_dynamic import select_channel_subset
+
+        # raw_x: (B, C, T) on device
+        if self.channel_subset_k is not None and self.channel_subset_k > 0:
+            k = min(int(self.channel_subset_k), raw_x.shape[1])
+            # per-trial selection (B, k)
+            idx = select_channel_subset(
+                raw_x, k=k, metric=self.channel_subset_metric
+            )  # (B, k) or (k,) if B was squeezed
+
+            # For a first version: require same k for every trial in the chunk
+            # and implement the common case B-loop or assume idx is (k,) when
+            # called one-window-at-a-time from the streaming path.
+            #
+            # Minimal reliable path (streaming / one window):
+            #   idx: (k,)
+            #   w_real_sub = w_real[:, idx, ...]
+            #   w_imag_sub = w_imag[:, idx, ...]
+            #   raw_sub    = raw_x[:, idx, :]
+            # then call existing compute_dense_edge_input on the subset.
+            # Edge count becomes k*(k-1)/2. Model must accept variable E or
+            # you rebuild src_idx/dst_idx for this k (see note below).
         n_channels = int(raw_x.shape[1])
         n_samples = int(raw_x.shape[0])
 
