@@ -65,7 +65,6 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from certifi.__main__ import args
 import numpy as np
 import pandas as pd
 from sklearn.metrics import (
@@ -412,6 +411,7 @@ def leave_one_seizure_out_detection(
     clf_params: dict,
     epochs: int,
     disable_disk_cache: bool = False,
+    max_folds: int | None = None,
 ) -> pd.DataFrame:
     """Leave-one-seizure-out CV for label_mode="detection": hold out one
     recording's windows at a time.
@@ -442,6 +442,12 @@ def leave_one_seizure_out_detection(
     """
     groups = list(zip(metadata["subject"], metadata["run"]))
     unique_groups = sorted(set(groups), key=lambda g: (g[0], g[1]))
+    if max_folds is not None:
+        # Diagnostic only (same convention as --max-channels): run just the
+        # first N folds, e.g. for a quick cache-vs-no-cache or timing
+        # comparison without paying for every recording. Does not change
+        # any fold's own train/test split -- only how many folds run.
+        unique_groups = unique_groups[: max(1, int(max_folds))]
     shared_cwt_cache = DISABLE_CWT_CACHE if disable_disk_cache else DiskCWTCache(default_cwt_cache_root())
     shared_dense_edge_cache_dir = None if disable_disk_cache else default_dense_edge_cache_root()
 
@@ -527,6 +533,7 @@ def leave_one_seizure_out_prediction(
     # compared against.
     k_of_n_k: int = DEFAULT_TRUONG_K_OF_N_K,
     k_of_n_n: int = DEFAULT_TRUONG_K_OF_N_N,
+    max_folds: int | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Leave-one-seizure-out CV for label_mode="prediction".
 
@@ -596,7 +603,6 @@ def leave_one_seizure_out_prediction(
             "every documented seizure in this dataset. Nothing to "
             "leave-one-seizure-out over."
         )
-
     # CWT/dense-edge caching -- see leave_one_seizure_out_detection's
     # docstring for the full rationale and the 2026-08-22 restoration note.
     shared_cwt_cache = DISABLE_CWT_CACHE if disable_disk_cache else DiskCWTCache(default_cwt_cache_root())
@@ -624,12 +630,32 @@ def leave_one_seizure_out_prediction(
     all_run_pairs = sorted(set(zip(subject_arr.tolist(), run_arr.tolist())))
     seizure_run_pairs = set(zip(positive_meta["subject"], positive_meta["run"]))
     interictal_only_runs = [rp for rp in all_run_pairs if rp not in seizure_run_pairs]
+    # n_folds/fold_interictal_runs are sized off the FULL unique_seizures --
+    # deliberately BEFORE max_folds truncates below -- since this round-robin
+    # split is what gives each fold its own disjoint 1/n_folds share of the
+    # (limited) interictal pool (see the comment above). Truncating first
+    # would shrink n_folds too, so with e.g. max_folds=1 a single remaining
+    # fold would round-robin to n_folds=1 and claim EVERY interictal-only
+    # recording for its own test set -- leaving zero for training and
+    # starving that fold down to one class (confirmed: this is exactly what
+    # happened before this ordering fix, IndexError on predict_proba's
+    # single-column output). max_folds only trims which of these real folds
+    # actually run, never how big each one's own split is.
     n_folds = len(unique_seizures)
     # Round-robin, not all-in-one-fold, so the (limited) interictal pool is
     # spread evenly across folds rather than e.g. handed entirely to fold 0.
     fold_interictal_runs = [
         [rp for j, rp in enumerate(interictal_only_runs) if j % n_folds == i] for i in range(n_folds)
     ]
+    if max_folds is not None:
+        # Diagnostic only (same convention as --max-channels): run just the
+        # first N seizures' folds, e.g. for a quick cache-vs-no-cache or
+        # timing comparison without paying for every fold. fold_interictal_
+        # runs above is already indexed 0..n_folds-1 against the FULL fold
+        # count, so slicing unique_seizures here still lines up correctly --
+        # fold_i for the folds we keep is unchanged (still 0, 1, ..., not
+        # renumbered), only the trailing folds are skipped.
+        unique_seizures = unique_seizures[: max(1, int(max_folds))]
     if not interictal_only_runs:
         print(
             "  WARNING: no genuinely seizure-free recordings in this dataset -- "
@@ -1053,6 +1079,17 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--max-folds", type=int, default=None,
+        help=(
+            "Diagnostic only: run just the first N leave-one-seizure-out folds "
+            "(label_mode=prediction) / leave-one-recording-out folds "
+            "(label_mode=detection) instead of every one -- e.g. for a quick "
+            "cache-vs-no-cache or timing A/B without paying for the whole dataset. "
+            "Does not change any fold's own train/test split. Unset (default): "
+            "every fold runs, current behavior."
+        ),
+    )
+    parser.add_argument(
         "--max-interictal-recordings", type=int, default=None,
         help=(
             "label_mode=prediction only: cap on how many seizure-free recordings to load (evenly spaced through "
@@ -1153,13 +1190,13 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-    "--channel-subset-k",
-    type=int,
-    default=None,
-    help=(
-        "If set, per-window top-k channels by absolute cosine are used "
-        "for the dense-edge WCT instead of the full C*(C-1)/2 mesh. "
-        "None (default) keeps current full-mesh behaviour."
+        "--channel-subset-k",
+        type=int,
+        default=None,
+        help=(
+            "If set, per-window top-k channels by absolute cosine are used "
+            "for the dense-edge WCT instead of the full C*(C-1)/2 mesh. "
+            "None (default) keeps current full-mesh behaviour."
         ),
     )
     parser.add_argument(
@@ -1416,6 +1453,7 @@ def main(args: argparse.Namespace) -> None:
             negative_to_positive_ratio=negative_to_positive_ratio,
             disable_disk_cache=args.disable_disk_cache,
             k_of_n_k=args.k_of_n_k, k_of_n_n=args.k_of_n_n,
+            max_folds=args.max_folds,
         )
 
         # Separate output path (task 6, bullet 1): never pooled with
@@ -1454,6 +1492,8 @@ def main(args: argparse.Namespace) -> None:
         clf_params["compile_dense_edge_helper"] = args.compile_dense_edge_helper
         clf_params["dense_edge_amp_bf16"] = args.dense_edge_amp_bf16
         clf_params["train_amp_bf16"] = args.train_amp_bf16
+        clf_params["channel_subset_k"] = args.channel_subset_k
+        clf_params["channel_subset_metric"] = args.channel_subset_metric
         if args.verbose is not None:
             clf_params["verbose"] = args.verbose
 
@@ -1461,6 +1501,7 @@ def main(args: argparse.Namespace) -> None:
         results = leave_one_seizure_out_detection(
             X, y, metadata, clf_params, epochs,
             disable_disk_cache=args.disable_disk_cache,
+            max_folds=args.max_folds,
         )
 
         # --shuffle-labels: same separate-subdirectory reasoning as the

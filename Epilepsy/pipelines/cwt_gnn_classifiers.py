@@ -4928,6 +4928,8 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         self.dense_edge_cache_dir = dense_edge_cache_dir
         self.precompute_chunk_size = precompute_chunk_size
         self.compile_dense_edge_helper = compile_dense_edge_helper
+        self.channel_subset_k = channel_subset_k
+        self.channel_subset_metric = channel_subset_metric
         self.dense_edge_amp_bf16 = dense_edge_amp_bf16
         self.train_amp_bf16 = train_amp_bf16
         if cwt_resample_n_time is not None:
@@ -5019,6 +5021,55 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
             )
             raw_x = torch.from_numpy(raw_np).float().to(raw_x.device)
         if self.event_mode in ("dense", "temporal_graph"):
+            # Dynamic per-window channel subset (top-k by absolute cosine,
+            # see channel_subset_dynamic.py) -- applied HERE, before both the
+            # dense-edge WCT precompute below AND the `raw_x` this method
+            # returns, so the two stay consistent: forward()'s channel_encoder
+            # (fed this method's raw_x) and its dense-edge path (fed
+            # dense_edge_raw) must agree on n_channels, since
+            # _build_model_from_features sizes the whole trainable model
+            # (channel embeddings, src_idx/dst_idx pair buffers, everything)
+            # off raw_x.shape[1] -- see that method and
+            # SparseEvidenceGNNCore.__init__. None/0 (default) leaves raw_x/
+            # w_real/w_imag untouched -- current full-mesh behavior.
+            if self.channel_subset_k is not None and self.channel_subset_k > 0:
+                from Epilepsy.pipelines.channel_subset_dynamic import select_channel_subset
+
+                k = min(int(self.channel_subset_k), raw_x.shape[1])
+                idx = select_channel_subset(
+                    raw_x, k=k, metric=self.channel_subset_metric
+                )  # (B, k) in practice (raw_x is always 3D here); (k,)
+                # handled too since select_channel_subset's docstring allows
+                # a 2D (C, T) input in general.
+                if idx.dim() == 1:
+                    # Same k channels for every trial in this call.
+                    raw_x = raw_x[:, idx, :]
+                    w_real = w_real[:, idx, :, :]
+                    w_imag = w_imag[:, idx, :, :]
+                    if raw_x_native is not None:
+                        raw_x_native = raw_x_native[:, idx.detach().cpu().numpy(), :]
+                else:
+                    # Per-trial subset (B, k): "k slots", not fixed electrode
+                    # identity -- slot j of the k-channel axis below is
+                    # whichever physical channel select_channel_subset picked
+                    # for THAT trial, so it can differ trial-to-trial. Every
+                    # downstream consumer (channel_encoder, dense-edge WCT,
+                    # the trainable model's src_idx/dst_idx) only ever sees
+                    # positional slots, never a channel identity, so this is
+                    # safe -- see this class's channel_subset_k docstring /
+                    # the module's v1 scope note.
+                    idx_raw = idx.unsqueeze(-1).expand(-1, -1, raw_x.shape[-1])
+                    raw_x = torch.gather(raw_x, 1, idx_raw)
+                    idx_w = idx.view(idx.shape[0], idx.shape[1], 1, 1).expand(
+                        -1, -1, w_real.shape[2], w_real.shape[3]
+                    )
+                    w_real = torch.gather(w_real, 1, idx_w)
+                    w_imag = torch.gather(w_imag, 1, idx_w)
+                    if raw_x_native is not None:
+                        idx_np = idx.detach().cpu().numpy()
+                        raw_x_native = np.take_along_axis(
+                            raw_x_native, idx_np[:, :, None], axis=1
+                        )
             # "temporal_graph" reuses the exact same precomputed [B, 4, E,
             # T, F] stack "dense" does (see SparseEvidenceGNNCore's
             # event_mode docstring) -- only forward()-time processing of it
@@ -5559,28 +5610,18 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         silently ignored.
         """
 
-        from Epilepsy.pipelines.channel_subset_dynamic import select_channel_subset
-
-        # raw_x: (B, C, T) on device
-        if self.channel_subset_k is not None and self.channel_subset_k > 0:
-            k = min(int(self.channel_subset_k), raw_x.shape[1])
-            # per-trial selection (B, k)
-            idx = select_channel_subset(
-                raw_x, k=k, metric=self.channel_subset_metric
-            )  # (B, k) or (k,) if B was squeezed
-
-            # For a first version: require same k for every trial in the chunk
-            # and implement the common case B-loop or assume idx is (k,) when
-            # called one-window-at-a-time from the streaming path.
-            #
-            # Minimal reliable path (streaming / one window):
-            #   idx: (k,)
-            #   w_real_sub = w_real[:, idx, ...]
-            #   w_imag_sub = w_imag[:, idx, ...]
-            #   raw_sub    = raw_x[:, idx, :]
-            # then call existing compute_dense_edge_input on the subset.
-            # Edge count becomes k*(k-1)/2. Model must accept variable E or
-            # you rebuild src_idx/dst_idx for this k (see note below).
+        # raw_x: (B, C, T); w_real/w_imag: (B, C, T, F) -- channel axis is
+        # dim 1 on all three (see compute_cwt_real_imag_tensors_cached).
+        # Dynamic per-window channel subsetting (channel_subset_k) already
+        # happened in the caller (_prepare_features), BEFORE raw_x/w_real/
+        # w_imag/raw_x_native were passed in here -- so C below is already k
+        # when channel_subset_k is set, and everything downstream (the
+        # helper built from n_channels, its src_idx/dst_idx pair-index
+        # buffers, the cache key) naturally sees k channels / k*(k-1)/2 edges
+        # with no special-casing needed in this method. Done there rather
+        # than here so the SAME subset also feeds raw_x's OTHER consumer --
+        # the trainable model's channel_encoder -- which must agree with
+        # dense_edge_raw on n_channels (see _prepare_features's comment).
         n_channels = int(raw_x.shape[1])
         n_samples = int(raw_x.shape[0])
 
@@ -5745,19 +5786,48 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         # w_real/w_imag. self.dense_edge_cache_dir is None by default (opt-
         # in, same convention as cwt_cache/surrogate_cache_dir), so this is
         # a no-op unless a caller (e.g. run_pipelines.py) supplies a
-        # directory. Also gated off whenever keep_on_device applies
-        # (StreamingSparseEvidenceGNNClassifier's per-batch path): that path
-        # deliberately never brings `dense` back to CPU (see keep_on_device
-        # above), and this cache's read/write is CPU-numpy-only -- the two
-        # optimizations target different classifiers and were never asked
-        # to compose (same reasoning as compute_cwt_real_imag_tensors_cached's
-        # cache/keep_on_device interaction, cwt_window_cache.py).
+        # directory.
+        #
+        # Re-implemented for keep_on_device (2026-08-23, was unconditionally
+        # gated off here before): StreamingSparseEvidenceGNNClassifier
+        # (label_mode="prediction") calls this method once per training
+        # BATCH, every epoch -- with caching gated off, a real run (~20
+        # epochs) recomputed the WCT/coherence/smoothing stage for the exact
+        # same physical windows ~20 times over, with epoch>1 buying nothing
+        # a cache wouldn't have given for free. keep_on_device's own
+        # rationale (2026-08-22 comment, still true) is about avoiding a
+        # per-batch CPU<->GPU bounce for `dense` ITSELF -- that's preserved
+        # unchanged below (`if not keep_on_device: dense = dense.cpu()`
+        # still gates the RESULT tensor's device). What changes here is only
+        # that a cache MISS also gets written to disk (save_dense_edge
+        # already does its own tensor.detach().cpu().numpy() internally --
+        # see that function -- so it CPU-bounces the one trial being saved
+        # regardless of `dense`'s device, not the whole batch), and a cache
+        # HIT is loaded from CPU/disk and .to()'d onto the compute device
+        # (below) instead of recomputed -- a small, one-off transfer, not
+        # the per-batch bounce keep_on_device exists to avoid. Net effect:
+        # epoch 1 pays the same (now-optimized, see dense_edge_amp_bf16)
+        # compute cost plus a cheap uncompressed disk write per trial
+        # (~6.6ms/trial, see save_dense_edge's docstring); every later
+        # epoch's repeat windows become disk reads instead of WCT recompute.
         cache_dir = None
         cache_keys: list[str] | None = None
-        if mode_label == "fixed" and not keep_on_device and self.dense_edge_cache_dir is not None:
+        if mode_label == "fixed" and self.dense_edge_cache_dir is not None:
             cache_dir = Path(self.dense_edge_cache_dir)
+            # raw_x_native/raw_x are already channel-subset (both the static
+            # self.channel_subset AND, when set, the dynamic channel_subset_k
+            # -- see _prepare_features) by the time they reach here, so this
+            # hashes exactly the bytes compute_dense_edge_input actually
+            # consumed -- consistent with this method's existing "post-
+            # channel-subset" convention (dense_edge_cache_key's docstring).
+            # channel_subset_k/metric are ALSO hashed below (config_tuple)
+            # purely so a full-mesh entry and a channel_subset_k entry can
+            # never collide even in the (byte-identical-by-coincidence) case
+            # where a k-subset happens to reproduce another run's raw bytes.
             raw_for_keys = (
-                raw_x_native if raw_x_native is not None else raw_x.detach().cpu().numpy()
+                raw_x_native
+                if raw_x_native is not None
+                else raw_x.detach().cpu().numpy()
             )
             cache_keys = [
                 dense_edge_cache_key(
@@ -5774,6 +5844,8 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
                     scale_adaptive_cycles=self.scale_adaptive_cycles,
                     scale_adaptive_max_kernel=self.scale_adaptive_max_kernel,
                     cwt_backend=self.cwt_backend,
+                    channel_subset_k=self.channel_subset_k,
+                    channel_subset_metric=self.channel_subset_metric,
                 )
                 for i in range(n_samples)
             ]
@@ -5789,6 +5861,13 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
             for i, key in enumerate(cache_keys):
                 cached = load_dense_edge(cache_dir, key)
                 if cached is not None:
+                    # load_dense_edge always returns a CPU tensor (disk-
+                    # backed). keep_on_device's `results`/final stack are
+                    # GPU-resident (see below), so a cache hit needs this one
+                    # small transfer to match -- cheap next to the WCT/
+                    # coherence recompute it's replacing.
+                    if keep_on_device:
+                        cached = cached.to(fixed_torch_device)
                     results[i] = cached
                     n_hits += 1
                 else:

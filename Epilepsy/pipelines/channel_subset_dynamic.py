@@ -1,7 +1,6 @@
 """Per-window channel subset selection via cheap affinity (cosine)."""
 from __future__ import annotations
 
-import numpy as np
 import torch
 
 

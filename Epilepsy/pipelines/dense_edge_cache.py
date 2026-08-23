@@ -67,8 +67,8 @@ def dense_edge_cache_key(
     scale_adaptive_cycles,
     scale_adaptive_max_kernel,
     cwt_backend: str = "fcwt",
-    channel_subset_k=...,
-    channel_subset_metric=...,
+    channel_subset_k: int | None = None,
+    channel_subset_metric: str = "abs_cosine",
 ) -> str:
     """`raw_trial` is one trial's FULL [n_channels, n_time] raw (pre-
     normalization, post-channel-subset) window -- the whole trial in one
@@ -86,7 +86,14 @@ def dense_edge_cache_key(
     cwt_window_cache.py's `_window_cache_key` docstring for why an entry
     must be keyed on which transform produced it, not just on (raw
     trial, config). Defaults to "fcwt" so existing on-disk entries key
-    identically to before this param existed."""
+    identically to before this param existed.
+
+    `channel_subset_k`/`channel_subset_metric` (dynamic per-window channel
+    subset): compute_dense_edge_input runs on a different (and, when
+    channel_subset_k is set, smaller) set of channels than the full-mesh
+    default, so a full-mesh entry and a subset entry for the SAME raw_trial
+    bytes must not collide. None/"abs_cosine" defaults key identically to
+    before this pair of params existed (full mesh, unchanged)."""
     hasher = hashlib.sha256()
     hasher.update(np.ascontiguousarray(raw_trial, dtype=np.float32).tobytes())
     config_tuple = (
@@ -97,6 +104,8 @@ def dense_edge_cache_key(
         bool(coi_enabled), int(dense_edge_time_downsample), bool(time_averaged_graph),
         bool(scale_adaptive_smoothing), float(scale_adaptive_cycles),
         int(scale_adaptive_max_kernel), str(cwt_backend),
+        None if channel_subset_k is None else int(channel_subset_k),
+        str(channel_subset_metric),
     )
     hasher.update(repr(config_tuple).encode("utf-8"))
     return hasher.hexdigest()
