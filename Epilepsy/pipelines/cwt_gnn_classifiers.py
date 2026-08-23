@@ -81,6 +81,11 @@ try:
         load_dense_edge,
         save_dense_edge,
     )
+    from Epilepsy.pipelines.channel_subset_dynamic import (
+        live_edges_from_channel_subset,
+        pair_to_edge_index,
+        select_channel_subset,
+    )
 except ModuleNotFoundError:
     from pipelines.common import (
         TorchEEGClassifier,
@@ -116,6 +121,11 @@ except ModuleNotFoundError:
         dense_edge_cache_key,
         load_dense_edge,
         save_dense_edge,
+    )
+    from pipelines.channel_subset_dynamic import (
+        live_edges_from_channel_subset,
+        pair_to_edge_index,
+        select_channel_subset,
     )
 
 
@@ -2741,8 +2751,25 @@ class SparseEvidenceGNNCore(nn.Module):
         freqs: torch.Tensor,
         *,
         compute_mag: bool,
+        src_idx: torch.Tensor | None = None,
+        dst_idx: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor | None, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        num_edges = self.src_idx.numel()
+        # Optional src_idx/dst_idx override a live-edge subset (same
+        # channel-id semantics as self.src_idx/self.dst_idx). None = full
+        # registered mesh. Live pairs still index into the full-C CWT
+        # tensors; the caller scatters the shorter E axis into a full-E
+        # zeros tensor.
+        if src_idx is None:
+            src_idx = self.src_idx
+            dst_idx = self.dst_idx
+            edge_pair_idx = self.edge_pair_idx
+        else:
+            if dst_idx is None:
+                raise ValueError("dst_idx is required when src_idx is provided")
+            src_idx = src_idx.to(device=w_real.device, dtype=torch.long)
+            dst_idx = dst_idx.to(device=w_real.device, dtype=torch.long)
+            edge_pair_idx = torch.cat([src_idx, dst_idx])
+        num_edges = src_idx.numel()
         # 2026-08-23: this stage's elementwise products below (index_select
         # + multiply/subtract on the raw [B, C, T, F] CWT coefficients) are
         # NOT autocast-eligible ops -- confirmed directly (`a*b-a` keeps its
@@ -2776,8 +2803,8 @@ class SparseEvidenceGNNCore(nn.Module):
             w_real = w_real.to(amp_dtype)
             w_imag = w_imag.to(amp_dtype)
             freqs = freqs.to(amp_dtype)
-        real_edges = w_real.index_select(1, self.edge_pair_idx)
-        imag_edges = w_imag.index_select(1, self.edge_pair_idx)
+        real_edges = w_real.index_select(1, edge_pair_idx)
+        imag_edges = w_imag.index_select(1, edge_pair_idx)
         src_r, dst_r = real_edges.split(num_edges, dim=1)
         src_i, dst_i = imag_edges.split(num_edges, dim=1)
 
@@ -3496,6 +3523,7 @@ class SparseEvidenceGNNCore(nn.Module):
     def _build_dense_edge_input(
         self, w_real, w_imag, freqs_batched, smooth_kernel_and_pad,
         coherence_threshold_override=None,
+        src_idx=None, dst_idx=None,
     ):
         """event_mode="dense" counterpart to _build_sparse_events: the exact
         same non-trainable cross-spectrum + smoothing math _coherence_only
@@ -3536,7 +3564,8 @@ class SparseEvidenceGNNCore(nn.Module):
         """
         with torch.no_grad():
             _, xwt_real, xwt_imag, auto1, auto2 = self._full_edge_wct_maps(
-                w_real, w_imag, freqs_batched, compute_mag=False
+                w_real, w_imag, freqs_batched, compute_mag=False,
+                src_idx=src_idx, dst_idx=dst_idx,
             )
             # 2026-08-23: see _coherence_only's identical call for the full
             # explanation -- `phase` comes back directly now, not a complex
@@ -3636,13 +3665,21 @@ class SparseEvidenceGNNCore(nn.Module):
             0, 1, 3, 4, 2
         )  # [B, 4, E, T_ds, F]
 
-    def compute_dense_edge_input(self, w_real, w_imag, freqs, coherence_threshold_override=None):
+    def compute_dense_edge_input(
+        self, w_real, w_imag, freqs, coherence_threshold_override=None,
+        src_idx=None, dst_idx=None,
+    ):
         """event_mode="dense" counterpart to compute_events -- runs the
         identical non-trainable cross-spectrum/smoothing/COI pipeline (see
         _build_dense_edge_input) once per trial, mirroring compute_events'
         own "non-trainable work runs once, not every forward()"
         optimization (see that method's docstring). Called by
         SparseEvidenceGNNClassifier._precompute_dense_edge_inputs.
+
+        `src_idx`/`dst_idx`, if given, override the full registered mesh
+        for this call only (live pairs). Length m, same channel-id
+        semantics as self.src_idx/self.dst_idx. The returned tensor then
+        has E=m; the classifier scatters it into a full-E zeros tensor.
         """
         batch_size = w_real.shape[0]
         freqs_batched = self._batched_freqs(freqs, batch_size)
@@ -3656,6 +3693,7 @@ class SparseEvidenceGNNCore(nn.Module):
         return self._build_dense_edge_input(
             w_real, w_imag, freqs_batched, smooth_kernel_and_pad,
             coherence_threshold_override=coherence_threshold_override,
+            src_idx=src_idx, dst_idx=dst_idx,
         )
 
     def _aggregate_events(self, msg, full_features, dst_padded, valid_mask, batch_idx, dtype):
@@ -4634,17 +4672,18 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         # (range [0,1]), noise-level by this pipeline's own existing bar
         # (see the (5,3)-vs-(25,3) smoothing-kernel comparison above).
 
-        # Dynamic per-window channel subset for dense-edge computation.
-        # None / 0 = full mesh (current behaviour). When set, only the top-k
-        # channels by absolute cosine are used for the expensive WCT/dense-edge
-        # stage; channel embeddings stay size C and are indexed.
+        # Dynamic per-window live-edge subset for dense-edge WCT.
+        # None / <=0 = full mesh (current behaviour). When set to k in
+        # (0, C), absolute-cosine top-k channels form a clique of
+        # m=k*(k-1)/2 live edges; only those pairs run the expensive
+        # WCT/coherence math. Features are scattered into a full
+        # [B, 4, E, T, F] tensor (E=C*(C-1)/2) with zeros in inactive
+        # slots -- the GNN always sees n_channels=C and full E; channel
+        # embeddings / src_idx/dst_idx stay the full-mesh layout. k>=C
+        # is treated as full mesh.
         channel_subset_k: int | None = None,
         channel_subset_metric: str = "abs_cosine",
         dense_edge_amp_bf16: bool = False,
-
-
-
-
         # 2026-08-23: opt-in torch.autocast(dtype=torch.bfloat16) around the
         # TRAINABLE forward pass (channel_encoder/dense_edge_conv/GRU/
         # classifier -- whatever self.model_(*batch_inputs) actually is),
@@ -5021,60 +5060,15 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
             )
             raw_x = torch.from_numpy(raw_np).float().to(raw_x.device)
         if self.event_mode in ("dense", "temporal_graph"):
-            # Dynamic per-window channel subset (top-k by absolute cosine,
-            # see channel_subset_dynamic.py) -- applied HERE, before both the
-            # dense-edge WCT precompute below AND the `raw_x` this method
-            # returns, so the two stay consistent: forward()'s channel_encoder
-            # (fed this method's raw_x) and its dense-edge path (fed
-            # dense_edge_raw) must agree on n_channels, since
-            # _build_model_from_features sizes the whole trainable model
-            # (channel embeddings, src_idx/dst_idx pair buffers, everything)
-            # off raw_x.shape[1] -- see that method and
-            # SparseEvidenceGNNCore.__init__. None/0 (default) leaves raw_x/
-            # w_real/w_imag untouched -- current full-mesh behavior.
-            if self.channel_subset_k is not None and self.channel_subset_k > 0:
-                from Epilepsy.pipelines.channel_subset_dynamic import select_channel_subset
-
-                k = min(int(self.channel_subset_k), raw_x.shape[1])
-                idx = select_channel_subset(
-                    raw_x, k=k, metric=self.channel_subset_metric
-                )  # (B, k) in practice (raw_x is always 3D here); (k,)
-                # handled too since select_channel_subset's docstring allows
-                # a 2D (C, T) input in general.
-                if idx.dim() == 1:
-                    # Same k channels for every trial in this call.
-                    raw_x = raw_x[:, idx, :]
-                    w_real = w_real[:, idx, :, :]
-                    w_imag = w_imag[:, idx, :, :]
-                    if raw_x_native is not None:
-                        raw_x_native = raw_x_native[:, idx.detach().cpu().numpy(), :]
-                else:
-                    # Per-trial subset (B, k): "k slots", not fixed electrode
-                    # identity -- slot j of the k-channel axis below is
-                    # whichever physical channel select_channel_subset picked
-                    # for THAT trial, so it can differ trial-to-trial. Every
-                    # downstream consumer (channel_encoder, dense-edge WCT,
-                    # the trainable model's src_idx/dst_idx) only ever sees
-                    # positional slots, never a channel identity, so this is
-                    # safe -- see this class's channel_subset_k docstring /
-                    # the module's v1 scope note.
-                    idx_raw = idx.unsqueeze(-1).expand(-1, -1, raw_x.shape[-1])
-                    raw_x = torch.gather(raw_x, 1, idx_raw)
-                    idx_w = idx.view(idx.shape[0], idx.shape[1], 1, 1).expand(
-                        -1, -1, w_real.shape[2], w_real.shape[3]
-                    )
-                    w_real = torch.gather(w_real, 1, idx_w)
-                    w_imag = torch.gather(w_imag, 1, idx_w)
-                    if raw_x_native is not None:
-                        idx_np = idx.detach().cpu().numpy()
-                        raw_x_native = np.take_along_axis(
-                            raw_x_native, idx_np[:, :, None], axis=1
-                        )
             # "temporal_graph" reuses the exact same precomputed [B, 4, E,
             # T, F] stack "dense" does (see SparseEvidenceGNNCore's
             # event_mode docstring) -- only forward()-time processing of it
             # differs (_temporal_graph_node_states vs. _dense_edge_features),
             # so this precompute call is unchanged/shared between the two.
+            # channel_subset_k, when set, does NOT shrink n_channels here --
+            # the GNN always sees full C / full E; live-edge WCT + scatter
+            # into a zero full-E tensor happens inside
+            # _precompute_dense_edge_inputs.
             dense_edge_raw = self._precompute_dense_edge_inputs(
                 raw_x, w_real, w_imag, freqs, raw_x_native=raw_x_native
             )
@@ -5568,7 +5562,111 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         valid_mask = torch.cat([pad(t, fill=False) for t in all_valid], dim=0)
         return events_padded, src_padded, dst_padded, freq_idx_padded, valid_mask
 
+    def _resolved_channel_subset_k(self, n_channels: int) -> int | None:
+        """None = full mesh (channel_subset_k unset, <=0, or >= C)."""
+        k = self.channel_subset_k
+        if k is None or int(k) <= 0:
+            return None
+        k = min(int(k), int(n_channels))
+        if k >= int(n_channels):
+            return None
+        return k
 
+    def _scatter_live_dense_edge(
+        self,
+        helper,
+        w_real,
+        w_imag,
+        freqs,
+        override,
+        live: torch.Tensor,
+    ) -> torch.Tensor:
+        """WCT for `live` edge indices, scattered into a full-E zeros tensor.
+
+        Fixed E layout, live edges only, zeros = not computed.
+        """
+        n_edges_full = int(helper.src_idx.numel())
+        live = live.to(device=helper.src_idx.device, dtype=torch.long)
+        if live.numel() == 0:
+            t_in = int(w_real.shape[2])
+            if helper.time_averaged_graph:
+                t_out = 1
+            elif helper.dense_edge_time_downsample > 1:
+                t_out = t_in // int(helper.dense_edge_time_downsample)
+            else:
+                t_out = t_in
+            return w_real.new_zeros(
+                w_real.shape[0], 4, n_edges_full, t_out, helper.nfreqs
+            )
+        src_live = helper.src_idx[live]
+        dst_live = helper.dst_idx[live]
+        ov = override
+        if (
+            ov is not None
+            and torch.is_tensor(ov)
+            and ov.dim() >= 2
+            and ov.shape[1] == n_edges_full
+        ):
+            ov = ov[:, live]
+        features_live = helper.compute_dense_edge_input(
+            w_real,
+            w_imag,
+            freqs,
+            coherence_threshold_override=ov,
+            src_idx=src_live,
+            dst_idx=dst_live,
+        )
+        bsz, n_stack, _m, n_time, nfreqs = features_live.shape
+        # Fixed E layout, live edges only, zeros = not computed.
+        out = features_live.new_zeros(bsz, n_stack, n_edges_full, n_time, nfreqs)
+        out[:, :, live, :, :] = features_live
+        return out
+
+    def _compute_live_dense_edge_scattered(
+        self,
+        helper,
+        w_real,
+        w_imag,
+        freqs,
+        *,
+        override,
+        raw_x_chunk,
+        k: int,
+    ) -> torch.Tensor:
+        """Select cosine-top-k channels per trial, compute the k-clique
+        WCT, scatter into full-E zeros. Different subsets in a batch are
+        handled per trial -- trial-0's subset is never applied to the rest.
+        """
+        pair_index = pair_to_edge_index(int(helper.n_channels))
+        idx = select_channel_subset(
+            raw_x_chunk, k=k, metric=self.channel_subset_metric
+        )
+        if idx.dim() == 1:
+            live = live_edges_from_channel_subset(idx, pair_index)
+            return self._scatter_live_dense_edge(
+                helper, w_real, w_imag, freqs, override, live
+            )
+        same_subset = bool((idx == idx[0]).all())
+        if same_subset:
+            live = live_edges_from_channel_subset(idx[0], pair_index)
+            return self._scatter_live_dense_edge(
+                helper, w_real, w_imag, freqs, override, live
+            )
+        pieces = []
+        for b in range(idx.shape[0]):
+            live = live_edges_from_channel_subset(idx[b], pair_index)
+            ov_b = None if override is None else override[b : b + 1]
+            pieces.append(
+                self._scatter_live_dense_edge(
+                    helper,
+                    w_real[b : b + 1],
+                    w_imag[b : b + 1],
+                    freqs[b : b + 1],
+                    ov_b,
+                    live,
+                )
+            )
+        return torch.cat(pieces, dim=0)
 
     def _precompute_dense_edge_inputs(self, raw_x, w_real, w_imag, freqs, raw_x_native=None):
         """event_mode="dense" counterpart to _precompute_sparse_events:
@@ -5612,18 +5710,14 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
 
         # raw_x: (B, C, T); w_real/w_imag: (B, C, T, F) -- channel axis is
         # dim 1 on all three (see compute_cwt_real_imag_tensors_cached).
-        # Dynamic per-window channel subsetting (channel_subset_k) already
-        # happened in the caller (_prepare_features), BEFORE raw_x/w_real/
-        # w_imag/raw_x_native were passed in here -- so C below is already k
-        # when channel_subset_k is set, and everything downstream (the
-        # helper built from n_channels, its src_idx/dst_idx pair-index
-        # buffers, the cache key) naturally sees k channels / k*(k-1)/2 edges
-        # with no special-casing needed in this method. Done there rather
-        # than here so the SAME subset also feeds raw_x's OTHER consumer --
-        # the trainable model's channel_encoder -- which must agree with
-        # dense_edge_raw on n_channels (see _prepare_features's comment).
+        # channel_subset_k, when set, does NOT shrink C here. The helper
+        # is built at full n_channels so src_idx/dst_idx stay the canonical
+        # E=C*(C-1)/2 layout; live-edge WCT is computed only for the
+        # cosine-top-k clique and scattered into a full-E zeros tensor
+        # (see _compute_live_dense_edge_scattered).
         n_channels = int(raw_x.shape[1])
         n_samples = int(raw_x.shape[0])
+        live_subset_k = self._resolved_channel_subset_k(n_channels)
 
         surrogate_mode = self.coherence_threshold_mode == "surrogate"
         cluster_mode = self.coherence_threshold_mode == "surrogate_cluster"
@@ -5814,16 +5908,12 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         cache_keys: list[str] | None = None
         if mode_label == "fixed" and self.dense_edge_cache_dir is not None:
             cache_dir = Path(self.dense_edge_cache_dir)
-            # raw_x_native/raw_x are already channel-subset (both the static
-            # self.channel_subset AND, when set, the dynamic channel_subset_k
-            # -- see _prepare_features) by the time they reach here, so this
-            # hashes exactly the bytes compute_dense_edge_input actually
-            # consumed -- consistent with this method's existing "post-
-            # channel-subset" convention (dense_edge_cache_key's docstring).
-            # channel_subset_k/metric are ALSO hashed below (config_tuple)
-            # purely so a full-mesh entry and a channel_subset_k entry can
-            # never collide even in the (byte-identical-by-coincidence) case
-            # where a k-subset happens to reproduce another run's raw bytes.
+            # raw_x_native/raw_x are already statically channel-subset
+            # (self.channel_subset) by the time they reach here -- the
+            # dynamic channel_subset_k path does NOT slice them (full C
+            # stays in the GNN). channel_subset_k/metric are hashed in
+            # config_tuple so a full-mesh entry and a live-edge-subset
+            # entry for the same raw bytes cannot collide.
             raw_for_keys = (
                 raw_x_native
                 if raw_x_native is not None
@@ -6022,12 +6112,27 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
                 else contextlib.nullcontext()
             )
             with amp_ctx, torch.no_grad():
-                dense = active_compute_fn(
-                    chunk_w_real,
-                    chunk_w_imag,
-                    chunk_freqs,
-                    coherence_threshold_override=override,
-                )
+                if live_subset_k is not None:
+                    # Live-edge path changes E from full mesh to m, which
+                    # would break a cudagraphs capture of the full-E
+                    # compute_dense_edge_input -- always the plain method.
+                    chunk_raw = raw_x[idx_chunk]
+                    dense = self._compute_live_dense_edge_scattered(
+                        helper,
+                        chunk_w_real,
+                        chunk_w_imag,
+                        chunk_freqs,
+                        override=override,
+                        raw_x_chunk=chunk_raw,
+                        k=live_subset_k,
+                    )
+                else:
+                    dense = active_compute_fn(
+                        chunk_w_real,
+                        chunk_w_imag,
+                        chunk_freqs,
+                        coherence_threshold_override=override,
+                    )
 
             if profile:
                 _sync_device(compute_device)
@@ -6170,10 +6275,9 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
 #   reimplemented for the lazy per-batch path; fit() raises
 #   NotImplementedError if augmentation is ever turned on with this class,
 #   rather than silently doing the wrong thing.
-# - validation_split > 0 isn't supported (also raises) -- this pipeline
-#   always runs with validation_split=0.0 (see run_pipelines.py's params),
-#   so nothing currently needs it; a lazy val_loader would need the same
-#   treatment as the train loader below.
+# - validation_split > 0 uses the same lazy per-batch path as training
+#   (_LazyFeatureBatchDataset + _SequentialBatchSampler), so a 0.2 split
+#   does not materialize the val set's feature tensors all at once.
 # ============================================================================
 
 
@@ -6195,6 +6299,22 @@ class _BatchIndexSampler(Sampler):
         order = torch.randperm(self.n, generator=self.generator).tolist()
         for start in range(0, self.n, self.batch_size):
             yield order[start : start + self.batch_size]
+
+    def __len__(self) -> int:
+        return (self.n + self.batch_size - 1) // self.batch_size
+
+
+class _SequentialBatchSampler(Sampler):
+    """Consecutive index lists, no shuffle -- validation counterpart to
+    _BatchIndexSampler."""
+
+    def __init__(self, n: int, batch_size: int):
+        self.n = int(n)
+        self.batch_size = int(batch_size)
+
+    def __iter__(self):
+        for start in range(0, self.n, self.batch_size):
+            yield list(range(start, min(start + self.batch_size, self.n)))
 
     def __len__(self) -> int:
         return (self.n + self.batch_size - 1) // self.batch_size
@@ -6334,13 +6454,9 @@ class StreamingSparseEvidenceGNNClassifier(SparseEvidenceGNNClassifier):
         if val_idx.size == 0:
             self._vprint(1, "[Train] validation disabled.")
         else:
-            # See this section's header comment -- not needed by this
-            # pipeline (validation_split=0.0 always), not built.
-            raise NotImplementedError(
-                "StreamingSparseEvidenceGNNClassifier doesn't support "
-                "validation_split > 0 -- a lazy val_loader would need the "
-                "same batching treatment as the train loader, not built "
-                "since nothing here currently sets validation_split != 0."
+            self._vprint(
+                1,
+                f"[Train] validation split: {val_idx.size}/{X.shape[0]} samples.",
             )
 
         # ONE cheap, whole-training-set pass to fit normalization stats --
@@ -6395,7 +6511,11 @@ class StreamingSparseEvidenceGNNClassifier(SparseEvidenceGNNClassifier):
         train_dataset = _LazyFeatureBatchDataset(self, X[train_idx], y_idx[train_idx])
         train_sampler = _BatchIndexSampler(len(train_idx), self.batch_size, shuffle_generator)
         train_loader = DataLoader(train_dataset, sampler=train_sampler, batch_size=None, num_workers=0)
-        val_loader = None  # val_idx.size == 0 enforced above
+        val_loader = None
+        if val_idx.size > 0:
+            val_dataset = _LazyFeatureBatchDataset(self, X[val_idx], y_idx[val_idx])
+            val_sampler = _SequentialBatchSampler(len(val_idx), self.batch_size)
+            val_loader = DataLoader(val_dataset, sampler=val_sampler, batch_size=None, num_workers=0)
 
         if _count_eligible_tensor_batches(train_loader, min_batch_size) == 0:
             raise ValueError(

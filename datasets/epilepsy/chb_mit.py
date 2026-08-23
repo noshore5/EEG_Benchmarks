@@ -31,7 +31,15 @@ from typing import Dict, List, Optional, Union
 import mne
 from moabb.datasets.base import BaseDataset
 from moabb.datasets.download import data_dl, get_dataset_path
-from moabb.datasets.preprocessing import FixedPipeline
+try:
+    from moabb.datasets.preprocessing import FixedPipeline
+except ImportError:  # moabb < 1.3 (no FixedPipeline); identity is enough here
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import FunctionTransformer
+
+    class FixedPipeline(Pipeline):
+        def __init__(self, steps=None):
+            super().__init__(list(steps) if steps else [("identity", FunctionTransformer())])
 
 
 log = logging.getLogger(__name__)

@@ -88,12 +88,12 @@ def dense_edge_cache_key(
     trial, config). Defaults to "fcwt" so existing on-disk entries key
     identically to before this param existed.
 
-    `channel_subset_k`/`channel_subset_metric` (dynamic per-window channel
-    subset): compute_dense_edge_input runs on a different (and, when
-    channel_subset_k is set, smaller) set of channels than the full-mesh
-    default, so a full-mesh entry and a subset entry for the SAME raw_trial
-    bytes must not collide. None/"abs_cosine" defaults key identically to
-    before this pair of params existed (full mesh, unchanged)."""
+    `channel_subset_k`/`channel_subset_metric` (dynamic per-window live-edge
+    subset): when channel_subset_k is set, WCT runs only for the cosine-top-k
+    clique and the result is scattered into a full-E zeros tensor. A
+    full-mesh entry and a subset entry for the SAME raw_trial bytes must not
+    collide. None/"abs_cosine" defaults key identically to before this pair
+    of params existed (full mesh, unchanged)."""
     hasher = hashlib.sha256()
     hasher.update(np.ascontiguousarray(raw_trial, dtype=np.float32).tobytes())
     config_tuple = (

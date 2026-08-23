@@ -1419,6 +1419,7 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
         self.selector_alpha_val_history_ = []
         self.edge_density_history_ = []
         self.optimizer_step_count_history_ = []
+        self.epoch_time_history_ = []
         self.best_epoch_ = None
         self.best_val_loss_ = None
 
@@ -2092,6 +2093,7 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
                     no_improve_epochs += 1
 
             epoch_time = time.perf_counter() - epoch_start
+            self.epoch_time_history_.append(epoch_time)
             # getattr default True: most models don't set _log_aux_metric at
             # all and keep printing whenever they return an aux value (old
             # behavior, unchanged). SparseEvidenceGNNClassifier sets it False

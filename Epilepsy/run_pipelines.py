@@ -1,15 +1,22 @@
-"""Entry point for the Epilepsy dense-edge-GRU pipeline (and, via --pipeline,
+"""Entry point for the Epilepsy dense-edge pipelines (and, via --pipeline,
 the Truong et al. 2018 STFT+CNN replica).
 
     python Epilepsy/run_pipelines.py --subjects 1
     python Epilepsy/run_pipelines.py --smoke
     python Epilepsy/run_pipelines.py --label-mode prediction --smoke
+    python Epilepsy/run_pipelines.py --pipeline dense_edge --smoke
     python Epilepsy/run_pipelines.py --pipeline truong_stft_cnn --smoke
 
---pipeline {dense_edge_gru, truong_stft_cnn}: which CLASSIFIER runs, on top
-of --label-mode's which TASK it's trained for. "dense_edge_gru" (default)
-is this file's own SparseEvidenceGNNClassifier and respects --label-mode
-normally. "truong_stft_cnn" is TruongSTFTCNNClassifier (see
+--pipeline {dense_edge_gru, dense_edge, truong_stft_cnn}: which CLASSIFIER
+runs, on top of --label-mode's which TASK it's trained for. "dense_edge_gru"
+(default) is this file's own SparseEvidenceGNNClassifier with
+dense_edge_temporal_mode="rnn" (per-edge GRU) and respects --label-mode
+normally. "dense_edge" is the same classifier with
+dense_edge_temporal_mode="conv" (Conv2d + pool over time) -- same
+event_mode="dense" graph, same leave-one-seizure-out loops, same
+--label-mode. Results go under results/dense_edge/ so they are never pooled
+with the GRU CSVs under results/ and results/prediction/. "truong_stft_cnn"
+is TruongSTFTCNNClassifier (see
 Epilepsy/pipelines/truong_stft_cnn_classifier.py's module docstring for
 exactly what it replicates from the paper) -- a prediction-only classifier
 by construction, so it forces label_mode="prediction" regardless of
@@ -20,14 +27,13 @@ deliberately not a branch inside leave_one_seizure_out_prediction, same
 its own window_length/step_size defaults (30s/30s, the paper's own segment
 length, vs. dense_edge_gru's 4s/8s), and its own results/truong_stft_cnn/
 output directory. Dataset loading (_build_windowed_dataset,
-_subsample_negative_windows below) IS shared between both --pipeline
-values -- that part is generic to any label_mode="prediction" run, not
-GNN-specific.
+_subsample_negative_windows below) IS shared across --pipeline values --
+that part is generic to any label_mode="prediction" run, not GNN-specific.
 
-This is the epilepsy counterpart to BCI/run_pipelines.py's "dense_edge_gru"
-pipeline (SparseEvidenceGNNClassifier, event_mode="dense",
-dense_edge_temporal_mode="rnn") -- but NOT a copy of that script. Two things
-there don't carry over:
+This is the epilepsy counterpart to BCI/run_pipelines.py's "dense_edge" /
+"dense_edge_gru" pipelines (SparseEvidenceGNNClassifier, event_mode="dense",
+dense_edge_temporal_mode="conv" / "rnn") -- but NOT a copy of that script.
+Two things there don't carry over:
 
   - BCI/run_pipelines.py evaluates via moabb.evaluations.CrossSessionEvaluation
     /CrossSubjectEvaluation, which call paradigm.get_data(dataset, subjects)
@@ -50,12 +56,13 @@ you actually want to match.
 paradigms sharing this file's plumbing (dataset loading, model, caches) but
 kept independent everywhere it matters -- separate label rule (see
 paradigms/continuous_labeling.py), separate leave-one-seizure-out fold
-function (below), separate hyperparameter block (PREDICTION_GRU_PARAMS vs.
-DENSE_EDGE_GRU_PARAMS -- see the comment above _SHARED_ARCH_PARAMS for why),
-separate output directory (results/ vs. results/prediction/), and separate
-evaluation (prediction mode adds event-level hit/miss + false-alarms/hour on
-top of the window-level metrics both modes report). See results/README.md
-for why detection and prediction scores are not directly comparable.
+function (below), separate hyperparameter block (the four DENSE_EDGE_* /
+PREDICTION_* dicts -- see the comment above _SHARED_ARCH_PARAMS for why),
+separate output directory (results/ vs. results/prediction/ for GRU,
+results/dense_edge/ for conv), and separate evaluation (prediction mode
+adds event-level hit/miss + false-alarms/hour on top of the window-level
+metrics both modes report). See results/README.md for why detection and
+prediction scores are not directly comparable.
 """
 
 from __future__ import annotations
@@ -110,16 +117,19 @@ DEFAULT_SPH = 300.0  # seizure prediction horizon, seconds (5min)
 DEFAULT_SOP = 900.0  # seizure occurrence period, seconds (15min)
 DEFAULT_POSTICTAL_BUFFER = 1800.0  # seconds after offset excluded from interictal
 
-# Parameters shared by BOTH label modes: pure model architecture (channel
-# encoder, GNN/GRU shape, coherence/dense-edge settings, device, caching) and
-# training-dynamics knobs that were NOT specifically tuned against
-# detection's behavior. epochs/batch_size/learning_rate are excluded from
-# this block on purpose -- those WERE empirically tuned against detection's
-# easy, fast-converging signal (see the 2026-08-16 session notes under
-# Epilepsy/Session_notes/), and prediction is a harder, noisier task that may
-# need different values entirely. Tuning one mode's epochs/batch_size/
-# learning_rate must not silently move the other's -- see
-# DENSE_EDGE_GRU_PARAMS / PREDICTION_GRU_PARAMS below.
+# Parameters shared by BOTH dense-family pipelines and BOTH label modes:
+# pure model architecture (channel encoder, GNN / dense-edge temporal block,
+# coherence/dense-edge settings, device, caching) and training-dynamics knobs
+# that were NOT specifically tuned against detection's behavior.
+# epochs/batch_size/learning_rate are excluded from this block on purpose --
+# those WERE empirically tuned against detection's easy, fast-converging
+# signal (see the 2026-08-16 session notes under Epilepsy/Session_notes/),
+# and prediction is a harder, noisier task that may need different values
+# entirely. Tuning one mode's epochs/batch_size/learning_rate must not
+# silently move the other's -- see the four DENSE_EDGE_* / PREDICTION_*
+# dicts below. dense_edge_temporal_mode lives in those dicts too (conv vs
+# rnn) rather than here, so flipping the shared default cannot silently
+# turn a GRU run into a Conv2d run.
 _SHARED_ARCH_PARAMS: dict[str, object] = dict(
     channel_subset_k=None,          # None = full mesh
     channel_subset_metric="abs_cosine",
@@ -144,6 +154,11 @@ _SHARED_ARCH_PARAMS: dict[str, object] = dict(
     grad_clip_norm=0.1,
     normalize_input=True,
     validation_split=0.0,
+    # Only fires when validation_split > 0 (common.py's _train_loop needs a
+    # val_loader to score val_loss). Consecutive epochs without a val_loss
+    # improvement before the loop breaks; the best-val checkpoint is still
+    # restored either way. None = run every epoch.
+    early_stopping_patience=5,
     device="mps",
     surrogate_seed=42,
     smooth_kernel_size=(5, 3),
@@ -161,7 +176,6 @@ _SHARED_ARCH_PARAMS: dict[str, object] = dict(
     # after CWT). Same disk-budget motivation as nfreqs above; coarser
     # temporal resolution feeding dense_edge_conv/the GRU.
     dense_edge_time_downsample=16,
-    dense_edge_temporal_mode="rnn",
     dense_conv_kernel_size=5,
     dense_conv_pool_size=4,
     time_averaged_graph=False,
@@ -177,24 +191,48 @@ _SHARED_ARCH_PARAMS: dict[str, object] = dict(
 )
 
 # label_mode="detection" training dynamics (device × batch-size × epochs
-# measured, see the 2026-08-16 session notes).
+# measured, see the 2026-08-16 session notes). Four independent copies
+# (pipeline × label-mode) so tuning one cell cannot silently move another.
+# dense_edge starts as the same numbers as dense_edge_gru plus
+# dense_edge_temporal_mode="conv" -- a reasonable starting point, not a
+# conv-specific tuning pass.
+DENSE_EDGE_PARAMS: dict[str, object] = dict(
+    _SHARED_ARCH_PARAMS,
+    batch_size=736,
+    learning_rate=2e-3,
+    dense_edge_temporal_mode="conv",
+)
+
 DENSE_EDGE_GRU_PARAMS: dict[str, object] = dict(
     _SHARED_ARCH_PARAMS,
     batch_size=736,
     learning_rate=2e-3,
+    dense_edge_temporal_mode="rnn",
 )
 
 # label_mode="prediction" training dynamics -- its OWN block (not a copy
 # reused by reference) so future tuning of one mode can't silently move the
-# other. Currently starts as the same numbers as DENSE_EDGE_GRU_PARAMS --
+# other. Currently starts as the same numbers as the detection dicts --
 # a reasonable starting point, nothing more; prediction's positive rate and
 # task difficulty are meaningfully different (see
 # leave_one_seizure_out_prediction below), so these are expected to need
 # their own tuning pass, not validated yet.
+PREDICTION_DENSE_EDGE_PARAMS: dict[str, object] = dict(
+    _SHARED_ARCH_PARAMS,
+    batch_size=32,
+    learning_rate=2e-3,
+    dense_edge_temporal_mode="conv",
+    # Same validation_split=0.0 note as PREDICTION_GRU_PARAMS below --
+    # copied rather than inherited so a later GRU-only val-split fix cannot
+    # silently move the conv pipeline.
+    validation_split=0.0,
+)
+
 PREDICTION_GRU_PARAMS: dict[str, object] = dict(
     _SHARED_ARCH_PARAMS,
     batch_size=32,
     learning_rate=2e-3,
+    dense_edge_temporal_mode="rnn",
     # 2026-08-19: REVERTED to _SHARED_ARCH_PARAMS's validation_split=0.0 --
     # the apples-to-apples validation_split=0.2 fix (see git history) crashes
     # every prediction-mode dense_edge_gru run: leave_one_seizure_out_prediction
@@ -210,6 +248,45 @@ PREDICTION_GRU_PARAMS: dict[str, object] = dict(
     # never affected by this).
     validation_split=0.0,
 )
+
+
+def _dense_family_params(pipeline: str, label_mode: str) -> dict:
+    """Param dict for --pipeline dense_edge / dense_edge_gru × --label-mode.
+
+    Returns the module-level dict itself (caller must `dict(...)` copy
+    before overlaying CLI overrides). Raises on anything that is not one
+    of the two dense-family pipelines -- truong_stft_cnn has its own
+    TRUONG_STFT_CNN_PARAMS path in main().
+    """
+    if pipeline == "dense_edge":
+        return PREDICTION_DENSE_EDGE_PARAMS if label_mode == "prediction" else DENSE_EDGE_PARAMS
+    if pipeline == "dense_edge_gru":
+        return PREDICTION_GRU_PARAMS if label_mode == "prediction" else DENSE_EDGE_GRU_PARAMS
+    raise ValueError(f"not a dense-family pipeline: {pipeline!r}")
+
+
+def _dense_family_result_dir(
+    output_dir: Path,
+    pipeline: str,
+    label_mode: str,
+    shuffle_labels: bool,
+) -> Path:
+    """Where dense-family CSVs land. dense_edge_gru keeps the historical
+    layout (results/leave_one_seizure_out_*.csv and results/prediction/)
+    so existing GRU numbers stay GRU numbers. dense_edge goes under
+    results/dense_edge/ so conv vs GRU cannot be pooled by a glob.
+    """
+    if pipeline == "dense_edge":
+        root = output_dir / "dense_edge"
+        if label_mode == "prediction":
+            return root / ("prediction_shuffled_control" if shuffle_labels else "prediction")
+        return root / "shuffled_control" if shuffle_labels else root
+    if pipeline == "dense_edge_gru":
+        if label_mode == "prediction":
+            return output_dir / ("prediction_shuffled_control" if shuffle_labels else "prediction")
+        return output_dir / "shuffled_control" if shuffle_labels else output_dir
+    raise ValueError(f"not a dense-family pipeline: {pipeline!r}")
+
 
 DEFAULT_DETECTION_EPOCHS = 20
 # Starting point, same reasoning as PREDICTION_GRU_PARAMS above -- kept as
@@ -268,6 +345,7 @@ TRUONG_STFT_CNN_PARAMS: dict[str, object] = dict(
     weight_decay=0.0,
     grad_clip_norm=None,
     validation_split=0.2,
+    early_stopping_patience=5,
     device="mps",
     use_class_weights=True,
     batch_size=32,
@@ -1025,11 +1103,14 @@ def _build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--subjects", nargs="+", type=int, default=DEFAULT_SUBJECTS)
     parser.add_argument(
         "--pipeline",
-        choices=["dense_edge_gru", "truong_stft_cnn"],
+        choices=["dense_edge_gru", "dense_edge", "truong_stft_cnn"],
         default="dense_edge_gru",
         help=(
-            "'dense_edge_gru' (default): this file's own SparseEvidenceGNNClassifier "
-            "(CWT + coherence dense-edge GNN/GRU) -- respects --label-mode. "
+            "'dense_edge_gru' (default): SparseEvidenceGNNClassifier with "
+            "dense_edge_temporal_mode='rnn' (per-edge GRU) -- respects --label-mode. "
+            "'dense_edge': the same classifier with dense_edge_temporal_mode='conv' "
+            "(Conv2d + pool over time); results go under results/dense_edge/ so they "
+            "are never pooled with the GRU CSVs. "
             "'truong_stft_cnn': Truong et al. 2018's STFT+CNN architecture replica "
             "(see Epilepsy/pipelines/truong_stft_cnn_classifier.py's module docstring) "
             "-- prediction-mode ONLY, forces --label-mode=prediction regardless of "
@@ -1146,13 +1227,14 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         # log), so epochs 24-30 did nothing for that fold. 20 leaves margin
         # before that observed flatline rather than cutting at it -- not
         # validated against every fold, and this is a per-fold TRAINING-loss
-        # observation, not a held-out-performance one (validation_split=0.0
-        # here, so there's no direct evidence of where held-out performance
-        # itself peaks). A train-loss-based early-stopping criterion would
-        # replace this guess with a measured per-fold cutoff; not built yet.
-        # default=None: resolved per --label-mode in main() (see
-        # DEFAULT_DETECTION_EPOCHS / DEFAULT_PREDICTION_EPOCHS) unless
-        # explicitly overridden here.
+        # observation, not a held-out-performance one when
+        # validation_split=0.0). With validation_split > 0, common.py's
+        # val-loss early_stopping_patience (see _SHARED_ARCH_PARAMS /
+        # TRUONG_STFT_CNN_PARAMS) cuts the fold once val_loss stops
+        # improving and restores the best checkpoint; this epoch cap is
+        # then just an upper bound. default=None: resolved per
+        # --label-mode in main() (see DEFAULT_DETECTION_EPOCHS /
+        # DEFAULT_PREDICTION_EPOCHS) unless explicitly overridden here.
         "--epochs", type=int, default=None,
         help="Override epoch count for any pipeline/mode. Unset: defaults depend on --pipeline/--label-mode "
              f"(detection={DEFAULT_DETECTION_EPOCHS}, prediction={DEFAULT_PREDICTION_EPOCHS}, "
@@ -1168,9 +1250,21 @@ def _build_argument_parser() -> argparse.ArgumentParser:
     # under (see the 2026-08-16 session note).
     parser.add_argument("--device", default="mps")
     parser.add_argument(
+        "--early-stopping-patience",
+        type=int,
+        default=None,
+        help=(
+            "Consecutive epochs without val_loss improvement before training "
+            "stops (common.py _train_loop). Requires validation_split > 0 or "
+            "it is a no-op. Unset: uses the pipeline param dict "
+            "(early_stopping_patience=5). Pass 0 to stop on the first "
+            "non-improving epoch."
+        ),
+    )
+    parser.add_argument(
         "--precompute-chunk-size", type=int, default=None,
         help=(
-            "--pipeline=dense_edge_gru only: trials-per-torch-call for the CWT/dense-edge "
+            "--pipeline=dense_edge / dense_edge_gru only: trials-per-torch-call for the CWT/dense-edge "
             "precompute stage (see SparseEvidenceGNNClassifier's precompute_chunk_size docstring, "
             "cwt_gnn_classifiers.py). Unset: original min(batch_size, 4) cap, tuned for a "
             "~16-17GB-RAM machine. On a high-RAM/many-core machine (e.g. a Runpod pod), raising "
@@ -1183,7 +1277,7 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         "--compile-dense-edge-helper",
         action="store_true",
         help=(
-            "--pipeline=dense_edge_gru only: torch.compile(backend='cudagraphs') the "
+            "--pipeline=dense_edge / dense_edge_gru only: torch.compile(backend='cudagraphs') the "
             "dense-edge helper's compute_dense_edge_input -- see that constructor param's "
             "2026-08-22 docstring in cwt_gnn_classifiers.py. CUDA only; no-op elsewhere. "
             "Measured 2026-08-22: no net win on a Windows/no-Triton box."
@@ -1194,9 +1288,11 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help=(
-            "If set, per-window top-k channels by absolute cosine are used "
-            "for the dense-edge WCT instead of the full C*(C-1)/2 mesh. "
-            "None (default) keeps current full-mesh behaviour."
+            "--pipeline=dense_edge / dense_edge_gru only: per-window absolute-cosine top-k "
+            "channels form a clique of live edges; only those pairs get "
+            "WCT/coherence features, scattered into the full E=C*(C-1)/2 "
+            "tensor (inactive slots = 0). The GNN always sees n_channels=C "
+            "and full E. None (default) is the current full-mesh behaviour."
         ),
     )
     parser.add_argument(
@@ -1209,7 +1305,7 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         "--dense-edge-amp-bf16",
         action="store_true",
         help=(
-        "--pipeline=dense_edge_gru only: torch.autocast(dtype=torch.bfloat16) around "
+        "--pipeline=dense_edge / dense_edge_gru only: torch.autocast(dtype=torch.bfloat16) around "
         "the non-trainable dense-edge helper's compute_dense_edge_input call -- see "
         "that constructor param's 2026-08-22 docstring in cwt_gnn_classifiers.py. "
         "CUDA only; no-op elsewhere."
@@ -1219,7 +1315,7 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         "--train-amp-bf16",
         action="store_true",
         help=(
-            "--pipeline=dense_edge_gru only: torch.autocast(dtype=torch.bfloat16) around "
+            "--pipeline=dense_edge / dense_edge_gru only: torch.autocast(dtype=torch.bfloat16) around "
             "the TRAINABLE forward pass (channel_encoder/dense_edge_conv/GRU/classifier), "
             "not the dense-edge precompute stage --dense-edge-amp-bf16 already covers -- "
             "see that constructor param's 2026-08-23 docstring in cwt_gnn_classifiers.py "
@@ -1234,7 +1330,7 @@ def _build_argument_parser() -> argparse.ArgumentParser:
             "SparseEvidenceGNNClassifier._precompute_dense_edge_inputs's per-chunk "
             "phase-timing breakdown (threshold/transfer/compute/copy_back, synced "
             "so CUDA/MPS numbers are real -- see that method's 2026-08-22 comment) "
-            "-- use this to see where a slow --pipeline=dense_edge_gru run's time "
+            "-- use this to see where a slow --pipeline=dense_edge / dense_edge_gru run's time "
             "actually goes before changing --precompute-chunk-size/--device blind. "
             "Unset: leaves clf_params's own default untouched."
         ),
@@ -1243,7 +1339,7 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         "--disable-disk-cache",
         action="store_true",
         help=(
-            "--pipeline=dense_edge_gru only: skip the disk-backed CWT/dense-edge "
+            "--pipeline=dense_edge / dense_edge_gru only: skip the disk-backed CWT/dense-edge "
             "cache (restored 2026-08-22, on by default in leave_one_seizure_out_"
             "detection/leave_one_seizure_out_prediction -- see cwt_window_cache.py's "
             "module docstring). Use this on a machine/config where recompute "
@@ -1401,6 +1497,8 @@ def main(args: argparse.Namespace) -> None:
         clf_params["device"] = args.device
         if args.verbose is not None:
             clf_params["verbose"] = args.verbose
+        if args.early_stopping_patience is not None:
+            clf_params["early_stopping_patience"] = args.early_stopping_patience
 
         print(f"Running leave-one-seizure-out (Truong STFT+CNN, epochs={epochs}, sph={args.sph}s, sop={args.sop}s)...")
         results, per_seizure = leave_one_seizure_out_truong(
@@ -1434,7 +1532,7 @@ def main(args: argparse.Namespace) -> None:
         print(f"event-level hit rate (raw):    {n_hits}/{n_seizures} ({100 * n_hits / n_seizures:.1f}%)")
         print(f"event-level hit rate (k-of-n): {n_hits_smoothed}/{n_seizures} ({100 * n_hits_smoothed / n_seizures:.1f}%)")
     elif label_mode == "prediction":
-        clf_params = dict(PREDICTION_GRU_PARAMS)
+        clf_params = dict(_dense_family_params(pipeline, "prediction"))
         clf_params["seed"] = args.seed
         clf_params["device"] = args.device
         clf_params["precompute_chunk_size"] = args.precompute_chunk_size
@@ -1445,9 +1543,14 @@ def main(args: argparse.Namespace) -> None:
         clf_params["channel_subset_metric"] = args.channel_subset_metric
         if args.verbose is not None:
             clf_params["verbose"] = args.verbose
+        if args.early_stopping_patience is not None:
+            clf_params["early_stopping_patience"] = args.early_stopping_patience
 
-        print(f"Running leave-one-seizure-out prediction (epochs={epochs}, "
-              f"sph={args.sph}s, sop={args.sop}s)...")
+        print(
+            f"Running leave-one-seizure-out prediction (pipeline={pipeline}, "
+            f"dense_edge_temporal_mode={clf_params['dense_edge_temporal_mode']}, "
+            f"epochs={epochs}, sph={args.sph}s, sop={args.sop}s)..."
+        )
         results, per_seizure = leave_one_seizure_out_prediction(
             X, y, metadata, clf_params, epochs, window_length,
             negative_to_positive_ratio=negative_to_positive_ratio,
@@ -1462,7 +1565,11 @@ def main(args: argparse.Namespace) -> None:
         # rule and different achievable ceiling -- see results/README.md.
         # --shuffle-labels gets its OWN separate subdirectory for the same
         # reason -- a null-control run must never be readable as a real one.
-        prediction_dir = output_dir / ("prediction_shuffled_control" if args.shuffle_labels else "prediction")
+        # dense_edge vs dense_edge_gru: conv CSVs never land next to GRU CSVs
+        # (results/dense_edge/prediction/ vs results/prediction/).
+        prediction_dir = _dense_family_result_dir(
+            output_dir, pipeline, "prediction", args.shuffle_labels,
+        )
         prediction_dir.mkdir(parents=True, exist_ok=True)
         results_path = prediction_dir / f"prediction_leave_one_seizure_out_{run_id}.csv"
         per_seizure_path = prediction_dir / f"prediction_per_seizure_{run_id}.csv"
@@ -1480,12 +1587,15 @@ def main(args: argparse.Namespace) -> None:
         n_hits_smoothed = int(results["hit_smoothed"].sum())
         n_seizures = len(results)
         control_note = " -- LABEL-SHUFFLED NULL CONTROL, NOT a real result" if args.shuffle_labels else ""
-        print(f"\n=== Mean across folds (label_mode=prediction; NOT comparable to detection's numbers){control_note} ===")
+        print(
+            f"\n=== Mean across folds (pipeline={pipeline}, label_mode=prediction; "
+            f"NOT comparable to detection's numbers){control_note} ==="
+        )
         print(means.to_string())
         print(f"event-level hit rate (raw):    {n_hits}/{n_seizures} ({100 * n_hits / n_seizures:.1f}%)")
         print(f"event-level hit rate (k-of-n): {n_hits_smoothed}/{n_seizures} ({100 * n_hits_smoothed / n_seizures:.1f}%)")
     else:
-        clf_params = dict(DENSE_EDGE_GRU_PARAMS)
+        clf_params = dict(_dense_family_params(pipeline, "detection"))
         clf_params["seed"] = args.seed
         clf_params["device"] = args.device
         clf_params["precompute_chunk_size"] = args.precompute_chunk_size
@@ -1496,8 +1606,14 @@ def main(args: argparse.Namespace) -> None:
         clf_params["channel_subset_metric"] = args.channel_subset_metric
         if args.verbose is not None:
             clf_params["verbose"] = args.verbose
+        if args.early_stopping_patience is not None:
+            clf_params["early_stopping_patience"] = args.early_stopping_patience
 
-        print(f"Running leave-one-seizure-out detection (epochs={epochs})...")
+        print(
+            f"Running leave-one-seizure-out detection (pipeline={pipeline}, "
+            f"dense_edge_temporal_mode={clf_params['dense_edge_temporal_mode']}, "
+            f"epochs={epochs})..."
+        )
         results = leave_one_seizure_out_detection(
             X, y, metadata, clf_params, epochs,
             disable_disk_cache=args.disable_disk_cache,
@@ -1507,7 +1623,9 @@ def main(args: argparse.Namespace) -> None:
         # --shuffle-labels: same separate-subdirectory reasoning as the
         # prediction branch above -- a null-control run must never land in
         # the same place as (or be mistaken for) a real detection result.
-        detection_dir = output_dir / "shuffled_control" if args.shuffle_labels else output_dir
+        detection_dir = _dense_family_result_dir(
+            output_dir, pipeline, "detection", args.shuffle_labels,
+        )
         detection_dir.mkdir(parents=True, exist_ok=True)
         results_path = detection_dir / f"leave_one_seizure_out_{run_id}.csv"
         results.to_csv(results_path, index=False)
@@ -1516,7 +1634,7 @@ def main(args: argparse.Namespace) -> None:
         numeric_cols = ["accuracy", "precision", "recall", "f1", "average_precision", "roc_auc"]
         means = results[numeric_cols].mean(numeric_only=True)
         control_note = " -- LABEL-SHUFFLED NULL CONTROL, NOT a real result" if args.shuffle_labels else ""
-        print(f"\n=== Mean across folds{control_note} ===")
+        print(f"\n=== Mean across folds (pipeline={pipeline}){control_note} ===")
         print(means.to_string())
 
 
@@ -1559,7 +1677,14 @@ def _write_results_readme(output_dir: Path) -> None:
         "and not directly comparable to `prediction/`'s either (different "
         "model, different window length by default) even though both solve "
         "the same task -- see Epilepsy/pipelines/truong_stft_cnn_classifier.py's "
-        "module docstring.\n",
+        "module docstring.\n\n"
+        "- `dense_edge/leave_one_seizure_out_*.csv` and "
+        "`dense_edge/prediction/`: `--pipeline dense_edge` -- same "
+        "SparseEvidenceGNNClassifier and leave-one-seizure-out loops as "
+        "`dense_edge_gru`, but `dense_edge_temporal_mode=\"conv\"` (Conv2d "
+        "over time) instead of `\"rnn\"` (per-edge GRU). Do not pool these "
+        "with `leave_one_seizure_out_*.csv` / `prediction/` -- those are "
+        "the GRU pipeline's historical layout.\n",
         encoding="utf-8",
     )
 

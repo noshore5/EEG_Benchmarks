@@ -9,6 +9,7 @@ Run, for example:
 
 Or:
     python Epilepsy/debug_one_epoch.py --pipeline dense_edge_gru
+    python Epilepsy/debug_one_epoch.py --pipeline dense_edge
     python Epilepsy/debug_one_epoch.py --pipeline truong_stft_cnn
 
 The purpose is NOT model evaluation. It is to make one complete fold
@@ -652,8 +653,8 @@ def run_debug(args):
 
         clf_class = rp.TruongSTFTCNNClassifier
 
-    elif label_mode == "prediction":
-        clf_params = dict(rp.PREDICTION_GRU_PARAMS)
+    elif pipeline in ("dense_edge", "dense_edge_gru"):
+        clf_params = dict(rp._dense_family_params(pipeline, label_mode))
         clf_params["seed"] = args.seed
         clf_params["device"] = args.device
         clf_params["precompute_chunk_size"] = args.precompute_chunk_size
@@ -665,22 +666,14 @@ def run_debug(args):
         if args.verbose is not None:
             clf_params["verbose"] = args.verbose
 
-        clf_class = rp.StreamingSparseEvidenceGNNClassifier
+        clf_class = (
+            rp.StreamingSparseEvidenceGNNClassifier
+            if label_mode == "prediction"
+            else rp.SparseEvidenceGNNClassifier
+        )
 
     else:
-        clf_params = dict(rp.DENSE_EDGE_GRU_PARAMS)
-        clf_params["seed"] = args.seed
-        clf_params["device"] = args.device
-        clf_params["precompute_chunk_size"] = args.precompute_chunk_size
-        clf_params["compile_dense_edge_helper"] = args.compile_dense_edge_helper
-        clf_params["dense_edge_amp_bf16"] = args.dense_edge_amp_bf16
-        if not args.disable_disk_cache:
-            clf_params["cwt_cache"] = rp.DiskCWTCache(rp.default_cwt_cache_root())
-            clf_params["dense_edge_cache_dir"] = rp.default_dense_edge_cache_root()
-        if args.verbose is not None:
-            clf_params["verbose"] = args.verbose
-
-        clf_class = rp.SparseEvidenceGNNClassifier
+        raise ValueError(f"unknown --pipeline {pipeline!r}")
 
     log(f"classifier class: {clf_class.__name__}")
 
@@ -972,7 +965,7 @@ def parse_args():
 
     parser.add_argument(
         "--pipeline",
-        choices=["dense_edge_gru", "truong_stft_cnn"],
+        choices=["dense_edge_gru", "dense_edge", "truong_stft_cnn"],
         default="dense_edge_gru",
     )
 
