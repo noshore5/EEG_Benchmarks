@@ -65,6 +65,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from certifi.__main__ import args
 import numpy as np
 import pandas as pd
 from sklearn.metrics import (
@@ -121,6 +122,8 @@ DEFAULT_POSTICTAL_BUFFER = 1800.0  # seconds after offset excluded from interict
 # learning_rate must not silently move the other's -- see
 # DENSE_EDGE_GRU_PARAMS / PREDICTION_GRU_PARAMS below.
 _SHARED_ARCH_PARAMS: dict[str, object] = dict(
+    channel_subset_k=None,          # None = full mesh
+    channel_subset_metric="abs_cosine",
     seed=42,
     sampling_rate=256,
     lowest=8.0,
@@ -1150,13 +1153,29 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+    "--channel-subset-k",
+    type=int,
+    default=None,
+    help=(
+        "If set, per-window top-k channels by absolute cosine are used "
+        "for the dense-edge WCT instead of the full C*(C-1)/2 mesh. "
+        "None (default) keeps current full-mesh behaviour."
+        ),
+    )
+    parser.add_argument(
+        "--channel-subset-metric",
+        default="abs_cosine",
+        choices=["abs_cosine"],
+        help="Cheap affinity used to rank channels when --channel-subset-k is set.",
+    )
+    parser.add_argument(
         "--dense-edge-amp-bf16",
         action="store_true",
         help=(
-            "--pipeline=dense_edge_gru only: torch.autocast(dtype=torch.bfloat16) around "
-            "the non-trainable dense-edge helper's compute_dense_edge_input call -- see "
-            "that constructor param's 2026-08-22 docstring in cwt_gnn_classifiers.py. "
-            "CUDA only; no-op elsewhere."
+        "--pipeline=dense_edge_gru only: torch.autocast(dtype=torch.bfloat16) around "
+        "the non-trainable dense-edge helper's compute_dense_edge_input call -- see "
+        "that constructor param's 2026-08-22 docstring in cwt_gnn_classifiers.py. "
+        "CUDA only; no-op elsewhere."
         ),
     )
     parser.add_argument(
@@ -1385,6 +1404,8 @@ def main(args: argparse.Namespace) -> None:
         clf_params["compile_dense_edge_helper"] = args.compile_dense_edge_helper
         clf_params["dense_edge_amp_bf16"] = args.dense_edge_amp_bf16
         clf_params["train_amp_bf16"] = args.train_amp_bf16
+        clf_params["channel_subset_k"] = args.channel_subset_k
+        clf_params["channel_subset_metric"] = args.channel_subset_metric
         if args.verbose is not None:
             clf_params["verbose"] = args.verbose
 

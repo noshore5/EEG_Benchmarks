@@ -4633,7 +4633,18 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         # being trusted -- max abs diff ~0.007-0.008 on coh/significance
         # (range [0,1]), noise-level by this pipeline's own existing bar
         # (see the (5,3)-vs-(25,3) smoothing-kernel comparison above).
+
+        # Dynamic per-window channel subset for dense-edge computation.
+        # None / 0 = full mesh (current behaviour). When set, only the top-k
+        # channels by absolute cosine are used for the expensive WCT/dense-edge
+        # stage; channel embeddings stay size C and are indexed.
+        channel_subset_k: int | None = None,
+        channel_subset_metric: str = "abs_cosine",
         dense_edge_amp_bf16: bool = False,
+
+
+
+
         # 2026-08-23: opt-in torch.autocast(dtype=torch.bfloat16) around the
         # TRAINABLE forward pass (channel_encoder/dense_edge_conv/GRU/
         # classifier -- whatever self.model_(*batch_inputs) actually is),

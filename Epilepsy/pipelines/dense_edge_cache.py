@@ -67,6 +67,8 @@ def dense_edge_cache_key(
     scale_adaptive_cycles,
     scale_adaptive_max_kernel,
     cwt_backend: str = "fcwt",
+    channel_subset_k=...,
+    channel_subset_metric=...,
 ) -> str:
     """`raw_trial` is one trial's FULL [n_channels, n_time] raw (pre-
     normalization, post-channel-subset) window -- the whole trial in one
