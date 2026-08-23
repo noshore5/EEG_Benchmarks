@@ -624,9 +624,13 @@ def _compute_cwt_real_imag_tensors_device_resident(
                     "cwt_torch's own output length ever stops matching its "
                     "input length."
                 )
-            coeffs_tf = torch.nan_to_num(coeffs_tf, nan=0.0, posinf=0.0, neginf=0.0)
-            w_real_flat[start:end] = coeffs_tf.real.float() * scale
-            w_imag_flat[start:end] = coeffs_tf.imag.float() * scale
+            # nan_to_num on a complex tensor isn't implemented for the MPS
+            # backend (NotImplementedError: "nan_to_num_mps" ... 'ComplexFloat'),
+            # so sanitize the real/imag float views separately instead.
+            real_part = torch.nan_to_num(coeffs_tf.real, nan=0.0, posinf=0.0, neginf=0.0)
+            imag_part = torch.nan_to_num(coeffs_tf.imag, nan=0.0, posinf=0.0, neginf=0.0)
+            w_real_flat[start:end] = real_part.float() * scale
+            w_imag_flat[start:end] = imag_part.float() * scale
             pbar.update(end - start)
 
     raw_x = torch.from_numpy(np.ascontiguousarray(X_raw, dtype=np.float32)).to(device)
