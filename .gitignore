@@ -6,3 +6,20 @@
 # keep working; must not be committed here (no .gitmodules, so committing
 # it would only leave a broken/dangling submodule reference).
 /src/
+
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# OS cruft
+.DS_Store
+
+# Scratch / working files not meant to be tracked
+_to_delete/
+
+# Common Python packaging/venv artifacts
+*.egg-info/
+.eggs/
+.ipynb_checkpoints/
+.pytest_cache/
