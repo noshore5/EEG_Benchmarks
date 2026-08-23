@@ -513,6 +513,17 @@ def leave_one_seizure_out_prediction(
     negative_to_positive_ratio: float | None = None,
     subsample_seed: int = 42,
     disable_disk_cache: bool = False,
+    # 2026-08-23: added so this pipeline's event-level numbers are directly
+    # comparable to leave_one_seizure_out_truong's, not just its window-level
+    # ones -- same k_of_n_alarm (Truong et al. 2018 Section II.D), same
+    # default k/n, applied the same way (per held-out (subject, run)
+    # recording, in chronological window order, never across recordings).
+    # Reuses truong's own constants/CLI flags (--k-of-n-k/--k-of-n-n) rather
+    # than defining a separate pair -- there's no reason this pipeline's
+    # smoothing window would want to differ from the baseline it's being
+    # compared against.
+    k_of_n_k: int = DEFAULT_TRUONG_K_OF_N_K,
+    k_of_n_n: int = DEFAULT_TRUONG_K_OF_N_N,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Leave-one-seizure-out CV for label_mode="prediction".
 
@@ -669,6 +680,19 @@ def leave_one_seizure_out_prediction(
         y_score = proba[:, 1]
         y_pred = clf.classes_[np.argmax(proba, axis=1)]
 
+        # k-of-n smoothing (Truong et al. 2018 Section II.D), same as
+        # leave_one_seizure_out_truong -- per (subject, run) recording in
+        # this fold, in chronological window order (meta_test's
+        # "window_start" column from ContinuousLabelingParadigm), never
+        # across recordings.
+        y_pred_smoothed = np.array(y_pred, dtype=np.int64, copy=True)
+        time_col = "window_start" if "window_start" in meta_test.columns else None
+        for (_s, _r), group in meta_test.groupby(["subject", "run"], sort=False):
+            order = group.sort_values(time_col).index if time_col else group.index
+            order = order.to_numpy()
+            raw = (y_pred[order] == 1).astype(np.int64)
+            y_pred_smoothed[order] = k_of_n_alarm(raw, k=k_of_n_k, n=k_of_n_n)
+
         row = {
             "subject": subject,
             "run": run,
@@ -690,13 +714,8 @@ def leave_one_seizure_out_prediction(
         # --- event-level evaluation (task: window-level metrics alone
         # don't answer the question that matters for prediction) ---
         own_seizure_mask = (meta_test["seizure_id"] == seizure_id).to_numpy()
-        n_preictal = int(own_seizure_mask.sum())
-        n_preictal_hit = int((y_pred[own_seizure_mask] == 1).sum()) if n_preictal else 0
-        hit = n_preictal_hit > 0
-
         interictal_mask = (y_test == 0)
         n_interictal = int(interictal_mask.sum())
-        n_false_alarms = int((y_pred[interictal_mask] == 1).sum())
         # Monitored interictal hours, approximated as n_windows *
         # window_length. Exact only when step_size >= window_length
         # (non-overlapping windows); with overlap this overcounts monitored
@@ -704,15 +723,33 @@ def leave_one_seizure_out_prediction(
         # treat false_alarms_per_hour as an upper bound on true FAR/h, not
         # an exact field-comparable figure, until windows are non-overlapping.
         interictal_hours = (n_interictal * window_length) / 3600.0
-        far_per_hour = (n_false_alarms / interictal_hours) if interictal_hours > 0 else float("nan")
 
-        row["hit"] = hit
+        def _event_metrics(preds: np.ndarray) -> dict[str, object]:
+            n_preictal = int(own_seizure_mask.sum())
+            n_hit = int((preds[own_seizure_mask] == 1).sum()) if n_preictal else 0
+            n_false_alarms = int((preds[interictal_mask] == 1).sum())
+            far = (n_false_alarms / interictal_hours) if interictal_hours > 0 else float("nan")
+            return {
+                "hit": n_hit > 0,
+                "n_preictal_windows_predicted_positive": n_hit,
+                "n_false_alarms": n_false_alarms,
+                "false_alarms_per_hour": far,
+            }
+
+        raw_events = _event_metrics(np.asarray(y_pred))
+        smoothed_events = _event_metrics(y_pred_smoothed)
+        n_preictal = int(own_seizure_mask.sum())
+
+        row["hit"] = raw_events["hit"]
         row["n_preictal_windows"] = n_preictal
-        row["n_preictal_windows_predicted_positive"] = n_preictal_hit
+        row["n_preictal_windows_predicted_positive"] = raw_events["n_preictal_windows_predicted_positive"]
         row["n_interictal_windows"] = n_interictal
-        row["n_false_alarms"] = n_false_alarms
+        row["n_false_alarms"] = raw_events["n_false_alarms"]
         row["interictal_hours_monitored"] = interictal_hours
-        row["false_alarms_per_hour"] = far_per_hour
+        row["false_alarms_per_hour"] = raw_events["false_alarms_per_hour"]
+        row["hit_smoothed"] = smoothed_events["hit"]
+        row["n_false_alarms_smoothed"] = smoothed_events["n_false_alarms"]
+        row["false_alarms_per_hour_smoothed"] = smoothed_events["false_alarms_per_hour"]
         fold_rows.append(row)
 
         # --- per-seizure outcome log (task: cheap now, expensive to
@@ -729,19 +766,23 @@ def leave_one_seizure_out_prediction(
                 "seizure_offset_s": offset,
                 "seizure_duration_s": offset - onset,
                 "run_start_time": run_start_time,  # best-effort clock time; often None (see paradigm docstring)
-                "hit": hit,
+                "hit": raw_events["hit"],
+                "hit_smoothed": smoothed_events["hit"],
                 "n_preictal_windows": n_preictal,
-                "n_preictal_windows_predicted_positive": n_preictal_hit,
+                "n_preictal_windows_predicted_positive": raw_events["n_preictal_windows_predicted_positive"],
                 "mean_preictal_score": mean_preictal_score,
                 "n_interictal_windows": n_interictal,
-                "n_false_alarms": n_false_alarms,
-                "false_alarms_per_hour": far_per_hour,
+                "n_false_alarms": raw_events["n_false_alarms"],
+                "false_alarms_per_hour": raw_events["false_alarms_per_hour"],
+                "false_alarms_per_hour_smoothed": smoothed_events["false_alarms_per_hour"],
             }
         )
 
         print(
             f"  seizure {seizure_id}: n_test={row['n_test']} preictal={n_preictal}  "
-            f"hit={hit}  FAR/h={far_per_hour:.3f}  "
+            f"hit={raw_events['hit']} (smoothed={smoothed_events['hit']})  "
+            f"FAR/h={raw_events['false_alarms_per_hour']:.3f} "
+            f"(smoothed={smoothed_events['false_alarms_per_hour']:.3f})  "
             f"precision={row['precision']:.3f} recall={row['recall']:.3f} "
             f"f1={row['f1']:.3f} auc_pr={row['average_precision']:.3f}"
         )
@@ -998,6 +1039,17 @@ def _build_argument_parser() -> argparse.ArgumentParser:
              "negative. Defaults to --postictal-buffer if not set.",
     )
     parser.add_argument(
+        "--max-channels", type=int, default=None,
+        help=(
+            "Diagnostic only (2026-08-23): truncate X to the first N channels right after "
+            "_build_windowed_dataset, before any classifier sees it -- e.g. to A/B time the "
+            "dense-edge precompute stage against edge count (dense edges scale as C*(C-1)/2, "
+            "so chb01's 23 channels -> 253 edges vs. 5 channels -> 10 edges). Cheap slice, no "
+            "re-download/re-window needed. Not a real channel-selection feature -- picks "
+            "whatever channels sort first in the EDF, not a principled electrode subset."
+        ),
+    )
+    parser.add_argument(
         "--max-interictal-recordings", type=int, default=None,
         help=(
             "label_mode=prediction only: cap on how many seizure-free recordings to load (evenly spaced through "
@@ -1105,6 +1157,18 @@ def _build_argument_parser() -> argparse.ArgumentParser:
             "the non-trainable dense-edge helper's compute_dense_edge_input call -- see "
             "that constructor param's 2026-08-22 docstring in cwt_gnn_classifiers.py. "
             "CUDA only; no-op elsewhere."
+        ),
+    )
+    parser.add_argument(
+        "--train-amp-bf16",
+        action="store_true",
+        help=(
+            "--pipeline=dense_edge_gru only: torch.autocast(dtype=torch.bfloat16) around "
+            "the TRAINABLE forward pass (channel_encoder/dense_edge_conv/GRU/classifier), "
+            "not the dense-edge precompute stage --dense-edge-amp-bf16 already covers -- "
+            "see that constructor param's 2026-08-23 docstring in cwt_gnn_classifiers.py "
+            "(TorchEEGClassifier.train_amp_bf16 in common.py). CUDA only; no-op elsewhere. "
+            "Independent of --dense-edge-amp-bf16 -- either, both, or neither."
         ),
     )
     parser.add_argument(
@@ -1240,6 +1304,11 @@ def main(args: argparse.Namespace) -> None:
         interictal_buffer=args.interictal_buffer,
         max_interictal_recordings=max_interictal_recordings,
     )
+    if args.max_channels is not None and X.shape[1] > args.max_channels:
+        print(f"  --max-channels={args.max_channels}: truncating X from {X.shape[1]} "
+              f"to {args.max_channels} channels (diagnostic only, see that flag's help)")
+        X = X[:, :args.max_channels, :]
+
     label_word = "preictal" if label_mode == "prediction" else "ictal"
     print(f"  X: {X.shape}  {label_word} windows: {int(y.sum())}/{len(y)} "
           f"({100 * y.mean():.1f}%)")
@@ -1315,6 +1384,7 @@ def main(args: argparse.Namespace) -> None:
         clf_params["precompute_chunk_size"] = args.precompute_chunk_size
         clf_params["compile_dense_edge_helper"] = args.compile_dense_edge_helper
         clf_params["dense_edge_amp_bf16"] = args.dense_edge_amp_bf16
+        clf_params["train_amp_bf16"] = args.train_amp_bf16
         if args.verbose is not None:
             clf_params["verbose"] = args.verbose
 
@@ -1324,6 +1394,7 @@ def main(args: argparse.Namespace) -> None:
             X, y, metadata, clf_params, epochs, window_length,
             negative_to_positive_ratio=negative_to_positive_ratio,
             disable_disk_cache=args.disable_disk_cache,
+            k_of_n_k=args.k_of_n_k, k_of_n_n=args.k_of_n_n,
         )
 
         # Separate output path (task 6, bullet 1): never pooled with
@@ -1343,15 +1414,17 @@ def main(args: argparse.Namespace) -> None:
 
         numeric_cols = [
             "accuracy", "precision", "recall", "f1", "average_precision", "roc_auc",
-            "false_alarms_per_hour",
+            "false_alarms_per_hour", "false_alarms_per_hour_smoothed",
         ]
         means = results[numeric_cols].mean(numeric_only=True)
         n_hits = int(results["hit"].sum())
+        n_hits_smoothed = int(results["hit_smoothed"].sum())
         n_seizures = len(results)
         control_note = " -- LABEL-SHUFFLED NULL CONTROL, NOT a real result" if args.shuffle_labels else ""
         print(f"\n=== Mean across folds (label_mode=prediction; NOT comparable to detection's numbers){control_note} ===")
         print(means.to_string())
-        print(f"event-level hit rate: {n_hits}/{n_seizures} ({100 * n_hits / n_seizures:.1f}%)")
+        print(f"event-level hit rate (raw):    {n_hits}/{n_seizures} ({100 * n_hits / n_seizures:.1f}%)")
+        print(f"event-level hit rate (k-of-n): {n_hits_smoothed}/{n_seizures} ({100 * n_hits_smoothed / n_seizures:.1f}%)")
     else:
         clf_params = dict(DENSE_EDGE_GRU_PARAMS)
         clf_params["seed"] = args.seed
@@ -1359,6 +1432,7 @@ def main(args: argparse.Namespace) -> None:
         clf_params["precompute_chunk_size"] = args.precompute_chunk_size
         clf_params["compile_dense_edge_helper"] = args.compile_dense_edge_helper
         clf_params["dense_edge_amp_bf16"] = args.dense_edge_amp_bf16
+        clf_params["train_amp_bf16"] = args.train_amp_bf16
         if args.verbose is not None:
             clf_params["verbose"] = args.verbose
 

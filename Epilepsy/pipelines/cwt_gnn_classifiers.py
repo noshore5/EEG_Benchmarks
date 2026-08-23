@@ -2743,6 +2743,39 @@ class SparseEvidenceGNNCore(nn.Module):
         compute_mag: bool,
     ) -> tuple[torch.Tensor | None, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         num_edges = self.src_idx.numel()
+        # 2026-08-23: this stage's elementwise products below (index_select
+        # + multiply/subtract on the raw [B, C, T, F] CWT coefficients) are
+        # NOT autocast-eligible ops -- confirmed directly (`a*b-a` keeps its
+        # input dtype under torch.autocast(dtype=bfloat16); only conv2d/
+        # matmul-type ops get auto-downcast there). That means
+        # dense_edge_amp_bf16's outer torch.autocast(...) context (see
+        # compute_dense_edge_input's caller, _precompute_dense_edge_inputs)
+        # never actually shrank THESE tensors -- only _smooth_wct_maps's
+        # conv2d further downstream did. This is exactly the stage that
+        # OOM'd at 23 channels/T=7680 native resolution (2026-08-23 session:
+        # `xwt_imag = src_i * dst_r - src_r * dst_i` tried to allocate 1.85
+        # GiB with nothing free). Explicitly casting to the ambient autocast
+        # dtype here -- rather than relying on autocast's own (here,
+        # ineffective) op-based casting -- is what actually halves this
+        # stage's VRAM footprint. torch.is_autocast_enabled() is only True
+        # inside an active CUDA autocast context (i.e. dense_edge_amp_bf16=
+        # True on CUDA, the only caller that opens one around this code
+        # path); a no-op everywhere else (CPU/MPS, or bf16 off), same
+        # gating the outer context already provides -- no new flag needed.
+        # Also casts `freqs` (not just w_real/w_imag): the final
+        # `xwt_real * inv_scale` below is a plain elementwise multiply too
+        # (same non-autocast-eligible category as everything else in this
+        # function), and freqs/inv_scale start out fp32 regardless -- left
+        # uncast, that multiply's ordinary bf16-times-fp32 type promotion
+        # would silently upcast the RETURNED xwt_real/xwt_imag/auto1/auto2
+        # back to fp32 right at the end, undoing the cast above for exactly
+        # the tensors _smooth_wct_maps's conv2d (and its own `maps` stack)
+        # receives next.
+        if torch.is_autocast_enabled():
+            amp_dtype = torch.get_autocast_dtype("cuda")
+            w_real = w_real.to(amp_dtype)
+            w_imag = w_imag.to(amp_dtype)
+            freqs = freqs.to(amp_dtype)
         real_edges = w_real.index_select(1, self.edge_pair_idx)
         imag_edges = w_imag.index_select(1, self.edge_pair_idx)
         src_r, dst_r = real_edges.split(num_edges, dim=1)
@@ -2814,31 +2847,40 @@ class SparseEvidenceGNNCore(nn.Module):
 
         out_time, out_freq = smoothed.shape[-2:]
         smoothed = smoothed.view(batch_size, num_edges, 4, out_time, out_freq)
-        # 2026-08-22: torch.complex() only accepts Half/Float/Double --
-        # confirmed directly (RuntimeError) that it rejects BFloat16. This
-        # is the actual blocker for dense_edge_amp_bf16 (see that
-        # constructor param's docstring): wrapping compute_dense_edge_input
-        # in torch.autocast(dtype=torch.bfloat16) casts this method's
-        # conv2d output (`smoothed`) to bf16, and the very next line then
-        # crashes here (this is the scale_adaptive_smoothing=False path --
-        # the default and this pipeline's actual config; see
-        # _smooth_wct_maps_scale_adaptive below for the same issue on the
-        # scale_adaptive_smoothing=True path). A future attempt at bf16
-        # for this stage would need to force `smoothed` (or at minimum
-        # smoothed[:, :, 0:2], the two slices feeding torch.complex) back
-        # to float32 right at this boundary -- e.g.
-        # `smoothed[:, :, :2].float()` -- before constructing smooth_cross,
-        # then decide separately whether smooth_auto1/smooth_auto2 and the
-        # coh division below stay bf16 or also get upcast. Not attempted
-        # yet: real surgery inside this method, a bigger change than the
-        # flag-gated call-site wrapping every other 2026-08-22 optimization
-        # used (re-verify numerically against fp32 output before trusting
-        # it, same as this flag's own verification did).
-        smooth_cross = torch.complex(smoothed[:, :, 0], smoothed[:, :, 1])
+        # 2026-08-23: was `smooth_cross = torch.complex(smoothed[:, :, 0],
+        # smoothed[:, :, 1])` + `coh = smooth_cross.abs() ** 2 / ...`,
+        # returning smooth_cross itself for callers to run torch.angle() on.
+        # Two problems under dense_edge_amp_bf16's
+        # torch.autocast(dtype=torch.bfloat16): (1) torch.complex() only
+        # accepts Half/Float/Double, rejecting the bf16 `smoothed` this
+        # produces (RuntimeError, confirmed directly) -- forcing the two
+        # slices to .float() fixed the crash but (2) complex64 itself is
+        # ALWAYS 8 bytes/element (two fp32 lanes) regardless of the real
+        # dtype fed in, so that fix silently re-inflated exactly the
+        # [B, E, T, F]-at-native-resolution tensor this whole change exists
+        # to shrink -- confirmed directly: the 23-channel/T=7680 OOM this
+        # session persisted afterward, same 1.85GiB allocation size as
+        # before the fix, just moved here from _full_edge_wct_maps.
+        # real_c/imag_c below are the same values smooth_cross's real/imag
+        # parts would have held, but as plain tensors: no complex64 dtype
+        # to force a minimum 8 bytes/element, so they (and everything built
+        # from them -- coh, and callers' phase) stay in `smoothed`'s own
+        # dtype -- bf16 under autocast, bit-identical to the previous
+        # fp32-only behavior otherwise. torch.angle(complex(r, i)) ==
+        # torch.atan2(i, r) and complex(r,i).abs()**2 == r*r + i*i
+        # algebraically -- every caller that used to do
+        # `smooth_cross, coh, _ = self._smooth(...); phase =
+        # torch.angle(smooth_cross)` now gets `phase` back directly instead
+        # of `smooth_cross` (see this method's callers) and drops that
+        # torch.angle() call, since there is no complex tensor left to call
+        # it on.
+        real_c = smoothed[:, :, 0]
+        imag_c = smoothed[:, :, 1]
         smooth_auto1 = smoothed[:, :, 2]
         smooth_auto2 = smoothed[:, :, 3]
-        coh = (smooth_cross.abs() ** 2) / (smooth_auto1 * smooth_auto2 + 1e-12)
-        return smooth_cross, coh.clamp(min=0.0, max=1.0), smooth_kernel
+        coh = (real_c * real_c + imag_c * imag_c) / (smooth_auto1 * smooth_auto2 + 1e-12)
+        phase = torch.atan2(imag_c, real_c)
+        return phase, coh.clamp(min=0.0, max=1.0), smooth_kernel
 
     def _resolved_scale_adaptive_max_kernel(self) -> int:
         """scale_adaptive_max_kernel rounded up to odd, as every kernel-
@@ -2979,18 +3021,21 @@ class SparseEvidenceGNNCore(nn.Module):
 
         out_time, out_freq = smoothed.shape[-2:]
         smoothed = smoothed.view(batch_size, num_edges, 4, out_time, out_freq)
-        # 2026-08-22: same torch.complex()-rejects-BFloat16 blocker as
-        # _smooth_wct_maps's identical line (see that method's comment for
-        # the full explanation and what a fix would need) -- this is the
-        # scale_adaptive_smoothing=True path, not this pipeline's actual
-        # config (scale_adaptive_smoothing=False), but dense_edge_amp_bf16
-        # would hit the same crash here if that option were ever combined
-        # with bf16.
-        smooth_cross = torch.complex(smoothed[:, :, 0], smoothed[:, :, 1])
+        # 2026-08-23: same fix as _smooth_wct_maps's identical line (see
+        # that method's comment for the full explanation of why the
+        # torch.complex()-based version both crashed AND, once patched to
+        # avoid the crash, defeated dense_edge_amp_bf16's own purpose) --
+        # this is the scale_adaptive_smoothing=True path, not this
+        # pipeline's actual config (scale_adaptive_smoothing=False), but
+        # gets the same real/imag-without-complex64 treatment rather than
+        # being left with either problem live.
+        real_c = smoothed[:, :, 0]
+        imag_c = smoothed[:, :, 1]
         smooth_auto1 = smoothed[:, :, 2]
         smooth_auto2 = smoothed[:, :, 3]
-        coh = (smooth_cross.abs() ** 2) / (smooth_auto1 * smooth_auto2 + 1e-12)
-        return smooth_cross, coh.clamp(min=0.0, max=1.0), time_weight
+        coh = (real_c * real_c + imag_c * imag_c) / (smooth_auto1 * smooth_auto2 + 1e-12)
+        phase = torch.atan2(imag_c, real_c)
+        return phase, coh.clamp(min=0.0, max=1.0), time_weight
 
     def _smooth(self, xwt_real, xwt_imag, auto1, auto2, freqs_batched, smooth_kernel_and_pad,
                 stride: tuple[int, int] = (1, 1)):
@@ -3018,23 +3063,27 @@ class SparseEvidenceGNNCore(nn.Module):
         the exact same (parameter-free) math _build_sparse_events uses for
         real trials, so the null is computed under identical conditions.
 
-        Returns (coh, phase) -- phase (torch.angle(smooth_cross)) is needed
-        by _max_cluster_statistic's cluster-forming gate for
-        coherence_threshold_mode="surrogate_cluster", so the null is formed
-        under the exact same (coherence AND phase) gate real events use, not
-        coherence alone (a coherence-only null would systematically
-        overstate cluster sizes relative to what real candidate clusters --
-        which must also clear the phase gate -- can ever achieve).
+        Returns (coh, phase) -- phase is needed by _max_cluster_statistic's
+        cluster-forming gate for coherence_threshold_mode="surrogate_cluster",
+        so the null is formed under the exact same (coherence AND phase) gate
+        real events use, not coherence alone (a coherence-only null would
+        systematically overstate cluster sizes relative to what real
+        candidate clusters -- which must also clear the phase gate -- can
+        ever achieve).
         """
         with torch.no_grad():
             _, xwt_real, xwt_imag, auto1, auto2 = self._full_edge_wct_maps(
                 w_real, w_imag, freqs_batched, compute_mag=False
             )
-            smooth_cross, coh, _ = self._smooth(
+            # 2026-08-23: _smooth's first return value used to be a complex
+            # `smooth_cross` tensor this call site ran torch.angle() on --
+            # see _smooth_wct_maps's 2026-08-23 comment for why that's now
+            # `phase` directly (torch.atan2(imag, real), computed without
+            # ever forming a complex64 tensor).
+            phase, coh, _ = self._smooth(
                 xwt_real, xwt_imag, auto1, auto2, freqs_batched, smooth_kernel_and_pad,
                 stride=(1, 1),
             )
-            phase = torch.angle(smooth_cross)
         return coh, phase
 
     def _max_cluster_statistic(self, coh, cluster_forming_threshold, coi_valid, phase):
@@ -3183,11 +3232,13 @@ class SparseEvidenceGNNCore(nn.Module):
             _, xwt_real, xwt_imag, auto1, auto2 = self._full_edge_wct_maps(
                 w_real, w_imag, freqs_batched, compute_mag=False
             )
-            smooth_cross, coh, _ = self._smooth(
+            # 2026-08-23: see _coherence_only's identical call, above --
+            # `phase` comes back directly now, not a complex tensor to run
+            # torch.angle() on.
+            phase, coh, _ = self._smooth(
                 xwt_real, xwt_imag, auto1, auto2, freqs_batched, smooth_kernel_and_pad,
                 stride=(1, 1),
             )
-            phase = torch.angle(smooth_cross)
             threshold = (
                 self.coherence_threshold
                 if coherence_threshold_override is None
@@ -3487,11 +3538,16 @@ class SparseEvidenceGNNCore(nn.Module):
             _, xwt_real, xwt_imag, auto1, auto2 = self._full_edge_wct_maps(
                 w_real, w_imag, freqs_batched, compute_mag=False
             )
-            smooth_cross, coh, _ = self._smooth(
+            # 2026-08-23: see _coherence_only's identical call for the full
+            # explanation -- `phase` comes back directly now, not a complex
+            # tensor to run torch.angle() on. This is the event_mode="dense"
+            # path DENSE_EDGE_GRU_PARAMS/PREDICTION_GRU_PARAMS actually use,
+            # so this is the call site dense_edge_amp_bf16's VRAM fix
+            # (see _full_edge_wct_maps/_smooth_wct_maps) was actually for.
+            phase, coh, _ = self._smooth(
                 xwt_real, xwt_imag, auto1, auto2, freqs_batched, smooth_kernel_and_pad,
                 stride=(1, 1),
             )
-            phase = torch.angle(smooth_cross)
 
             threshold = (
                 self.coherence_threshold
@@ -4539,22 +4595,68 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         # gets verified numerically before being trusted, not just timed.
         # CUDA only; no-op elsewhere.
         #
-        # STATUS (2026-08-22): does not currently work, and this flag has
-        # NOT been shown to speed anything up -- verified numerically
-        # before ever timing it (per this docstring's own stated plan),
-        # and that verification hit a hard crash, not a precision
-        # question: torch.complex() (in both _smooth_wct_maps and
-        # _smooth_wct_maps_scale_adaptive -- see their own comments at the
-        # torch.complex() call) rejects BFloat16 outright
-        # ("RuntimeError: Expected both inputs to be Half, Float or Double
-        # tensors but got BFloat16 and BFloat16"). Left in place, off by
-        # default, as a flagged future option: fixing it means forcing the
-        # conv2d output back to float32 right before torch.complex() (see
-        # those methods' comments for exactly where), which is real
-        # surgery inside the core math, not just wrapping this call site --
-        # re-run the fp32-vs-bf16 numerical comparison (not just epoch
-        # timing) before trusting any future attempt.
+        # STATUS (2026-08-23): fixed and actually verified now, in two
+        # steps -- neither alone was enough:
+        #   1. _full_edge_wct_maps (called BEFORE _smooth_wct_maps's conv2d,
+        #      i.e. upstream of the only autocast-eligible op in this whole
+        #      stage) does plain index_select + elementwise multiply/
+        #      subtract on w_real/w_imag -- confirmed directly that
+        #      autocast does NOT downcast those (only conv2d/matmul-type
+        #      ops), so this flag's outer torch.autocast(...) context used
+        #      to leave that stage's tensors at full fp32 regardless. This
+        #      is exactly what OOM'd at 23 channels/T=7680 (2026-08-23
+        #      session: `xwt_imag = src_i * dst_r - src_r * dst_i` tried to
+        #      allocate 1.85GiB with nothing free) -- fixed by an explicit
+        #      .to(amp_dtype) cast on w_real/w_imag/freqs at the top of
+        #      _full_edge_wct_maps, gated on torch.is_autocast_enabled()
+        #      (see that method's own comment).
+        #   2. That alone still OOM'd at the same size, just moved later:
+        #      _smooth_wct_maps used to build a complex64 `smooth_cross`
+        #      tensor (torch.complex() rejects bf16 outright -- the
+        #      original blocker) so callers could run torch.angle() on it.
+        #      complex64 is ALWAYS 8 bytes/element regardless of the real
+        #      dtype fed in, so forcing float32 in there just to satisfy
+        #      torch.complex() silently re-inflated the memory this whole
+        #      change exists to shrink. Fixed by dropping torch.complex()
+        #      entirely -- torch.angle(complex(r,i)) == torch.atan2(i, r)
+        #      and complex(r,i).abs()**2 == r*r + i*i algebraically, so
+        #      _smooth_wct_maps/_smooth_wct_maps_scale_adaptive now return
+        #      `phase` (via atan2) instead of a complex tensor, and every
+        #      caller (_coherence_only, _build_sparse_events,
+        #      _build_dense_edge_input) takes it directly instead of
+        #      calling torch.angle() itself. coh/phase now stay in
+        #      `smoothed`'s own dtype (bf16 under autocast) the whole way
+        #      through, matching fp32 behavior bit-for-bit when this flag
+        #      is off.
+        # Both steps verified numerically (fp32-vs-bf16 dense-edge output
+        # on a synthetic test-tone-like signal, not just timed) before
+        # being trusted -- max abs diff ~0.007-0.008 on coh/significance
+        # (range [0,1]), noise-level by this pipeline's own existing bar
+        # (see the (5,3)-vs-(25,3) smoothing-kernel comparison above).
         dense_edge_amp_bf16: bool = False,
+        # 2026-08-23: opt-in torch.autocast(dtype=torch.bfloat16) around the
+        # TRAINABLE forward pass (channel_encoder/dense_edge_conv/GRU/
+        # classifier -- whatever self.model_(*batch_inputs) actually is),
+        # i.e. the common.py TorchEEGClassifier.train_amp_bf16 flag this
+        # constructor param sets. Distinct from dense_edge_amp_bf16 above:
+        # that one casts the precomputed, non-trainable dense-edge feature
+        # tensors (no autograd graph, torch.no_grad() the whole time); this
+        # one casts the actual forward that backward()/optimizer.step()
+        # differentiate through -- the ~60% of a training epoch that
+        # dense_edge_amp_bf16 measurably left untouched (2026-08-23 session:
+        # dense-edge precompute dropped ~11x per-call after that fix, but
+        # epoch_time only dropped ~3.5x, because precompute is only part of
+        # each epoch's wall clock -- see that session's notes). bf16 (not
+        # fp16) for the same reason as dense_edge_amp_bf16: full fp32
+        # exponent range, so no GradScaler/loss-scaling needed -- optimizer
+        # state and master weights stay fp32 regardless; _model_forward
+        # explicitly casts its returned logits back to float32 before
+        # criterion() sees them (see that method's comment) so
+        # CrossEntropyLoss never runs its log_softmax/nll_loss in raw bf16.
+        # CUDA only; no-op elsewhere. False (default) changes nothing.
+        # Independent of dense_edge_amp_bf16 -- either, both, or neither can
+        # be set; nothing about this flag requires the other.
+        train_amp_bf16: bool = False,
         # Surrogate-data significance gating: replaces the fixed
         # coherence_threshold magnitude cutoff with a per-trial, per-(edge,
         # frequency) threshold calibrated from that trial's own null
@@ -4816,6 +4918,7 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         self.precompute_chunk_size = precompute_chunk_size
         self.compile_dense_edge_helper = compile_dense_edge_helper
         self.dense_edge_amp_bf16 = dense_edge_amp_bf16
+        self.train_amp_bf16 = train_amp_bf16
         if cwt_resample_n_time is not None:
             import warnings
             warnings.warn(
@@ -6199,3 +6302,44 @@ class StreamingSparseEvidenceGNNClassifier(SparseEvidenceGNNClassifier):
             alpha_optimizer=alpha_optimizer,
         )
         return self
+
+    # 2026-08-23: overrides TorchEEGClassifier._predict_logits (common.py) --
+    # that base version calls self._prepare_features(X, fit=False) on the
+    # WHOLE of X in one shot (materializing every trial's CWT+dense-edge
+    # tensors before any DataLoader batching even starts), then only
+    # batches the already-built tensors for the forward pass. Fine for the
+    # "eager" SparseEvidenceGNNClassifier's use case (test sets assumed to
+    # be a few hundred windows) but WRONG for this streaming subclass: a
+    # real, uncapped leave-one-seizure-out prediction test set is
+    # deliberately never subsampled (see leave_one_seizure_out_prediction's
+    # negative_to_positive_ratio docstring in run_pipelines.py), so it can
+    # be as large as a training fold (~750 windows measured, chb01 alone) --
+    # confirmed this session: a real 6-fold subject-1 run OOM'd here, on
+    # fold 1's very first predict_proba call, right after that same fold's
+    # 20 training epochs had completed cleanly. Fixed the same way fit()
+    # above fixes it for training: reuse _LazyFeatureBatchDataset so only
+    # one inference batch's features are ever materialized at a time,
+    # instead of the whole test set's. Sequential (no _BatchIndexSampler
+    # shuffle -- prediction order must match the caller's X row order) and
+    # no labels (dummy zeros; _LazyFeatureBatchDataset's third return value
+    # is unused here, same as it's unused by TorchEEGClassifier.predict()/
+    # predict_proba(), which only ever consume this method's logits).
+    def _predict_logits(self, X) -> np.ndarray:
+        if self.model_ is None or self.device_ is None:
+            raise ValueError("Model has not been fitted yet.")
+        X = validate_eeg_X(X)
+        n = X.shape[0]
+        dataset = _LazyFeatureBatchDataset(self, X, np.zeros(n, dtype=np.int64))
+        batch_size = max(1, int(self.batch_size))
+        logits_list = []
+        self.model_.eval()
+        with torch.no_grad():
+            for start in range(0, n, batch_size):
+                indices = list(range(start, min(start + batch_size, n)))
+                raw_x, dense_edge_raw, _ = dataset[indices]
+                batch_inputs = tuple(
+                    t.to(self.device_) for t in (raw_x, dense_edge_raw)
+                )
+                logits, _ = self._model_forward(batch_inputs)
+                logits_list.append(logits.cpu().numpy())
+        return np.concatenate(logits_list, axis=0)

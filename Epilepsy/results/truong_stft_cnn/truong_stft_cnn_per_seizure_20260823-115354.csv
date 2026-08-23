@@ -1,0 +1,7 @@
+subject,run,seizure_id,seizure_onset_s,seizure_offset_s,seizure_duration_s,hit,hit_smoothed,n_preictal_windows,mean_preictal_score,false_alarms_per_hour,false_alarms_per_hour_smoothed
+1,02,1_02_0,2996.0,3036.0,40.0,True,True,30,0.9972464442253113,2.0,0.0
+1,03,1_03_0,1467.0,1494.0,27.0,True,True,30,0.9218668341636658,3.0,0.0
+1,05,1_05_0,1732.0,1772.0,40.0,True,True,30,0.9812530279159546,1.0,0.0
+1,06,1_06_0,1015.0,1066.0,51.0,True,True,23,0.9974445700645447,120.0,113.0
+1,07,1_07_0,1720.0,1810.0,90.0,True,True,30,0.9970746636390686,3.0,0.0
+1,10,1_10_0,1862.0,1963.0,101.0,True,True,30,0.9958105087280273,,

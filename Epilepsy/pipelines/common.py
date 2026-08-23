@@ -8,7 +8,7 @@ import logging
 import math
 import os
 import random
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -1336,6 +1336,31 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
     # imply a percentage.
     aux_metric_name: str = "edge_density"
 
+    # 2026-08-23: opt-in torch.autocast(dtype=torch.bfloat16) around
+    # _model_forward's self.model_(*batch_inputs) call -- covers every call
+    # site (train step, validation-split alpha updates, both eval loops;
+    # see _model_forward's docstring) from one place instead of duplicating
+    # the amp_ctx dance at each. False (default) changes nothing for every
+    # existing classifier/pipeline that doesn't set this. Separate from
+    # cwt_gnn_classifiers.py's dense_edge_amp_bf16 -- that flag casts the
+    # precomputed, non-trainable dense-edge FEATURE tensors (dense-edge
+    # precompute stage, no autograd graph involved there); this one casts
+    # the actual trainable forward pass that backward()/optimizer.step()
+    # differentiate through. bf16 (unlike fp16) has the same exponent range
+    # as fp32, so no GradScaler/loss-scaling is needed -- optimizer.step()
+    # and the master weights stay fp32 either way; only this forward's
+    # matmul/conv/RNN-type ops run in bf16 under the context, same
+    # autocast-whitelist behavior already verified empirically this session
+    # (plain elementwise ops are NOT touched by autocast -- see
+    # _full_edge_wct_maps's cast comment in cwt_gnn_classifiers.py for that
+    # finding). Exists on the shared base class (not just the GNN
+    # classifiers) since _train_loop/_model_forward are shared by every
+    # TorchEEGClassifier subclass, but only ever set True by a subclass /
+    # caller that has actually verified its own model.forward() is bf16-safe
+    # -- see cwt_gnn_classifiers.py's train_amp_bf16 constructor param for
+    # the one subclass wired up to expose it so far.
+    train_amp_bf16: bool = False
+
     def _init_torch_classifier(
         self,
         *,
@@ -1521,13 +1546,34 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
     def _model_forward(self, batch_inputs: tuple[torch.Tensor, ...]):
         if self.model_ is not None and self.model_.training:
             batch_inputs = self._augment_train_batch_inputs(batch_inputs)
-        output = self.model_(*batch_inputs)
+        amp_ctx = (
+            torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+            if (
+                bool(getattr(self, "train_amp_bf16", False))
+                and getattr(self, "device_", None) is not None
+                and self.device_.type == "cuda"
+            )
+            else nullcontext()
+        )
+        with amp_ctx:
+            output = self.model_(*batch_inputs)
         if isinstance(output, tuple):
             logits = output[0]
             aux = float(output[1]) if len(output) > 1 else None
         else:
             logits = output
             aux = None
+        # Always hand callers fp32 logits regardless of amp_ctx above --
+        # criterion(...)/backward() happen at each call site, OUTSIDE this
+        # method and outside the autocast context, so without this cast
+        # CrossEntropyLoss would run its log_softmax/nll_loss in whatever
+        # dtype the model's last layer happened to produce under autocast
+        # (bf16) with none of autocast's own fp32-upcast-for-loss-ops
+        # safety net (that net only applies to ops that run INSIDE an
+        # active autocast context). .float() is a no-op (same tensor, no
+        # copy) when logits is already fp32, so this changes nothing when
+        # train_amp_bf16=False.
+        logits = logits.float()
         return logits, aux
 
     def _criterion(self, y_idx: np.ndarray) -> nn.Module:

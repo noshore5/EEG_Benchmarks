@@ -1,0 +1,8 @@
+# pip's `-e git+https://github.com/noshore5/moabb.git#egg=moabb` (see
+# requirements.txt) clones into ./src/moabb by default (pip's `-e git+URL`
+# convention, relative to wherever `pip install -r requirements.txt` was
+# run) -- that's a separate, already-tracked GitHub repo (noshore5/moabb),
+# not content of this repo. Needed on disk for the editable install to
+# keep working; must not be committed here (no .gitmodules, so committing
+# it would only leave a broken/dangling submodule reference).
+/src/
