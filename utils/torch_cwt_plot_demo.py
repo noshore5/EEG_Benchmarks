@@ -148,7 +148,7 @@ def main() -> None:
                 aspect="auto",
                 origin="upper",
                 extent=[t_axis[0], t_axis[-1], NFREQS - 0.5, -0.5],
-                cmap="magma",
+                cmap="jet",
                 vmin=0.0,
                 vmax=vmax_,
             )
