@@ -42,6 +42,7 @@ from typing import Callable, Literal, Sequence
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 from torch.utils.data import DataLoader, Dataset, Sampler
 from tqdm.auto import tqdm
@@ -1833,18 +1834,26 @@ class CWTTimeFrequencyNodeEncoder(nn.Module):
     exists to test whether learned per-channel time-frequency information
     adds anything to the existing WCT/coherence graph, not to grow capacity.
 
-    Native 30s CWT maps are [T=7680, F=8]. A single Conv2d(k=5) over a
-    full training batch of spectrograms (B=32, C=23 -> 736 maps) builds
-    an im2col workspace of ~9GB and OOMs on an 8-12GB GPU / MPS. The
-    architecture is unchanged -- the SAME shared convs still see full
-    time-frequency structure, with no pre-average -- but spectrograms
-    are encoded in chunks, with activation checkpointing during train
-    so backward does not keep every chunk's feature maps alive at once.
+    Native 30s CWT maps are [T=7680, F=8]. Conv2d(k=5) on that T, over a
+    full (B=32, C=23) batch, is an im2col of ~9GB and also a 1.4s/step
+    sequential-chunk loop -- the WCT graph itself is not the bottleneck
+    (dense-edge cache hits are a few ms/trial). Before the convs we
+    average-pool TIME only by `time_downsample` (default 16, same grain
+    as dense_edge_time_downsample). Frequency is not pooled. The CNN
+    still sees a [T/16, F] spectrogram, not a scalar; it is NOT a global
+    average of the CWT. After that, one batched Conv2d is cheap and the
+    chunk/checkpoint fallback is only for downsample=1 on long windows.
     """
 
-    def __init__(self, embed_dim: int, chunk_size: int = 32) -> None:
+    def __init__(
+        self,
+        embed_dim: int,
+        time_downsample: int = 16,
+        chunk_size: int = 32,
+    ) -> None:
         super().__init__()
         self.embed_dim = int(embed_dim)
+        self.time_downsample = max(1, int(time_downsample))
         self.chunk_size = max(1, int(chunk_size))
         self.net = nn.Sequential(
             nn.Conv2d(2, 16, kernel_size=5, padding=2),
@@ -1875,8 +1884,15 @@ class CWTTimeFrequencyNodeEncoder(nn.Module):
         x = torch.stack((w_real, w_imag), dim=2).reshape(
             batch_size * n_channels, 2, n_time, nfreqs
         )
+        ds = self.time_downsample
+        if ds > 1 and x.shape[2] >= ds:
+            # Time only -- frequency axis stays length F. Remainder samples
+            # dropped, same convention as dense_edge_time_downsample.
+            x = F.avg_pool2d(x, kernel_size=(ds, 1), stride=(ds, 1))
         n = x.shape[0]
-        if n <= self.chunk_size:
+        # After time-pooling, one batched conv is the fast path. Chunking
+        # is only a memory guard for native-T convs (downsample=1).
+        if n <= self.chunk_size or x.shape[2] * x.shape[3] <= 480 * 16:
             h = self._encode_flat(x)
         else:
             use_ckpt = bool(self.training and torch.is_grad_enabled())
@@ -2829,8 +2845,17 @@ class SparseEvidenceGNNCore(nn.Module):
         # submodule's random init is bit-identical to before this feature
         # existed.
         if self.time_frequency_node_encoder:
+            # Match the WCT edge path's temporal grain when it downsamples;
+            # otherwise still pool by 16 so a 30s native CWT (T=7680) cannot
+            # turn the node CNN into the epoch bottleneck.
+            enc_ds = (
+                int(self.dense_edge_time_downsample)
+                if int(self.dense_edge_time_downsample) > 1
+                else 16
+            )
             self.cwt_node_encoder = CWTTimeFrequencyNodeEncoder(
                 embed_dim=self.node_embedding_dim,
+                time_downsample=enc_ds,
             )
 
     def configure_summary_context(
@@ -2878,6 +2903,11 @@ class SparseEvidenceGNNCore(nn.Module):
             f"time_frequency_node_encoder={self.time_frequency_node_encoder} "
             f"node_embedding_dim={self.node_embedding_dim} "
             f"time_frequency_node_ablation={self.time_frequency_node_ablation}"
+            + (
+                f" tf_node_time_downsample={self.cwt_node_encoder.time_downsample}"
+                if self.cwt_node_encoder is not None
+                else ""
+            )
         )
         context = self._summary_context
         if context is None:

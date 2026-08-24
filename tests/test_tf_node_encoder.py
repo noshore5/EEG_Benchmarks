@@ -130,8 +130,12 @@ def test_encoder_channel_isolation() -> None:
 def test_encoder_chunking_matches_full_batch() -> None:
     """Microbatching must be a memory tactic, not a numerical change."""
     torch.manual_seed(0)
-    chunked = CWTTimeFrequencyNodeEncoder(embed_dim=HIDDEN, chunk_size=2)
-    full = CWTTimeFrequencyNodeEncoder(embed_dim=HIDDEN, chunk_size=1024)
+    chunked = CWTTimeFrequencyNodeEncoder(
+        embed_dim=HIDDEN, chunk_size=2, time_downsample=1
+    )
+    full = CWTTimeFrequencyNodeEncoder(
+        embed_dim=HIDDEN, chunk_size=1024, time_downsample=1
+    )
     full.load_state_dict(chunked.state_dict())
     chunked.eval()
     full.eval()
@@ -140,6 +144,19 @@ def test_encoder_chunking_matches_full_batch() -> None:
         assert torch.allclose(
             chunked(w_real, w_imag), full(w_real, w_imag), atol=1e-5, rtol=1e-5
         )
+
+
+def test_encoder_time_downsample_does_not_mix_channels() -> None:
+    enc = CWTTimeFrequencyNodeEncoder(embed_dim=HIDDEN, time_downsample=4)
+    enc.eval()
+    w_real, w_imag = _synthetic_cwt()
+    with torch.no_grad():
+        base = enc(w_real, w_imag)
+        w_real_a = w_real.clone()
+        w_real_a[:, 0] = w_real_a[:, 0] + 1.5
+        perturbed = enc(w_real_a, w_imag)
+    assert not torch.allclose(base[:, 0], perturbed[:, 0], atol=1e-6)
+    assert torch.allclose(base[:, 1], perturbed[:, 1], atol=1e-6)
 
 
 def test_encoder_uses_real_and_imag_as_ordinary_channels() -> None:
