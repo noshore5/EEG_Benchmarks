@@ -1755,6 +1755,209 @@ class _DenseEdgeGRUTemporal(nn.Module):
         return out.permute(0, 2, 1).unsqueeze(-1)  # [B, out_channels, E, 1]
 
 
+class _DenseEdgeMambaTemporal(nn.Module):
+    """dense_edge_temporal_mode="mamba" counterpart to _DenseEdgeGRUTemporal /
+    _build_dense_feature_conv -- 2026-08-24, event_mode="dense" only. A third,
+    interchangeable dense_edge_conv backend: same per-edge, weight-shared
+    processing convention as the other two ("edges convolved/processed
+    independently with SHARED weights", see _build_dense_feature_conv's own
+    docstring), same [B, C_in, E, T] -> [B, out_channels, E, 1] shape
+    contract, so SparseEvidenceGNNCore._dense_edge_features' squeeze/permute
+    call downstream is unchanged regardless of which of the three builds
+    self.dense_edge_conv. Purely additive -- does not touch _DenseEdgeGRUTemporal
+    or _build_dense_feature_conv, and dense_edge_temporal_mode="conv"/"rnn"
+    remain bit-identical to before this class existed.
+
+    Motivation (see run_pipelines.py's DENSE_EDGE_MAMBA_PARAMS and the
+    2026-08-24 session note this landed with): _DenseEdgeGRUTemporal already
+    established that a mechanism able to see the FULL T' sequence with
+    memory (vs. Conv2d's small fixed local window) is worth testing here.
+    Mamba (Gu & Dao 2023, a selective state-space sequence model) is a
+    second, architecturally distinct way to do that -- linear-time in T'
+    (vs. quadratic self-attention), and unlike a plain RNN/GRU its
+    per-timestep gating (the "selective" part) is explicitly input-
+    dependent, so this is a genuine ablation of *which* sequence model
+    extracts the temporal structure, not just a capacity/parameter-count
+    change on top of the existing GRU.
+
+    mamba-ssm (the official/upstream package) was evaluated first and
+    rejected for THIS repo's environment, not for architectural reasons --
+    see the 2026-08-24 session note for the full investigation. Summary:
+    mamba-ssm ships no Windows wheel (PyPI: sdist only) and its selective-
+    scan/causal-conv1d kernels are custom CUDA extensions that require
+    nvcc + a matching Linux toolchain to build from source; this repo runs
+    on Windows (see setup.sh / requirements.txt's cu128 extra-index-url
+    comment) and must keep working on the MPS path too (macOS dev machine --
+    see the module docstring's device history), which mamba-ssm's CUDA-only
+    kernels cannot support at all. `mambapy` (PyPI, github.com/alxndrTL/
+    mamba.py) is used instead: a pure-PyTorch reimplementation of the same
+    selective-SSM recurrence (parallel-scan by default, `use_cuda=False`
+    forced below so this NEVER reaches for mamba-ssm's kernels even if that
+    package happens to be installed too), so it runs identically on
+    CUDA/MPS/CPU with no custom kernel compilation step -- the least
+    invasive option that still uses a real, maintained Mamba implementation
+    rather than a from-scratch reimplementation of the selective-scan math.
+
+    `d_model` (mamba_d_model) is independent of in_channels (4*nfreqs) and
+    out_channels (dense_conv_out_channels) -- an input nn.Linear projects
+    C_in -> d_model when they differ (nn.Identity when they already match,
+    e.g. a future config where in_channels == d_model), and an output
+    nn.Linear projects d_model -> out_channels unconditionally, exactly
+    mirroring how _build_dense_feature_conv's first/last Conv2d layers
+    change channel width at the boundaries while the GRU path instead ties
+    hidden_size directly to out_channels. Kept as its own knob (not simply
+    reusing out_channels as d_model) because Mamba's internal
+    expand_factor/d_state already multiply d_model's effective width
+    internally (see MambaConfig) -- collapsing d_model to out_channels=8
+    would leave very little room for the SSM to do anything before the
+    final projection pools it back down.
+
+    Pools time the same way _DenseEdgeGRUTemporal does: takes the LAST
+    timestep of Mamba's output sequence as the "T summarized to one vector"
+    step, analogous to the GRU's own final hidden state h_T. This is a
+    correct analogy specifically because Mamba's recurrence (like the
+    GRU's) is causal -- timestep T's output already depends on every
+    timestep <= T through the running SSM state, so it is a genuine
+    whole-sequence summary, not a local window average the way Conv2d's
+    AdaptiveAvgPool2d((None, 1)) is.
+
+    mamba_dropout: MambaConfig (mambapy) has no native dropout field --
+    applied here as an explicit nn.Dropout on the pooled [B*E, d_model]
+    summary, before the output projection, the same place GRU's h_T would
+    be tapped if it had one. Default 0.0 is a no-op, bit-identical to
+    "no dropout at all".
+
+    mamba_chunk_size: 2026-08-24 smoke-test finding -- mambapy's ssm()
+    (both the `pscan=True` parallel-scan path and the `pscan=False`
+    sequential-loop path; the allocation happens in the shared deltaA/
+    deltaB/BX setup BEFORE either scan strategy even runs, so choosing
+    pscan does not avoid this) materializes three dense [rows, T, d_model*
+    expand, d_state] float tensors, where `rows` is THIS class's whole
+    B*E leading dim -- not a small number: E is the full canonical edge
+    count (253 for the 23-channel mesh, unaffected by channel_subset_k --
+    see _dense_edge_features' docstring, every edge always "fires" in
+    event_mode="dense"), so at this file's own default batch_size=32 that
+    is 32*253=8096 rows. At the shared defaults (dense_edge_time_downsample
+    =16 on a 30s/256Hz window -> T'=480, mamba_expand=2, mamba_d_state=16)
+    processing all 8096 rows through mambapy in one call needs ~8GB PER
+    intermediate tensor (confirmed: CUDA OOM on an 8GB RTX 3070 Ti, "Tried
+    to allocate 7.40 GiB" -- see the 2026-08-24 session note) -- unlike
+    Conv2d (bounded local receptive field) or nn.GRU (cuDNN's fused kernel
+    never materializes a dense [rows, T, ...] tensor at all), a pure-
+    PyTorch selective scan's memory scales with rows*T*d_state directly.
+    Purely a memory tactic, NOT a numerical change (same "chunking must
+    equal one full-batch call" contract CWTTimeFrequencyNodeEncoder's own
+    chunk_size already establishes and tests -- every row of `seq` is
+    processed independently, so splitting the leading dim changes nothing
+    about any single row's output): splits `seq`'s B*E rows into groups of
+    at most mamba_chunk_size, runs self.mamba on each group, concatenates.
+    Also gradient-checkpoints each chunk during training (same
+    torch.utils.checkpoint import CWTTimeFrequencyNodeEncoder already
+    uses) so the SAVED activations for backward scale with chunk_size too,
+    not the full B*E. Default 128 keeps each of those three tensors under
+    ~500MB at the defaults above -- comfortably modest for an 8GB card
+    alongside the rest of the pipeline's own CUDA memory use; raise it on
+    a larger GPU, lower it if this still OOMs.
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        d_model: int = 16,
+        d_state: int = 16,
+        d_conv: int = 4,
+        expand: int = 2,
+        n_layers: int = 1,
+        dropout: float = 0.0,
+        chunk_size: int = 128,
+    ) -> None:
+        super().__init__()
+        try:
+            from mambapy.mamba import Mamba, MambaConfig
+        except ImportError as exc:  # pragma: no cover -- environment-dependent
+            raise ImportError(
+                "dense_edge_temporal_mode='mamba' requires the 'mambapy' package "
+                "(pure-PyTorch Mamba SSM -- see _DenseEdgeMambaTemporal's "
+                "docstring for why the upstream 'mamba-ssm' CUDA package was not "
+                "used). Install with `pip install mambapy`."
+            ) from exc
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.d_model = d_model
+        self.in_proj = (
+            nn.Identity() if in_channels == d_model else nn.Linear(in_channels, d_model)
+        )
+        self.mamba = Mamba(
+            MambaConfig(
+                d_model=d_model,
+                n_layers=n_layers,
+                d_state=d_state,
+                expand_factor=expand,
+                d_conv=d_conv,
+                # Force the pure-PyTorch parallel-scan path on every device --
+                # see class docstring. Never reaches for mamba-ssm's CUDA
+                # kernels even if that package happens to also be installed.
+                use_cuda=False,
+            )
+        )
+        self.dropout = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
+        self.out_proj = nn.Linear(d_model, out_channels)
+        self.chunk_size = max(1, int(chunk_size))
+
+    def _mamba_pooled(self, seq_chunk: torch.Tensor) -> torch.Tensor:
+        """seq_chunk: [rows, T, d_model] -> [rows, d_model], one Mamba call
+        (the actual, possibly-large-memory step -- see mamba_chunk_size's
+        docstring) plus the same last-timestep pooling forward() documents.
+        Split out so it can be handed to torch.utils.checkpoint per chunk.
+        """
+        out_seq = self.mamba(seq_chunk)  # [rows, T, d_model] -- causal
+        return out_seq[:, -1, :]  # [rows, d_model] -- last timestep == h_T analogue
+
+    def forward(self, conv_in: torch.Tensor) -> torch.Tensor:
+        """`conv_in`: [B, C_in, E, T] -- identical input _build_dense_feature_
+        conv's Sequential and _DenseEdgeGRUTemporal's GRU both receive
+        (C_in = 4 * nfreqs, frequency already folded in by the caller; see
+        _DenseEdgeGRUTemporal's class docstring). Reshapes to [B*E, T, C_in]
+        (same "edges folded into the batch dim, one instance processes every
+        edge with shared weights" convention the GRU path uses), projects to
+        d_model, runs the Mamba block(s) in chunks of mamba_chunk_size rows
+        at a time (see that param's docstring -- a memory tactic only, same
+        output as one full-batch call), pools each chunk's last timestep,
+        and projects back out to the [B, out_channels, E, 1] shape
+        _dense_edge_features' downstream squeeze/permute expects.
+        """
+        batch_size, c_in, num_edges, n_time = conv_in.shape
+        assert c_in == self.in_channels, (
+            f"_DenseEdgeMambaTemporal built with in_channels={self.in_channels} "
+            f"but received conv_in with C_in={c_in} -- see this class's "
+            "forward() docstring for the expected [B, C_in, E, T] contract."
+        )
+        seq = conv_in.permute(0, 2, 3, 1).reshape(batch_size * num_edges, n_time, c_in)
+        # seq: [B*E, T, C_in] -- batch_size, sequence_length, feature_dim,
+        # logged once so the temporal contract this backend receives is
+        # visible in the same place GRU/conv's own shape comments already
+        # document it (see class docstring's "Consumes/produces" note).
+        seq = self.in_proj(seq)  # [B*E, T, d_model]
+        n_rows = seq.shape[0]
+        if n_rows <= self.chunk_size:
+            pooled = self._mamba_pooled(seq)
+        else:
+            use_ckpt = bool(self.training and torch.is_grad_enabled())
+            pieces: list[torch.Tensor] = []
+            for start in range(0, n_rows, self.chunk_size):
+                chunk = seq[start : start + self.chunk_size]
+                if use_ckpt:
+                    pieces.append(checkpoint(self._mamba_pooled, chunk, use_reentrant=False))
+                else:
+                    pieces.append(self._mamba_pooled(chunk))
+            pooled = torch.cat(pieces, dim=0)  # [B*E, d_model]
+        pooled = self.dropout(pooled)
+        out = self.out_proj(pooled)  # [B*E, out_channels]
+        out = out.reshape(batch_size, num_edges, -1)  # [B, E, out_channels]
+        return out.permute(0, 2, 1).unsqueeze(-1)  # [B, out_channels, E, 1]
+
+
 class ChannelSignalEncoder(nn.Module):
     """Lightweight learned per-channel signature: gives each graph node an
     actual representation of its raw signal shape, not just the
@@ -2247,11 +2450,33 @@ class SparseEvidenceGNNCore(nn.Module):
         # integrates the FULL T' sequence with memory instead of Conv2d's
         # small fixed local window (dense_conv_kernel_size) -- see that
         # class's docstring for the full rationale and exactly what shape
-        # contract it preserves. Purely additive: dense_edge_conv is built
-        # from whichever path this selects, and everything else
-        # (_dense_edge_features' squeeze/permute, sparse_message_mlp,
-        # aggregation, hops, sparse_classifier) is unchanged either way.
-        dense_edge_temporal_mode: Literal["conv", "rnn"] = "conv",
+        # contract it preserves. 2026-08-24: "mamba" is a third option
+        # (_DenseEdgeMambaTemporal) -- a second, architecturally distinct
+        # full-sequence-with-memory backend (selective state-space model
+        # instead of a gated RNN), same [B, C_in, E, T] -> [B, out_channels,
+        # E, 1] contract -- see that class's docstring for the full
+        # rationale and the mamba-ssm-vs-mambapy dependency decision.
+        # Purely additive: dense_edge_conv is built from whichever path this
+        # selects, and everything else (_dense_edge_features' squeeze/
+        # permute, sparse_message_mlp, aggregation, hops, sparse_classifier)
+        # is unchanged either way.
+        dense_edge_temporal_mode: Literal["conv", "rnn", "mamba"] = "conv",
+        # dense_edge_temporal_mode="mamba" only -- see _DenseEdgeMambaTemporal's
+        # docstring for what each of these controls and why the defaults
+        # were picked (deliberately modest -- this is a first ablation, not
+        # a capacity-maximizing pass). Simply unread (no validation, same
+        # "no way to tell an explicit default from an unset one" precedent
+        # dense_edge_temporal_mode="rnn"'s own docstring already applies to
+        # the Conv2d-only params) when dense_edge_temporal_mode != "mamba".
+        mamba_d_model: int = 16,
+        mamba_d_state: int = 16,
+        mamba_d_conv: int = 4,
+        mamba_expand: int = 2,
+        mamba_n_layers: int = 1,
+        mamba_dropout: float = 0.0,
+        # Memory tactic only -- see _DenseEdgeMambaTemporal's mamba_chunk_size
+        # docstring (2026-08-24 CUDA-OOM finding). Does not change any output.
+        mamba_chunk_size: int = 128,
         # 2026-08-11, dense_edge_temporal_mode="rnn" only -- the negative
         # control for that mode: same architecture, same parameter count,
         # scrambled time order. When True, _dense_edge_features
@@ -2450,28 +2675,30 @@ class SparseEvidenceGNNCore(nn.Module):
                 f"{dense_conv_kernel_size!r}, dense_conv_pool_size="
                 f"{dense_conv_pool_size!r}."
             )
-        if dense_edge_temporal_mode not in ("conv", "rnn"):
+        if dense_edge_temporal_mode not in ("conv", "rnn", "mamba"):
             raise ValueError(
-                "dense_edge_temporal_mode must be 'conv' or 'rnn', got "
+                "dense_edge_temporal_mode must be 'conv', 'rnn', or 'mamba', got "
                 f"{dense_edge_temporal_mode!r}."
             )
-        if dense_edge_temporal_mode == "rnn" and event_mode != "dense":
+        if dense_edge_temporal_mode in ("rnn", "mamba") and event_mode != "dense":
             # Same "explicit no-op rejection" precedent as
             # dense_edge_time_downsample/time_averaged_graph above --
             # dense_edge_temporal_mode only affects how dense_edge_conv
             # itself is built, which only exists when event_mode="dense".
             raise ValueError(
-                "dense_edge_temporal_mode='rnn' has no meaning when "
-                "event_mode='sparse' -- dense_edge_conv (the only consumer "
-                "of this param) is never built in event_mode='sparse' (see "
-                "dense_edge_temporal_mode's docstring above)."
+                f"dense_edge_temporal_mode={dense_edge_temporal_mode!r} has no "
+                "meaning when event_mode='sparse' -- dense_edge_conv (the only "
+                "consumer of this param) is never built in event_mode='sparse' "
+                "(see dense_edge_temporal_mode's docstring above)."
             )
         if shuffle_time_order and dense_edge_temporal_mode != "rnn":
             raise ValueError(
                 "shuffle_time_order=True has no meaning when "
-                "dense_edge_temporal_mode='conv' -- it only affects "
-                "_dense_edge_features' input to the 'rnn' path (see "
-                "shuffle_time_order's docstring above)."
+                f"dense_edge_temporal_mode={dense_edge_temporal_mode!r} -- it only "
+                "affects _dense_edge_features' input to the 'rnn' path (see "
+                "shuffle_time_order's docstring above). Not implemented for "
+                "'mamba' as a separate negative control yet -- see "
+                "_DenseEdgeMambaTemporal's docstring."
             )
         if time_frequency_node_ablation not in ("none", "zero_node_embed", "node_only"):
             raise ValueError(
@@ -2776,6 +3003,13 @@ class SparseEvidenceGNNCore(nn.Module):
         self.dense_conv_intermediate_channels_reduced = dense_conv_intermediate_channels_reduced
         self.dense_edge_temporal_mode = dense_edge_temporal_mode
         self.shuffle_time_order = bool(shuffle_time_order)
+        self.mamba_d_model = mamba_d_model
+        self.mamba_d_state = mamba_d_state
+        self.mamba_d_conv = mamba_d_conv
+        self.mamba_expand = mamba_expand
+        self.mamba_n_layers = mamba_n_layers
+        self.mamba_dropout = mamba_dropout
+        self.mamba_chunk_size = mamba_chunk_size
         if event_mode == "dense" and dense_edge_temporal_mode == "rnn":
             # See _DenseEdgeGRUTemporal's own docstring -- same in_channels
             # (frequency folded in) / out_channels contract as the Conv2d
@@ -2784,6 +3018,21 @@ class SparseEvidenceGNNCore(nn.Module):
             self.dense_edge_conv = _DenseEdgeGRUTemporal(
                 in_channels=4 * nfreqs,
                 out_channels=dense_conv_out_channels,
+            )
+        elif event_mode == "dense" and dense_edge_temporal_mode == "mamba":
+            # See _DenseEdgeMambaTemporal's own docstring -- same
+            # in_channels/out_channels contract as the other two dense_edge_
+            # conv backends, built LAST for the same init-order reason.
+            self.dense_edge_conv = _DenseEdgeMambaTemporal(
+                in_channels=4 * nfreqs,
+                out_channels=dense_conv_out_channels,
+                d_model=mamba_d_model,
+                d_state=mamba_d_state,
+                d_conv=mamba_d_conv,
+                expand=mamba_expand,
+                n_layers=mamba_n_layers,
+                dropout=mamba_dropout,
+                chunk_size=mamba_chunk_size,
             )
         elif event_mode == "dense":
             # Frequency is folded into in_channels here (see
@@ -2897,7 +3146,15 @@ class SparseEvidenceGNNCore(nn.Module):
             f"dense_conv_out_channels={self.dense_conv_out_channels} "
             f"time_averaged_graph={self.time_averaged_graph} "
             f"dense_edge_temporal_mode={self.dense_edge_temporal_mode} "
-            f"shuffle_time_order={self.shuffle_time_order} "
+            + (
+                f"mamba_d_model={self.mamba_d_model} mamba_d_state={self.mamba_d_state} "
+                f"mamba_d_conv={self.mamba_d_conv} mamba_expand={self.mamba_expand} "
+                f"mamba_n_layers={self.mamba_n_layers} mamba_dropout={self.mamba_dropout} "
+                f"mamba_chunk_size={self.mamba_chunk_size} "
+                if self.dense_edge_temporal_mode == "mamba"
+                else ""
+            )
+            + f"shuffle_time_order={self.shuffle_time_order} "
             f"temporal_graph_edge_dim={self.temporal_graph_edge_dim} "
             f"dense_edge_time_downsample={self.dense_edge_time_downsample} "
             f"cwt_encoder={self.cwt_encoder} "
@@ -4862,10 +5119,21 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         # (default) is dense_edge_conv's original Conv2d temporal stack,
         # bit-identical to before this param existed. "rnn" swaps it for a
         # GRU that integrates the full T' sequence with memory instead of
-        # Conv2d's small fixed local window. event_mode="dense" only --
-        # raises otherwise (duplicated validation, same precedent as
+        # Conv2d's small fixed local window. 2026-08-24: "mamba" is a third
+        # option (_DenseEdgeMambaTemporal, forwarded via mamba_* below) --
+        # see that class's docstring. event_mode="dense" only -- raises
+        # otherwise (duplicated validation, same precedent as
         # time_averaged_graph's own checks above).
-        dense_edge_temporal_mode: Literal["conv", "rnn"] = "conv",
+        dense_edge_temporal_mode: Literal["conv", "rnn", "mamba"] = "conv",
+        # dense_edge_temporal_mode="mamba" only, forwarded to
+        # SparseEvidenceGNNCore -- see _DenseEdgeMambaTemporal's docstring.
+        mamba_d_model: int = 16,
+        mamba_d_state: int = 16,
+        mamba_d_conv: int = 4,
+        mamba_expand: int = 2,
+        mamba_n_layers: int = 1,
+        mamba_dropout: float = 0.0,
+        mamba_chunk_size: int = 128,
         # 2026-08-11, forwarded to SparseEvidenceGNNCore -- see that class's
         # docstring / shuffle_time_order. The negative control for
         # dense_edge_temporal_mode="rnn": independently scrambles each
@@ -5242,22 +5510,22 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
                 f"{dense_conv_kernel_size!r}, dense_conv_pool_size="
                 f"{dense_conv_pool_size!r}."
             )
-        if dense_edge_temporal_mode not in ("conv", "rnn"):
+        if dense_edge_temporal_mode not in ("conv", "rnn", "mamba"):
             raise ValueError(
-                "dense_edge_temporal_mode must be 'conv' or 'rnn', got "
+                "dense_edge_temporal_mode must be 'conv', 'rnn', or 'mamba', got "
                 f"{dense_edge_temporal_mode!r}."
             )
-        if dense_edge_temporal_mode == "rnn" and event_mode != "dense":
+        if dense_edge_temporal_mode in ("rnn", "mamba") and event_mode != "dense":
             raise ValueError(
-                "dense_edge_temporal_mode='rnn' has no meaning when "
-                "event_mode='sparse' -- see SparseEvidenceGNNCore's "
+                f"dense_edge_temporal_mode={dense_edge_temporal_mode!r} has no "
+                "meaning when event_mode='sparse' -- see SparseEvidenceGNNCore's "
                 "dense_edge_temporal_mode docstring."
             )
         if shuffle_time_order and dense_edge_temporal_mode != "rnn":
             raise ValueError(
                 "shuffle_time_order=True has no meaning when "
-                "dense_edge_temporal_mode='conv' -- see SparseEvidenceGNNCore's "
-                "shuffle_time_order docstring."
+                f"dense_edge_temporal_mode={dense_edge_temporal_mode!r} -- see "
+                "SparseEvidenceGNNCore's shuffle_time_order docstring."
             )
         self.event_mode = event_mode
         # 2026-08-16: SparseEvidenceGNNCore.forward's aux return (bursts_per_
@@ -5280,6 +5548,13 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         self.time_averaged_graph = bool(time_averaged_graph)
         self.dense_edge_temporal_mode = dense_edge_temporal_mode
         self.shuffle_time_order = bool(shuffle_time_order)
+        self.mamba_d_model = mamba_d_model
+        self.mamba_d_state = mamba_d_state
+        self.mamba_d_conv = mamba_d_conv
+        self.mamba_expand = mamba_expand
+        self.mamba_n_layers = mamba_n_layers
+        self.mamba_dropout = mamba_dropout
+        self.mamba_chunk_size = mamba_chunk_size
         self.temporal_graph_edge_dim = temporal_graph_edge_dim
         if time_frequency_node_ablation not in ("none", "zero_node_embed", "node_only"):
             raise ValueError(
@@ -6740,6 +7015,13 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
             dense_edge_time_downsample=self.dense_edge_time_downsample,
             time_averaged_graph=self.time_averaged_graph,
             dense_edge_temporal_mode=self.dense_edge_temporal_mode,
+            mamba_d_model=self.mamba_d_model,
+            mamba_d_state=self.mamba_d_state,
+            mamba_d_conv=self.mamba_d_conv,
+            mamba_expand=self.mamba_expand,
+            mamba_n_layers=self.mamba_n_layers,
+            mamba_dropout=self.mamba_dropout,
+            mamba_chunk_size=self.mamba_chunk_size,
             shuffle_time_order=self.shuffle_time_order,
             temporal_graph_edge_dim=self.temporal_graph_edge_dim,
             cwt_encoder=self.cwt_encoder,

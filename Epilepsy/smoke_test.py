@@ -1,5 +1,6 @@
 """
-Editable-params smoke test for the dense_edge_gru / dense_edge pipelines.
+Editable-params smoke test for the dense_edge_gru / dense_edge /
+dense_edge_mamba pipelines.
 
 PARAMS below is the primary way to configure a run -- edit it directly and:
 
@@ -62,7 +63,7 @@ import Epilepsy.run_pipelines as rp
 # EDIT THESE
 # ---------------------------------------------------------------------------
 PARAMS = dict(
-    pipeline="dense_edge_gru",        # "dense_edge_gru" | "dense_edge"
+    pipeline="dense_edge_gru",        # "dense_edge_gru" | "dense_edge" | "dense_edge_mamba"
     label_mode="prediction",          # "prediction" or "detection"
     cwt_encoder=False,  # True: learned CWT node embeddings
                                        # alongside WCT edges. Works for
@@ -190,7 +191,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--pipeline",
-        choices=["dense_edge_gru", "dense_edge"],
+        choices=["dense_edge_gru", "dense_edge", "dense_edge_mamba"],
         default=_UNSET,
     )
     parser.add_argument("--label-mode", choices=["prediction", "detection"], default=_UNSET)

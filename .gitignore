@@ -23,3 +23,7 @@ _to_delete/
 .eggs/
 .ipynb_checkpoints/
 .pytest_cache/
+
+
+.venv
+

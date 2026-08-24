@@ -48,6 +48,21 @@ Jinja2==3.1.6
 joblib==1.5.3
 kiwisolver==1.4.7
 lazy_loader==0.4
+# 2026-08-24: dense_edge_temporal_mode="mamba" (Epilepsy/pipelines/
+# cwt_gnn_classifiers.py's _DenseEdgeMambaTemporal). The upstream/official
+# `mamba-ssm` package was evaluated first and rejected for THIS repo's
+# environment (not for architectural reasons): PyPI ships mamba-ssm as an
+# sdist only, no Windows wheel, and its selective-scan/causal-conv1d kernels
+# are custom CUDA extensions requiring nvcc + a Linux toolchain to build --
+# this repo runs on Windows (see the torch cu128 comment above) and must
+# keep working on the author's MPS Mac too, which mamba-ssm's CUDA-only
+# kernels cannot support at all. `mambapy` is a pure-PyTorch reimplementation
+# of the same selective-SSM recurrence (parallel-scan, no custom kernels),
+# so it runs identically on CUDA/MPS/CPU -- see the 2026-08-24 session note
+# under Epilepsy/Session_notes/ for the full investigation. Only depends on
+# torch (already pinned above); py3-none-any wheel, no platform-specific
+# build step.
+mambapy==1.2.0
 MarkupSafe==3.0.3
 matplotlib==3.9.4
 memory-profiler==0.61.0
