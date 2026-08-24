@@ -79,6 +79,7 @@ try:
     from Epilepsy.pipelines.dense_edge_cache import (
         dense_edge_cache_key,
         load_dense_edge,
+        precompute_dense_edge_cache_keys,
         save_dense_edge,
     )
     from Epilepsy.pipelines.channel_subset_dynamic import (
@@ -120,6 +121,7 @@ except ModuleNotFoundError:
     from pipelines.dense_edge_cache import (
         dense_edge_cache_key,
         load_dense_edge,
+        precompute_dense_edge_cache_keys,
         save_dense_edge,
     )
     from pipelines.channel_subset_dynamic import (
@@ -1988,7 +1990,8 @@ class SparseEvidenceGNNCore(nn.Module):
         # _precompute_dense_edge_inputs's docstring) -- only the (still
         # non-trainable) cross-spectrum/smoothing/COI/significance-channel
         # math is precomputed once; dense_edge_conv itself runs every
-        # forward() call, like channel_encoder already does for raw_x.
+        # forward() call. ChannelSignalEncoder is not run under the locked
+        # feature_ablation="zero_channel_embed" (its output would be zeroed).
         #
         # 2026-08-11: "temporal_graph" is a third option, distinct from both
         # "dense" (pools the whole T' axis away via dense_edge_conv's own
@@ -2444,26 +2447,26 @@ class SparseEvidenceGNNCore(nn.Module):
             "temporal_node_in_degree", temporal_node_in_degree, persistent=False
         )
         self.channel_embed_dim = channel_embed_dim
-        self.channel_encoder = ChannelSignalEncoder(
-            channel_embed_dim, dilation=channel_encoder_dilation
-        )
+        # ChannelSignalEncoder is unused: feature_ablation is locked to
+        # zero_channel_embed. Not constructed (we do not keep it around for
+        # init-RNG matching). channel_embed_dim / dilation stay as accepted
+        # constructor args so call sites do not change.
+        self.channel_encoder = None
         self.event_mode = event_mode
         self.dense_conv_out_channels = dense_conv_out_channels
         self.dense_edge_time_downsample = int(dense_edge_time_downsample)
         self.time_averaged_graph = bool(time_averaged_graph)
         self.temporal_graph_edge_dim = temporal_graph_edge_dim
-        # event_mode="sparse": message_in unchanged (5 fixed event scalars +
-        # src/dst embeds). "dense": dense_edge_conv's own out_channels
-        # replaces the "5". "temporal_graph": temporal_edge_proj's own
-        # output width plays the same role, one level cheaper -- see
-        # event_mode's docstring above.
+        # event_mode="sparse": 5 event scalars. "dense": dense_edge_conv
+        # out_channels. "temporal_graph": temporal_edge_proj width.
+        # No src/dst channel-embed slots -- those were always zeroed.
         if event_mode == "sparse":
             event_feature_dim = 5
         elif event_mode == "dense":
             event_feature_dim = dense_conv_out_channels
         else:  # "temporal_graph"
             event_feature_dim = temporal_graph_edge_dim
-        message_in = event_feature_dim + 2 * channel_embed_dim
+        message_in = event_feature_dim
         self.sparse_message_mlp = nn.Sequential(
             nn.Linear(message_in, hidden_dim), nn.GELU(), nn.Linear(hidden_dim, hidden_dim)
         )
@@ -2582,10 +2585,8 @@ class SparseEvidenceGNNCore(nn.Module):
         # message MLP, in forward() below, so it's a pure ablation of what
         # the CLASSIFIER sees, not of the event-detection pipeline itself.
         #   "zero_channel_embed" -- (default, and the ONLY accepted value)
-        #       src/dst ChannelSignalEncoder embeddings zeroed; message MLP
-        #       sees only each event's own (t, freq, mag, phase) -- tests
-        #       whether accuracy survives on event content + graph topology
-        #       alone, with no raw-signal information.
+        #       ChannelSignalEncoder is not built; sparse_message_mlp's
+        #       input is event features only (no src/dst embed slots).
         #
         # 2026-08-17: "none" and "zero_event_features" (which fed raw-signal
         # channel embeddings to the classifier) are hard-disabled -- this
@@ -4105,7 +4106,7 @@ class SparseEvidenceGNNCore(nn.Module):
         return events_padded, src_padded, dst_padded, freq_idx_padded, valid_mask, batch_idx
 
     def _temporal_graph_node_states(
-        self, dense_edge_raw: torch.Tensor, channel_emb: torch.Tensor
+        self, dense_edge_raw: torch.Tensor
     ) -> torch.Tensor:
         """event_mode="temporal_graph" forward()-time step: the genuine
         "evolving graph" counterpart to _dense_edge_features -- see
@@ -4138,28 +4139,9 @@ class SparseEvidenceGNNCore(nn.Module):
         edge_seq_in = folded.permute(0, 2, 3, 1)  # [B, E, T, 4F]
         edge_embed = self.temporal_edge_proj(edge_seq_in)  # [B, E, T, temporal_graph_edge_dim]
 
-        # channel_emb is [B, n_channels, channel_embed_dim] -- fixed
-        # topology (self.src_idx/self.dst_idx), so plain fancy-indexing
-        # gathers each edge's endpoint embeddings without the batch_idx
-        # dance sparse mode's variable-length per-trial event lists need.
-        # Broadcast (not copy, via expand) across T since channel_emb has no
-        # time axis of its own.
-        src_emb = channel_emb[:, self.src_idx, :].unsqueeze(2).expand(-1, -1, n_time, -1)
-        dst_emb = channel_emb[:, self.dst_idx, :].unsqueeze(2).expand(-1, -1, n_time, -1)
-
-        # Same feature_ablation semantics forward()'s sparse/dense branch
-        # applies (see that method's docstring) -- duplicated here rather
-        # than shared, since this method's tensors carry an extra T axis
-        # the shared code doesn't expect. See _aggregate_events_freq_indexed
-        # for the same "isolated duplication over shared-code contortion"
-        # precedent elsewhere in this file.
         if self.feature_ablation == "zero_event_features":
             edge_embed = torch.zeros_like(edge_embed)
-        elif self.feature_ablation == "zero_channel_embed":
-            src_emb = torch.zeros_like(src_emb)
-            dst_emb = torch.zeros_like(dst_emb)
-
-        full_features = torch.cat([edge_embed, src_emb, dst_emb], dim=-1)  # [B, E, T, message_in]
+        full_features = edge_embed
         msg = self.sparse_message_mlp(full_features)  # [B, E, T, hidden_dim] -- SAME weights
         # every other event_mode's message step uses; nn.Linear applies to
         # the last dim regardless of the extra T axis here.
@@ -4229,7 +4211,6 @@ class SparseEvidenceGNNCore(nn.Module):
         inside the sequence the GRU walked through).
         """
         batch_size = raw_x.shape[0]
-        channel_emb = self.channel_encoder(raw_x)
 
         if self.event_mode == "sparse":
             events_padded, src_padded, dst_padded, freq_idx_padded, valid_mask = event_inputs
@@ -4251,7 +4232,7 @@ class SparseEvidenceGNNCore(nn.Module):
 
         if self.event_mode == "temporal_graph":
             evidence = self._temporal_graph_node_states(
-                dense_edge_raw.to(raw_x.dtype), channel_emb
+                dense_edge_raw.to(raw_x.dtype)
             )
             # Every canonical edge is always "active" every timestep in
             # this mode too (same property event_mode="dense" already has
@@ -4260,27 +4241,9 @@ class SparseEvidenceGNNCore(nn.Module):
             # for that property, rather than introducing a different one.
             valid_edge_count = float(batch_size * self.src_idx.numel())
         else:
-            src_emb = channel_emb[batch_idx, src_padded]
-            dst_emb = channel_emb[batch_idx, dst_padded]
-
-            # See __init__'s feature_ablation docstring -- zeroing happens
-            # here, AFTER channel_encoder/event-building have already run,
-            # so this is a pure ablation of what sparse_message_mlp sees,
-            # not of which events exist or of gradient flow into the
-            # zeroed-out submodule (channel_encoder/event-building still
-            # run and still get real gradients through whichever branch
-            # isn't zeroed... except the zeroed branch itself gets none,
-            # since torch.zeros_like detaches it from the graph -- e.g.
-            # "zero_event_features" means channel_encoder is the only thing
-            # "coh"/"phase" thresholds route signal to via topology (which
-            # edges/how many events, still real), not via feature content).
             if self.feature_ablation == "zero_event_features":
                 events_padded = torch.zeros_like(events_padded)
-            elif self.feature_ablation == "zero_channel_embed":
-                src_emb = torch.zeros_like(src_emb)
-                dst_emb = torch.zeros_like(dst_emb)
-
-            full_features = torch.cat([events_padded, src_emb, dst_emb], dim=-1)
+            full_features = events_padded
             msg = self.sparse_message_mlp(full_features)
 
             evidence = self._aggregate_events(
@@ -4482,9 +4445,9 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         # masked) coherence/phase arrays, plus a continuous significance
         # channel derived from whatever coherence_threshold_mode/
         # surrogate_percentile below resolve to -- everything downstream of
-        # event-building (channel_encoder, sparse_message_mlp,
-        # _aggregate_events, n_hops propagation, sparse_classifier) is
-        # unaffected. The dense_conv_* params below only take effect when
+        # event-building (sparse_message_mlp, _aggregate_events, n_hops
+        # propagation, sparse_classifier) is unaffected. The dense_conv_*
+        # params below only take effect when
         # event_mode="dense".
         #
         # 2026-08-11: "temporal_graph" is a third option -- see
@@ -5028,7 +4991,115 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
             verbose=verbose,
         )
 
-    def _prepare_features(self, X, *, fit: bool, train_idx=None, window_keys=None):
+    def _dense_edge_cache_key_kwargs(self) -> dict:
+        return dict(
+            sampling_rate=self.sampling_rate,
+            highest=self.highest,
+            lowest=self.lowest,
+            nfreqs=self.nfreqs,
+            cwt_resample_n_time=self.cwt_resample_n_time,
+            coherence_threshold=self.coherence_threshold,
+            smooth_kernel_size=self.smooth_kernel_size,
+            smooth_kernel_sigma=self.smooth_kernel_sigma,
+            coi_enabled=self.coi_enabled,
+            dense_edge_time_downsample=self.dense_edge_time_downsample,
+            time_averaged_graph=self.time_averaged_graph,
+            scale_adaptive_smoothing=self.scale_adaptive_smoothing,
+            scale_adaptive_cycles=self.scale_adaptive_cycles,
+            scale_adaptive_max_kernel=self.scale_adaptive_max_kernel,
+            cwt_backend=self.cwt_backend,
+            channel_subset_k=self.channel_subset_k,
+            channel_subset_metric=self.channel_subset_metric,
+        )
+
+    def _dense_edge_fat_cache_kwargs(self, n_channels: int) -> dict:
+        """CUDA vs MPS disagree on whether a 15MB zeros-padded k=4 file is
+        cheaper to read or to ignore.
+
+        CUDA (measured): np.load of that file is 26ms, live-clique WCT is
+        ~2.5ms/trial -- treat fat as a miss, recompute, write compact.
+
+        MPS: unified-memory page cache made the same files cheap (11-14s
+        epochs with 100% hits). Treating them as misses would force CWT+WCT
+        recompute (61s cold on that machine). Load fat, skip CWT, rewrite
+        compact so later epochs get the 0.37MB files without a recompute.
+        """
+        k_set = self._resolved_channel_subset_k(int(n_channels)) is not None
+        if not k_set:
+            return {"require_compact": False, "migrate_compact": False}
+        dev = getattr(self, "device_", None)
+        is_cuda = dev is not None and torch.device(dev).type == "cuda"
+        return {"require_compact": is_cuda, "migrate_compact": not is_cuda}
+
+    def _keep_features_on_device_now(self) -> bool:
+        return (
+            bool(self._keep_features_on_device)
+            and getattr(self, "batch_transform_", None) is not None
+            and self.cwt_resample_n_time is None
+            and getattr(self, "device_", None) is not None
+        )
+
+    def _raw_x_tensor_from_windows(self, X_sub: np.ndarray) -> torch.Tensor:
+        """Z-scored raw windows without CWT -- used when a dense-edge cache
+        hit already supplies the [4, E, T, F] stack."""
+        if self.transform_ is None:
+            self._resolve_transform_fns()
+        if self.normalize_input:
+            if self.X_mean_ is None or self.X_std_ is None:
+                raise ValueError("Input normalization stats are not initialized.")
+            raw_np = apply_global_zscore(X_sub, self.X_mean_, self.X_std_)
+        else:
+            raw_np = X_sub
+        raw_np = np.nan_to_num(
+            np.ascontiguousarray(raw_np, dtype=np.float32),
+            nan=0.0, posinf=0.0, neginf=0.0,
+        ).astype(np.float32, copy=False)
+        raw_x = torch.from_numpy(raw_np)
+        if self._keep_features_on_device_now():
+            raw_x = raw_x.to(self.device_)
+        return raw_x
+
+    def _try_load_complete_dense_edge_batch(
+        self,
+        raw_x_native: np.ndarray,
+        cache_keys: np.ndarray | list[str] | None,
+    ) -> torch.Tensor | None:
+        """Stacked dense-edge tensor if EVERY trial is a disk hit, else None.
+
+        All-or-nothing so a miss still goes through CWT (needed to compute
+        the missing trials). Partial hits are re-loaded in
+        _precompute_dense_edge_inputs -- mixed batches only happen while
+        compacting an old full-E cache.
+        """
+        if self.coherence_threshold_mode != "fixed" or self.dense_edge_cache_dir is None:
+            return None
+        n_samples = int(raw_x_native.shape[0])
+        if n_samples == 0:
+            return None
+        cache_dir = Path(self.dense_edge_cache_dir)
+        fat_kw = self._dense_edge_fat_cache_kwargs(int(raw_x_native.shape[1]))
+        if cache_keys is None:
+            kwargs = self._dense_edge_cache_key_kwargs()
+            cache_keys = [
+                dense_edge_cache_key(raw_x_native[i], **kwargs) for i in range(n_samples)
+            ]
+        loaded: list[torch.Tensor] = []
+        for i in range(n_samples):
+            cached = load_dense_edge(cache_dir, str(cache_keys[i]), **fat_kw)
+            if cached is None:
+                return None
+            loaded.append(cached)
+        stacked = torch.stack(loaded, dim=0)
+        if self._keep_features_on_device_now():
+            stacked = stacked.to(self.device_)
+        if self.verbose >= 1:
+            print(
+                f"[dense-edge cache] {n_samples}/{n_samples} trials reused from disk "
+                f"(100.0%)"
+            )
+        return stacked
+
+    def _prepare_features(self, X, *, fit: bool, train_idx=None, window_keys=None, dense_edge_keys=None):
         # Channel-subset-applied but NOT z-score-normalized -- passed to
         # _precompute_sparse_events as raw_x_native so the surrogate cache
         # key hashes something that depends only on the physical trial +
@@ -5037,6 +5108,35 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         # the still-untouched `X` argument, since super()._prepare_features
         # below reassigns its own local copy without mutating this one.
         raw_x_native = self._apply_channel_subset(np.asarray(X, dtype=np.float32))
+        # Streaming batches call this with fit=False. On a complete dense-edge
+        # cache hit, CWT is unused (w_real/w_imag are only an input to
+        # compute_dense_edge_input) -- skip it. keep_on_device already bypasses
+        # the CWT disk cache, so without this skip every epoch re-ran CWT for
+        # 32*C 30s windows even at 100% dense-edge hits.
+        if (
+            (not fit)
+            and self.event_mode in ("dense", "temporal_graph")
+            and not self._uses_noise_augmentation()
+        ):
+            cached_dense = self._try_load_complete_dense_edge_batch(
+                raw_x_native, dense_edge_keys,
+            )
+            if cached_dense is not None:
+                raw_x = self._raw_x_tensor_from_windows(raw_x_native)
+                if self.raw_x_resample_n_time is not None and int(
+                    self.raw_x_resample_n_time
+                ) != int(raw_x.shape[2]):
+                    from scipy.signal import resample
+                    raw_np = resample(
+                        raw_x.detach().cpu().numpy(),
+                        int(self.raw_x_resample_n_time),
+                        axis=2,
+                    )
+                    raw_np = np.nan_to_num(raw_np, nan=0.0, posinf=0.0, neginf=0.0).astype(
+                        np.float32
+                    )
+                    raw_x = torch.from_numpy(raw_np).float().to(raw_x.device)
+                return raw_x, cached_dense
         raw_x, w_real, w_imag, freqs = super()._prepare_features(
             X, fit=fit, train_idx=train_idx, window_keys=window_keys
         )
@@ -5070,7 +5170,9 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
             # into a zero full-E tensor happens inside
             # _precompute_dense_edge_inputs.
             dense_edge_raw = self._precompute_dense_edge_inputs(
-                raw_x, w_real, w_imag, freqs, raw_x_native=raw_x_native
+                raw_x, w_real, w_imag, freqs,
+                raw_x_native=raw_x_native,
+                cache_keys=dense_edge_keys,
             )
             return raw_x, dense_edge_raw
         events_padded, src_padded, dst_padded, freq_idx_padded, valid_mask = self._precompute_sparse_events(
@@ -5668,7 +5770,9 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
             )
         return torch.cat(pieces, dim=0)
 
-    def _precompute_dense_edge_inputs(self, raw_x, w_real, w_imag, freqs, raw_x_native=None):
+    def _precompute_dense_edge_inputs(
+        self, raw_x, w_real, w_imag, freqs, raw_x_native=None, cache_keys=None,
+    ):
         """event_mode="dense" counterpart to _precompute_sparse_events:
         SAME once-per-trial, chunked, non-trainable precompute discipline
         (see that method's docstring for the full rationale -- everything
@@ -5905,7 +6009,7 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         # (~6.6ms/trial, see save_dense_edge's docstring); every later
         # epoch's repeat windows become disk reads instead of WCT recompute.
         cache_dir = None
-        cache_keys: list[str] | None = None
+        resolved_keys = cache_keys
         if mode_label == "fixed" and self.dense_edge_cache_dir is not None:
             cache_dir = Path(self.dense_edge_cache_dir)
             # raw_x_native/raw_x are already statically channel-subset
@@ -5914,42 +6018,29 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
             # stays in the GNN). channel_subset_k/metric are hashed in
             # config_tuple so a full-mesh entry and a live-edge-subset
             # entry for the same raw bytes cannot collide.
-            raw_for_keys = (
-                raw_x_native
-                if raw_x_native is not None
-                else raw_x.detach().cpu().numpy()
-            )
-            cache_keys = [
-                dense_edge_cache_key(
-                    raw_for_keys[i],
-                    sampling_rate=self.sampling_rate, highest=self.highest, lowest=self.lowest,
-                    nfreqs=self.nfreqs, cwt_resample_n_time=self.cwt_resample_n_time,
-                    coherence_threshold=self.coherence_threshold,
-                    smooth_kernel_size=self.smooth_kernel_size,
-                    smooth_kernel_sigma=self.smooth_kernel_sigma,
-                    coi_enabled=self.coi_enabled,
-                    dense_edge_time_downsample=self.dense_edge_time_downsample,
-                    time_averaged_graph=self.time_averaged_graph,
-                    scale_adaptive_smoothing=self.scale_adaptive_smoothing,
-                    scale_adaptive_cycles=self.scale_adaptive_cycles,
-                    scale_adaptive_max_kernel=self.scale_adaptive_max_kernel,
-                    cwt_backend=self.cwt_backend,
-                    channel_subset_k=self.channel_subset_k,
-                    channel_subset_metric=self.channel_subset_metric,
+            if resolved_keys is None:
+                raw_for_keys = (
+                    raw_x_native
+                    if raw_x_native is not None
+                    else raw_x.detach().cpu().numpy()
                 )
-                for i in range(n_samples)
-            ]
+                resolved_keys = [
+                    dense_edge_cache_key(raw_for_keys[i], **self._dense_edge_cache_key_kwargs())
+                    for i in range(n_samples)
+                ]
+
+        fat_kw = self._dense_edge_fat_cache_kwargs(int(n_channels))
 
         # results[i] is filled in from disk (cache hit) or computed below
         # (cache miss, or caching disabled entirely -- every trial is then a
         # "miss" and this reduces to the original always-compute behavior).
         results: list[torch.Tensor | None] = [None] * n_samples
         miss_indices = list(range(n_samples))
-        if cache_keys is not None:
+        if resolved_keys is not None:
             miss_indices = []
             n_hits = 0
-            for i, key in enumerate(cache_keys):
-                cached = load_dense_edge(cache_dir, key)
+            for i, key in enumerate(resolved_keys):
+                cached = load_dense_edge(cache_dir, str(key), **fat_kw)
                 if cached is not None:
                     # load_dense_edge always returns a CPU tensor (disk-
                     # backed). keep_on_device's `results`/final stack are
@@ -6148,7 +6239,7 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
             for j, i in enumerate(idx_chunk):
                 results[i] = dense[j]
                 if cache_dir is not None:
-                    save_dense_edge(cache_dir, cache_keys[i], dense[j])
+                    save_dense_edge(cache_dir, str(resolved_keys[i]), dense[j])
 
         if profile and chunk_starts:
             n_chunks = len(chunk_starts)
@@ -6369,10 +6460,10 @@ class _LazyFeatureBatchDataset(Dataset):
             and classifier.cwt_resample_n_time is None
             and getattr(classifier, "device_", None) is not None
         )
+        X_subset = self.classifier._apply_channel_subset(X_raw)
         if classifier.cwt_cache is DISABLE_CWT_CACHE or keep_on_device_always:
             self._window_keys = None
         else:
-            X_subset = self.classifier._apply_channel_subset(X_raw)
             self._window_keys = precompute_window_cache_keys(
                 X_subset,
                 sampling_rate=classifier.sampling_rate,
@@ -6382,17 +6473,24 @@ class _LazyFeatureBatchDataset(Dataset):
                 cwt_resample_n_time=classifier.cwt_resample_n_time,
                 cwt_backend=classifier.cwt_backend,
             )
+        if classifier.dense_edge_cache_dir is not None:
+            self._dense_edge_keys = precompute_dense_edge_cache_keys(
+                X_subset, **classifier._dense_edge_cache_key_kwargs()
+            )
+        else:
+            self._dense_edge_keys = None
 
     def __getitem__(self, indices: Sequence[int]):
         idx = np.asarray(indices, dtype=np.int64)
         X_batch = self.X_raw[idx]
         batch_keys = None if self._window_keys is None else self._window_keys[idx]
+        dense_keys = None if self._dense_edge_keys is None else self._dense_edge_keys[idx]
         # fit=False: reuses self.X_mean_/self.X_std_ already fit ONCE on
         # the whole training set in fit() below -- must NOT refit per
         # batch, which would normalize each batch by its own, different,
         # wrong mean/std instead of a single consistent training-set one.
         raw_x, dense_edge_raw = self.classifier._prepare_features(
-            X_batch, fit=False, window_keys=batch_keys
+            X_batch, fit=False, window_keys=batch_keys, dense_edge_keys=dense_keys
         )
         y_batch = torch.from_numpy(self.y_idx[idx]).long()
         return raw_x, dense_edge_raw, y_batch

@@ -81,8 +81,9 @@ PARAMS = dict(
     channel_subset_metric="abs_cosine",
     dense_edge_amp_bf16=True,
     train_amp_bf16=True,
-    disable_disk_cache=False,         # True = force-recompute every trial,
-                                       # every epoch (see dense_edge_cache.py).
+    disable_disk_cache=None,          # None = True on cuda, False on mps/cpu
+                                       # (see run_pipelines.resolve_disable_disk_cache).
+                                       # True = force-recompute every trial.
     device="mps",                     # "cuda" / "mps" / "cpu" / "auto".
     verbose=2,                        # 2 = per-chunk dense-edge phase timing
                                        # too, not just per-epoch.
@@ -211,6 +212,9 @@ def main() -> None:
     for key, value in vars(args).items():
         if value is not _UNSET:
             p[key] = value
+    p["disable_disk_cache"] = rp.resolve_disable_disk_cache(
+        p["device"], p["disable_disk_cache"],
+    )
 
     print("=== smoke_test.py params ===")
     for key, value in p.items():

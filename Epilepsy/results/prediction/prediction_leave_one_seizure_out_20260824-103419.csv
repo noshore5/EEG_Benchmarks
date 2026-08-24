@@ -1,0 +1,2 @@
+subject,run,seizure_id,n_train,n_test,n_test_preictal,accuracy,precision,recall,f1,average_precision,roc_auc,hit,n_preictal_windows,n_preictal_windows_predicted_positive,n_interictal_windows,n_false_alarms,interictal_hours_monitored,false_alarms_per_hour,hit_smoothed,n_false_alarms_smoothed,false_alarms_per_hour_smoothed
+1,03,1_03_0,3491,750,30,0.76,0.109375,0.7,0.1891891891891892,0.10457557053971281,0.8145833333333332,True,30,21,720,171,6.0,28.5,True,62,10.333333333333334

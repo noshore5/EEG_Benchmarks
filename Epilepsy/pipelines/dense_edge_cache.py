@@ -24,12 +24,20 @@ null distribution, so their dense-edge output is NOT just a function of
 (raw window, config); callers must not use this cache under those modes
 (SparseEvidenceGNNClassifier._precompute_dense_edge_inputs enforces this by
 only ever building cache keys when mode_label == "fixed").
+
+On-disk layout (2026-08-24): files are uncompressed npz. Full-mesh entries
+store `dense` as `[4, E, T, F]`. Live-clique entries (`channel_subset_k`)
+store only the nonzero edge slots (`dense` `[4, m, T, F]`, `edge_idx`,
+`n_edges`) and expand back to full E on load -- otherwise k=4 was writing
+15MB/trial of which 247/253 edges were the scatter zeros, and a 100%
+hit-rate cache was disk-bound (~7.6GB/epoch at batch_size=32).
 """
 
 from __future__ import annotations
 
 import hashlib
 import os
+import zipfile
 from pathlib import Path
 from typing import Optional
 
@@ -111,19 +119,106 @@ def dense_edge_cache_key(
     return hasher.hexdigest()
 
 
-def load_dense_edge(cache_dir: Path, key: str) -> Optional[torch.Tensor]:
+def precompute_dense_edge_cache_keys(
+    raw_trials: np.ndarray,
+    **key_kwargs,
+) -> np.ndarray:
+    """One `dense_edge_cache_key` per trial, hashed once per fit() rather
+    than again on every streaming batch (same role as
+    cwt_window_cache.precompute_window_cache_keys)."""
+    n = int(raw_trials.shape[0])
+    keys = np.empty(n, dtype=object)
+    for i in range(n):
+        keys[i] = dense_edge_cache_key(raw_trials[i], **key_kwargs)
+    return keys
+
+
+def _npz_has_edge_idx(path: Path) -> bool:
+    """True when the npz was written in the compact live-edge layout.
+    Reads only the zip directory, not the 15MB dense array."""
+    try:
+        with zipfile.ZipFile(path, "r") as zf:
+            return "edge_idx.npy" in zf.namelist()
+    except Exception:
+        return False
+
+
+def _expand_compact_dense(array: np.ndarray, edge_idx: np.ndarray, n_edges: int) -> np.ndarray:
+    """Scatter live-edge `[4, m, T, F]` into a full-E zeros tensor."""
+    full = np.zeros(
+        (array.shape[0], int(n_edges), array.shape[2], array.shape[3]),
+        dtype=array.dtype,
+    )
+    if edge_idx.size:
+        full[:, np.asarray(edge_idx, dtype=np.int64)] = array
+    return full
+
+
+def _compact_dense_payload(array: np.ndarray) -> dict[str, np.ndarray]:
+    """Drop exact-zero edge slots. k=4 live clique is 6/253 edges -- the
+    full `[4, 253, T, F]` fp32 tensor is 15MB of which ~97% is the zeros
+    `_scatter_live_dense_edge` wrote. Streaming training reloads this
+    every batch every epoch, so the zeros dominated wall time (~26ms/file,
+    ~7.6GB/epoch at batch_size=32) and made a 100% hit-rate cache slower
+    than MPS page-cache of the same payload. Compact files are ~0.37MB."""
+    if array.ndim != 4:
+        return {"dense": array}
+    n_edges = int(array.shape[1])
+    edge_max = np.abs(array).reshape(array.shape[0], n_edges, -1).max(axis=(0, 2))
+    live = np.flatnonzero(edge_max > 0).astype(np.int32)
+    if live.size >= n_edges:
+        return {"dense": array}
+    return {
+        "dense": np.ascontiguousarray(array[:, live]),
+        "edge_idx": live,
+        "n_edges": np.int32(n_edges),
+    }
+
+
+def load_dense_edge(
+    cache_dir: Path,
+    key: str,
+    *,
+    require_compact: bool = False,
+    migrate_compact: bool = False,
+) -> Optional[torch.Tensor]:
     """None on any miss -- absent file, unreadable, or partially-written by
     a killed process -- never an exception; a bad entry just triggers a
     recompute+overwrite, same convention as cwt_gnn_classifiers'
-    load_surrogate_null_cache."""
+    load_surrogate_null_cache.
+
+    `require_compact=True` (CUDA + channel_subset_k): a pre-compact full-E
+    file is treated as a miss. Recomputing the live clique is cheaper than
+    reading 15MB of zeros, and the subsequent save writes the compact
+    layout under the same key.
+
+    `migrate_compact=True` (MPS/CPU + channel_subset_k): load the fat file
+    (page cache makes that cheap there), then rewrite it compact so later
+    epochs do not keep paying 15MB reads. Not used on CUDA -- that path
+    refuses the fat file instead.
+    """
     path = cache_dir / f"{key}.npz"
     if not path.is_file():
+        return None
+    is_compact = _npz_has_edge_idx(path)
+    if require_compact and not is_compact:
         return None
     try:
         with np.load(path) as data:
             array = data["dense"]
+            if "edge_idx" in data.files:
+                array = _expand_compact_dense(
+                    array,
+                    data["edge_idx"],
+                    int(np.asarray(data["n_edges"]).item()),
+                )
     except Exception:
         return None
+    if migrate_compact and not is_compact:
+        try:
+            save_dense_edge(cache_dir, key, torch.from_numpy(array))
+        except Exception:
+            pass
     return torch.from_numpy(array)
 
 
@@ -154,5 +249,8 @@ def save_dense_edge(cache_dir: Path, key: str, tensor: torch.Tensor) -> None:
     cache_dir.mkdir(parents=True, exist_ok=True)
     final_path = cache_dir / f"{key}.npz"
     tmp_path = cache_dir / f".{key}.{os.getpid()}.tmp.npz"
-    np.savez(tmp_path, dense=tensor.detach().cpu().numpy())
+    # .float() before numpy: dense_edge_amp_bf16 leaves bf16 on the GPU,
+    # and numpy has no bfloat16 dtype.
+    payload = _compact_dense_payload(tensor.detach().cpu().float().numpy())
+    np.savez(tmp_path, **payload)
     os.replace(tmp_path, final_path)

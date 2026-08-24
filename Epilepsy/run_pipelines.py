@@ -98,6 +98,24 @@ from Epilepsy.pipelines.dense_edge_cache import default_dense_edge_cache_root
 from Epilepsy.pipelines.truong_stft_cnn_classifier import TruongSTFTCNNClassifier, k_of_n_alarm
 
 
+def resolve_disable_disk_cache(device, explicit: bool | None) -> bool:
+    """Unset (`explicit is None`): disable the CWT/dense-edge disk cache on
+    CUDA, leave it on for MPS/CPU.
+
+    Windows/CUDA (this box, 30s prediction, 15MB/trial full-E tensors):
+    `np.load` of a cache hit is slower than bf16 recompute -- measured
+    26ms/file vs 14-17ms/trial GPU, and a warm cache turned yesterday's
+    10.5s epochs into 26-30s. Same direction as the 2026-08-21 pod
+    (removing both caches cut epoch time ~34%). MPS page-cache made those
+    files cheap (~11-14s), so it keeps the cache unless asked not to.
+    `--disable-disk-cache` / `--no-disable-disk-cache` override.
+    """
+    if explicit is not None:
+        return bool(explicit)
+    kind = str(device).split(":", 1)[0].lower()
+    return kind == "cuda"
+
+
 DEFAULT_SUBJECTS = [1]
 
 # label_mode="prediction" defaults (task: add SPH/SOP as configurable
@@ -1250,6 +1268,19 @@ def _build_argument_parser() -> argparse.ArgumentParser:
     # under (see the 2026-08-16 session note).
     parser.add_argument("--device", default="mps")
     parser.add_argument(
+        "--validation-split",
+        "--validation_split",
+        type=float,
+        default=None,
+        dest="validation_split",
+        help=(
+            "Fraction of each fold's training windows held out for val_loss "
+            "(0.2 in smoke_test.py PARAMS). Unset: uses the pipeline param "
+            "dict (0.0 for dense_edge / dense_edge_gru, 0.2 for truong_stft_cnn). "
+            "Required for --early-stopping-patience to fire."
+        ),
+    )
+    parser.add_argument(
         "--early-stopping-patience",
         type=int,
         default=None,
@@ -1337,18 +1368,14 @@ def _build_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--disable-disk-cache",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=None,
         help=(
-            "--pipeline=dense_edge / dense_edge_gru only: skip the disk-backed CWT/dense-edge "
-            "cache (restored 2026-08-22, on by default in leave_one_seizure_out_"
-            "detection/leave_one_seizure_out_prediction -- see cwt_window_cache.py's "
-            "module docstring). Use this on a machine/config where recompute "
-            "measured faster (e.g. the Linux/Runpod pod the 2026-08-21 removal was "
-            "validated on) instead of assuming this session's re-enable still holds "
-            "there. No effect on --label-mode=prediction when the real config's "
-            "keep_on_device path is active (StreamingSparseEvidenceGNNClassifier "
-            "with cwt_backend='torch'/device='cuda' -- the common case), since that "
-            "path bypasses caching entirely regardless of this flag."
+            "--pipeline=dense_edge / dense_edge_gru only: skip the disk-backed "
+            "CWT/dense-edge cache. Unset: disabled on CUDA (recompute measured "
+            "faster for 30s prediction tensors on this Windows box and the "
+            "2026-08-21 pod), enabled on MPS/CPU. Pass --disable-disk-cache or "
+            "--no-disable-disk-cache to force either way."
         ),
     )
     parser.add_argument("--seed", type=int, default=42)
@@ -1385,6 +1412,16 @@ def _build_argument_parser() -> argparse.ArgumentParser:
 
 def main(args: argparse.Namespace) -> None:
     pipeline = args.pipeline
+    cache_flag_explicit = args.disable_disk_cache
+    args.disable_disk_cache = resolve_disable_disk_cache(
+        args.device, args.disable_disk_cache,
+    )
+    if cache_flag_explicit is None and pipeline in ("dense_edge", "dense_edge_gru"):
+        print(
+            f"  disk cache: {'disabled' if args.disable_disk_cache else 'enabled'} "
+            f"(default for device={args.device!r}; "
+            f"{'--no-disable-disk-cache' if args.disable_disk_cache else '--disable-disk-cache'} to override)"
+        )
     label_mode = args.label_mode
     if pipeline == "truong_stft_cnn" and label_mode != "prediction":
         print(
@@ -1497,6 +1534,8 @@ def main(args: argparse.Namespace) -> None:
         clf_params["device"] = args.device
         if args.verbose is not None:
             clf_params["verbose"] = args.verbose
+        if args.validation_split is not None:
+            clf_params["validation_split"] = args.validation_split
         if args.early_stopping_patience is not None:
             clf_params["early_stopping_patience"] = args.early_stopping_patience
 
@@ -1543,6 +1582,8 @@ def main(args: argparse.Namespace) -> None:
         clf_params["channel_subset_metric"] = args.channel_subset_metric
         if args.verbose is not None:
             clf_params["verbose"] = args.verbose
+        if args.validation_split is not None:
+            clf_params["validation_split"] = args.validation_split
         if args.early_stopping_patience is not None:
             clf_params["early_stopping_patience"] = args.early_stopping_patience
 
@@ -1606,6 +1647,8 @@ def main(args: argparse.Namespace) -> None:
         clf_params["channel_subset_metric"] = args.channel_subset_metric
         if args.verbose is not None:
             clf_params["verbose"] = args.verbose
+        if args.validation_split is not None:
+            clf_params["validation_split"] = args.validation_split
         if args.early_stopping_patience is not None:
             clf_params["early_stopping_patience"] = args.early_stopping_patience
 

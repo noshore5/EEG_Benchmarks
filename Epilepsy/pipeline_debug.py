@@ -1097,21 +1097,12 @@ def parse_args():
 
     parser.add_argument(
         "--disable-disk-cache",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=None,
         help=(
-            "dense_edge_gru/prediction only: skip the disk-backed CWT/dense-edge "
-            "cache (DiskCWTCache/dense_edge_cache_dir, restored 2026-08-22 -- see "
-            "cwt_window_cache.py's module docstring) that's otherwise wired in by "
-            "default here. Note this debug harness only ever runs ONE fold/ONE "
-            "epoch, so cross-fold cache reuse -- the actual point of these caches "
-            "-- never gets exercised by a single pipeline_debug.py invocation; use "
-            "run_pipelines.py for a real multi-fold measurement of whether caching "
-            "helps. Also has no effect at all when the real config's keep_on_device "
-            "path is active (StreamingSparseEvidenceGNNClassifier with cwt_backend="
-            "'torch'/cwt_resample_n_time=None/device='cuda' -- the common case for "
-            "label_mode=prediction), since that path bypasses caching entirely "
-            "regardless of this flag -- see _prepare_features's keep_on_device "
-            "comment in cwt_gnn_classifiers.py."
+            "Skip the disk-backed CWT/dense-edge cache. Unset: disabled on "
+            "CUDA, enabled on MPS/CPU (see run_pipelines.resolve_disable_disk_cache). "
+            "Force with --disable-disk-cache / --no-disable-disk-cache."
         ),
     )
 
@@ -1128,6 +1119,9 @@ def main():
     global LOG_FILE
 
     args = parse_args()
+    args.disable_disk_cache = rp.resolve_disable_disk_cache(
+        args.device, args.disable_disk_cache,
+    )
 
     if args.log_file:
         log_path = Path(args.log_file)
