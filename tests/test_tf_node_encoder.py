@@ -493,6 +493,7 @@ def test_tf_encoder_is_a_flag_not_a_pipeline() -> None:
     assert set(pipeline_action.choices) == {
         "dense_edge_gru",
         "dense_edge",
+        "dense_edge_mamba",
         "truong_stft_cnn",
     }
     encoder_action = next(
@@ -509,7 +510,7 @@ def test_tf_encoder_is_a_flag_not_a_pipeline() -> None:
     )
     assert set(ablation_action.choices) == {"none", "zero_node_embed", "node_only"}
 
-    for pipeline in ("dense_edge_gru", "dense_edge"):
+    for pipeline in ("dense_edge_gru", "dense_edge", "dense_edge_mamba"):
         for label_mode in ("prediction", "detection"):
             params = _dense_family_params(pipeline, label_mode)
             assert params["cwt_encoder"] is False

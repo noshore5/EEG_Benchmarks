@@ -6,17 +6,27 @@ the Truong et al. 2018 STFT+CNN replica).
     python Epilepsy/run_pipelines.py --label-mode prediction --smoke
     python Epilepsy/run_pipelines.py --pipeline dense_edge --smoke
     python Epilepsy/run_pipelines.py --pipeline dense_edge_gru --cwt-encoder --smoke
+    python Epilepsy/run_pipelines.py --pipeline dense_edge_mamba --smoke
     python Epilepsy/run_pipelines.py --pipeline truong_stft_cnn --smoke
 
---pipeline {dense_edge_gru, dense_edge, truong_stft_cnn}: which CLASSIFIER
-runs, on top of --label-mode's which TASK it's trained for. "dense_edge_gru"
-(default) is this file's own SparseEvidenceGNNClassifier with
+--pipeline {dense_edge_gru, dense_edge, dense_edge_mamba, truong_stft_cnn}:
+which CLASSIFIER runs, on top of --label-mode's which TASK it's trained for.
+"dense_edge_gru" (default) is this file's own SparseEvidenceGNNClassifier with
 dense_edge_temporal_mode="rnn" (per-edge GRU) and respects --label-mode
 normally. "dense_edge" is the same classifier with
 dense_edge_temporal_mode="conv" (Conv2d + pool over time) -- same
 event_mode="dense" graph, same leave-one-seizure-out loops, same
---label-mode. Results go under results/dense_edge/ so they are never pooled
-with the GRU CSVs under results/ and results/prediction/.
+--label-mode. "dense_edge_mamba" (2026-08-24) is the same classifier again,
+dense_edge_temporal_mode="mamba" (_DenseEdgeMambaTemporal, a selective
+state-space model over the same per-edge sequence the GRU/conv backends
+consume -- see that class's docstring in cwt_gnn_classifiers.py). All three
+dense-family pipelines share every dataset/graph/training-dynamics setting
+(DENSE_EDGE_MAMBA_PARAMS below starts as an exact copy of DENSE_EDGE_GRU_
+PARAMS's numbers, only dense_edge_temporal_mode differs) -- this is
+deliberately an isolated temporal-backend ablation, not a separately-tuned
+model. Results go under results/dense_edge/ ("dense_edge") or
+results/dense_edge_mamba/ ("dense_edge_mamba") so no pipeline's CSVs are ever
+pooled with another's by a downstream glob.
 --cwt-encoder (default off) is a FLAG on either dense-family
 pipeline, not a third pipeline: it adds a learned CWT time-frequency node
 encoder on top of the existing WCT edges (cwt_encoder=True).
@@ -39,6 +49,8 @@ that part is generic to any label_mode="prediction" run, not GNN-specific.
 This is the epilepsy counterpart to BCI/run_pipelines.py's "dense_edge" /
 "dense_edge_gru" pipelines (SparseEvidenceGNNClassifier, event_mode="dense",
 dense_edge_temporal_mode="conv" / "rnn") -- but NOT a copy of that script.
+"dense_edge_mamba" (dense_edge_temporal_mode="mamba") is Epilepsy-fork only,
+2026-08-24 -- BCI/run_pipelines.py has no counterpart pipeline for it.
 Two things there don't carry over:
 
   - BCI/run_pipelines.py evaluates via moabb.evaluations.CrossSessionEvaluation
@@ -243,6 +255,37 @@ DENSE_EDGE_GRU_PARAMS: dict[str, object] = dict(
     dense_edge_temporal_mode="rnn",
 )
 
+# 2026-08-24: dense_edge_mamba -- the temporal-backend ablation this dict
+# exists for. An EXACT copy of DENSE_EDGE_GRU_PARAMS's numbers (batch_size,
+# learning_rate, every _SHARED_ARCH_PARAMS knob) with only
+# dense_edge_temporal_mode flipped to "mamba" -- deliberately NOT a
+# separately-tuned config, so any accuracy difference against
+# DENSE_EDGE_GRU_PARAMS is attributable to the temporal backend alone, not a
+# confound from also changing training dynamics (see this file's module
+# docstring and the 2026-08-24 session note this pipeline landed with).
+# mamba_d_model/mamba_d_state/mamba_d_conv/mamba_expand/mamba_n_layers/
+# mamba_dropout/mamba_chunk_size are _DenseEdgeMambaTemporal's own
+# hyperparameters (see that class's docstring in cwt_gnn_classifiers.py for
+# what each controls -- mamba_chunk_size in particular is a memory tactic,
+# not an architecture change, added after a CUDA-OOM smoke-test finding) --
+# listed here explicitly (even though they equal the classifier's own
+# defaults) so they are visible/tunable at the params-dict level the same
+# way dense_conv_kernel_size etc. already are for the conv backend, not
+# silently hardcoded inside the model class.
+DENSE_EDGE_MAMBA_PARAMS: dict[str, object] = dict(
+    _SHARED_ARCH_PARAMS,
+    batch_size=736,
+    learning_rate=2e-3,
+    dense_edge_temporal_mode="mamba",
+    mamba_d_model=16,
+    mamba_d_state=16,
+    mamba_d_conv=4,
+    mamba_expand=2,
+    mamba_n_layers=1,
+    mamba_dropout=0.0,
+    mamba_chunk_size=128,
+)
+
 # label_mode="prediction" training dynamics -- its OWN block (not a copy
 # reused by reference) so future tuning of one mode can't silently move the
 # other. Currently starts as the same numbers as the detection dicts --
@@ -276,9 +319,31 @@ PREDICTION_GRU_PARAMS: dict[str, object] = dict(
     validation_split=0.2,
 )
 
+# 2026-08-24: prediction-mode dense_edge_mamba -- same "exact copy of the GRU
+# dict's numbers, only dense_edge_temporal_mode (+ mamba_* hyperparameters)
+# differs" reasoning as DENSE_EDGE_MAMBA_PARAMS above, applied to
+# PREDICTION_GRU_PARAMS instead of DENSE_EDGE_GRU_PARAMS -- the actual
+# smoke/prediction experiment this pipeline was added for runs label_mode=
+# "prediction", so THIS is the dict that matters for that comparison.
+PREDICTION_MAMBA_PARAMS: dict[str, object] = dict(
+    _SHARED_ARCH_PARAMS,
+    batch_size=32,
+    learning_rate=2e-3,
+    dense_edge_temporal_mode="mamba",
+    mamba_d_model=16,
+    mamba_d_state=16,
+    mamba_d_conv=4,
+    mamba_expand=2,
+    mamba_n_layers=1,
+    mamba_dropout=0.0,
+    mamba_chunk_size=128,
+    validation_split=0.2,
+)
+
 
 def _dense_family_params(pipeline: str, label_mode: str) -> dict:
-    """Param dict for --pipeline dense_edge / dense_edge_gru × --label-mode.
+    """Param dict for --pipeline dense_edge / dense_edge_gru / dense_edge_mamba
+    × --label-mode.
 
     Returns the module-level dict itself (caller must `dict(...)` copy
     before overlaying CLI overrides). Raises on anything that is not one
@@ -291,6 +356,8 @@ def _dense_family_params(pipeline: str, label_mode: str) -> dict:
         return PREDICTION_DENSE_EDGE_PARAMS if label_mode == "prediction" else DENSE_EDGE_PARAMS
     if pipeline == "dense_edge_gru":
         return PREDICTION_GRU_PARAMS if label_mode == "prediction" else DENSE_EDGE_GRU_PARAMS
+    if pipeline == "dense_edge_mamba":
+        return PREDICTION_MAMBA_PARAMS if label_mode == "prediction" else DENSE_EDGE_MAMBA_PARAMS
     raise ValueError(f"not a dense-family pipeline: {pipeline!r}")
 
 
@@ -306,6 +373,9 @@ def _dense_family_result_dir(
     layout (results/leave_one_seizure_out_*.csv and results/prediction/)
     so existing GRU numbers stay GRU numbers. dense_edge goes under
     results/dense_edge/ so conv vs GRU cannot be pooled by a glob.
+    dense_edge_mamba (2026-08-24) goes under results/dense_edge_mamba/ for
+    the same reason -- a third temporal backend's numbers must never land
+    next to conv's or GRU's by accident.
     cwt_encoder=True nests under cwt_encoder/ inside that
     pipeline's root so CWT-node runs cannot be globbed with WCT-only CSVs.
     node_only / zero_node_embed nest one level deeper so those ablations
@@ -313,6 +383,8 @@ def _dense_family_result_dir(
     """
     if pipeline == "dense_edge":
         root = output_dir / "dense_edge"
+    elif pipeline == "dense_edge_mamba":
+        root = output_dir / "dense_edge_mamba"
     elif pipeline == "dense_edge_gru":
         root = output_dir
     else:
@@ -1165,7 +1237,7 @@ def _build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--subjects", nargs="+", type=int, default=DEFAULT_SUBJECTS)
     parser.add_argument(
         "--pipeline",
-        choices=["dense_edge_gru", "dense_edge", "truong_stft_cnn"],
+        choices=["dense_edge_gru", "dense_edge", "dense_edge_mamba", "truong_stft_cnn"],
         default="dense_edge_gru",
         help=(
             "'dense_edge_gru' (default): SparseEvidenceGNNClassifier with "
@@ -1173,6 +1245,13 @@ def _build_argument_parser() -> argparse.ArgumentParser:
             "'dense_edge': the same classifier with dense_edge_temporal_mode='conv' "
             "(Conv2d + pool over time); results go under results/dense_edge/ so they "
             "are never pooled with the GRU CSVs. "
+            "'dense_edge_mamba' (2026-08-24): the same classifier again, "
+            "dense_edge_temporal_mode='mamba' (_DenseEdgeMambaTemporal, a selective "
+            "state-space model over the SAME per-edge sequence the GRU/conv backends "
+            "see) -- results go under results/dense_edge_mamba/. DENSE_EDGE_MAMBA_PARAMS "
+            "starts as an exact copy of DENSE_EDGE_GRU_PARAMS so this is an isolated "
+            "temporal-backend ablation, not a separately-tuned model. Requires the "
+            "'mambapy' package (see _DenseEdgeMambaTemporal's docstring). "
             "'truong_stft_cnn': Truong et al. 2018's STFT+CNN architecture replica "
             "(see Epilepsy/pipelines/truong_stft_cnn_classifier.py's module docstring) "
             "-- prediction-mode ONLY, forces --label-mode=prediction regardless of "
@@ -1181,8 +1260,8 @@ def _build_argument_parser() -> argparse.ArgumentParser:
             "to 30s/30s instead of 4s/8s to match the paper, and results are written "
             "to their own results/truong_stft_cnn/ subdirectory. "
             "The CWT time-frequency node encoder is --cwt-encoder "
-            "(off by default), not a fourth pipeline -- it works on dense_edge and "
-            "dense_edge_gru."
+            "(off by default), not a separate pipeline -- it works on any dense-family "
+            "pipeline (dense_edge, dense_edge_gru, dense_edge_mamba)."
         ),
     )
     parser.add_argument(
@@ -1492,7 +1571,7 @@ def main(args: argparse.Namespace) -> None:
     args.disable_disk_cache = resolve_disable_disk_cache(
         args.device, args.disable_disk_cache,
     )
-    if cache_flag_explicit is None and pipeline in ("dense_edge", "dense_edge_gru"):
+    if cache_flag_explicit is None and pipeline in ("dense_edge", "dense_edge_gru", "dense_edge_mamba"):
         print(
             f"  disk cache: {'disabled' if args.disable_disk_cache else 'enabled'} "
             f"(default for device={args.device!r}; "
