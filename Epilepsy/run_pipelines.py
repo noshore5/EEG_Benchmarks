@@ -171,11 +171,12 @@ _SHARED_ARCH_PARAMS: dict[str, object] = dict(
     weight_decay=1e-4,
     grad_clip_norm=0.1,
     normalize_input=True,
-    validation_split=0.0,
-    # Only fires when validation_split > 0 (common.py's _train_loop needs a
-    # val_loader to score val_loss). Consecutive epochs without a val_loss
-    # improvement before the loop breaks; the best-val checkpoint is still
-    # restored either way. None = run every epoch.
+    validation_split=0.2,
+    # Default-on: validation_split > 0 is required for this to fire
+    # (common.py's _train_loop needs a val_loader to score val_loss).
+    # Consecutive epochs without a val_loss improvement before the loop
+    # breaks; the best-val checkpoint is still restored either way.
+    # None = run every epoch. `--validation-split 0` turns both off.
     early_stopping_patience=5,
     device="mps",
     surrogate_seed=42,
@@ -240,10 +241,11 @@ PREDICTION_DENSE_EDGE_PARAMS: dict[str, object] = dict(
     batch_size=32,
     learning_rate=2e-3,
     dense_edge_temporal_mode="conv",
-    # Same validation_split=0.0 note as PREDICTION_GRU_PARAMS below --
-    # copied rather than inherited so a later GRU-only val-split fix cannot
-    # silently move the conv pipeline.
-    validation_split=0.0,
+    # Copied rather than inherited so a later GRU-only val-split change
+    # cannot silently move the conv pipeline. 0.2 + early_stopping_patience
+    # (from _SHARED_ARCH_PARAMS) is the default: val_loss early-stops and
+    # restores the best checkpoint. `--validation-split 0` disables both.
+    validation_split=0.2,
 )
 
 PREDICTION_GRU_PARAMS: dict[str, object] = dict(
@@ -252,20 +254,13 @@ PREDICTION_GRU_PARAMS: dict[str, object] = dict(
     learning_rate=2e-3,
     dense_edge_temporal_mode="rnn",
     time_frequency_node_encoder=False,
-    # 2026-08-19: REVERTED to _SHARED_ARCH_PARAMS's validation_split=0.0 --
-    # the apples-to-apples validation_split=0.2 fix (see git history) crashes
-    # every prediction-mode dense_edge_gru run: leave_one_seizure_out_prediction
-    # (above) trains via StreamingSparseEvidenceGNNClassifier, which explicitly
-    # raises NotImplementedError for validation_split > 0 (see that class's fit(),
-    # cwt_gnn_classifiers.py) -- lazy val_loader batching for the streaming
-    # classifier was never built. Until that's implemented, dense_edge_gru
-    # prediction mode trains on 100% of each fold's training windows while
-    # truong_stft_cnn (unaffected -- separate classifier, TRUONG_STFT_CNN_PARAMS
-    # below) trains on 80% -- a real, currently-unavoidable confound in comparing
-    # the two. Detection mode is untouched (DENSE_EDGE_GRU_PARAMS still inherits
-    # 0.0; SparseEvidenceGNNClassifier there is the non-streaming variant and was
-    # never affected by this).
-    validation_split=0.0,
+    # StreamingSparseEvidenceGNNClassifier now supports validation_split > 0
+    # (lazy val_loader via _LazyFeatureBatchDataset; the 2026-08-19
+    # NotImplementedError is gone). Default matches _SHARED_ARCH_PARAMS:
+    # hold out 20% of each fold's training windows, early-stop on val_loss
+    # with patience=5, restore the best checkpoint. `--validation-split 0`
+    # trains on 100% of the fold and runs every epoch.
+    validation_split=0.2,
 )
 
 # CWT time-frequency node encoder + WCT dense-edge GRU. Own copies of the
@@ -1279,11 +1274,11 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         # before that observed flatline rather than cutting at it -- not
         # validated against every fold, and this is a per-fold TRAINING-loss
         # observation, not a held-out-performance one when
-        # validation_split=0.0). With validation_split > 0, common.py's
-        # val-loss early_stopping_patience (see _SHARED_ARCH_PARAMS /
-        # TRUONG_STFT_CNN_PARAMS) cuts the fold once val_loss stops
-        # improving and restores the best checkpoint; this epoch cap is
-        # then just an upper bound. default=None: resolved per
+        # validation_split was 0.0). With the default validation_split=0.2,
+        # common.py's val-loss early_stopping_patience (see
+        # _SHARED_ARCH_PARAMS / TRUONG_STFT_CNN_PARAMS) cuts the fold once
+        # val_loss stops improving and restores the best checkpoint; this
+        # epoch cap is then just an upper bound. default=None: resolved per
         # --label-mode in main() (see DEFAULT_DETECTION_EPOCHS /
         # DEFAULT_PREDICTION_EPOCHS) unless explicitly overridden here.
         "--epochs", type=int, default=None,
@@ -1307,10 +1302,10 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         default=None,
         dest="validation_split",
         help=(
-            "Fraction of each fold's training windows held out for val_loss "
-            "(0.2 in smoke_test.py PARAMS). Unset: uses the pipeline param "
-            "dict (0.0 for dense_edge / dense_edge_gru, 0.2 for truong_stft_cnn). "
-            "Required for --early-stopping-patience to fire."
+            "Fraction of each fold's training windows held out for val_loss. "
+            "Unset: uses the pipeline param dict (0.2 for every pipeline, "
+            "which is what makes early stopping fire). Pass 0 to disable "
+            "the val split and early stopping."
         ),
     )
     parser.add_argument(
@@ -1319,10 +1314,10 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Consecutive epochs without val_loss improvement before training "
-            "stops (common.py _train_loop). Requires validation_split > 0 or "
-            "it is a no-op. Unset: uses the pipeline param dict "
-            "(early_stopping_patience=5). Pass 0 to stop on the first "
-            "non-improving epoch."
+            "stops (common.py _train_loop). Default-on via the pipeline param "
+            "dict (early_stopping_patience=5) whenever validation_split > 0. "
+            "Requires validation_split > 0 or it is a no-op. Pass 0 to stop "
+            "on the first non-improving epoch."
         ),
     )
     parser.add_argument(
@@ -1574,7 +1569,12 @@ def main(args: argparse.Namespace) -> None:
         if args.early_stopping_patience is not None:
             clf_params["early_stopping_patience"] = args.early_stopping_patience
 
-        print(f"Running leave-one-seizure-out (Truong STFT+CNN, epochs={epochs}, sph={args.sph}s, sop={args.sop}s)...")
+        print(
+            f"Running leave-one-seizure-out (Truong STFT+CNN, epochs={epochs}, "
+            f"sph={args.sph}s, sop={args.sop}s, "
+            f"validation_split={clf_params['validation_split']}, "
+            f"early_stopping_patience={clf_params['early_stopping_patience']})..."
+        )
         results, per_seizure = leave_one_seizure_out_truong(
             X, y, metadata, clf_params, epochs, window_length,
             negative_to_positive_ratio=negative_to_positive_ratio,
@@ -1625,7 +1625,9 @@ def main(args: argparse.Namespace) -> None:
         print(
             f"Running leave-one-seizure-out prediction (pipeline={pipeline}, "
             f"dense_edge_temporal_mode={clf_params['dense_edge_temporal_mode']}, "
-            f"epochs={epochs}, sph={args.sph}s, sop={args.sop}s)..."
+            f"epochs={epochs}, sph={args.sph}s, sop={args.sop}s, "
+            f"validation_split={clf_params['validation_split']}, "
+            f"early_stopping_patience={clf_params['early_stopping_patience']})..."
         )
         results, per_seizure = leave_one_seizure_out_prediction(
             X, y, metadata, clf_params, epochs, window_length,
@@ -1690,7 +1692,9 @@ def main(args: argparse.Namespace) -> None:
         print(
             f"Running leave-one-seizure-out detection (pipeline={pipeline}, "
             f"dense_edge_temporal_mode={clf_params['dense_edge_temporal_mode']}, "
-            f"epochs={epochs})..."
+            f"epochs={epochs}, "
+            f"validation_split={clf_params['validation_split']}, "
+            f"early_stopping_patience={clf_params['early_stopping_patience']})..."
         )
         results = leave_one_seizure_out_detection(
             X, y, metadata, clf_params, epochs,
