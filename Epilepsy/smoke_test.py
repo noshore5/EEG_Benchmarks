@@ -62,7 +62,7 @@ import Epilepsy.run_pipelines as rp
 # EDIT THESE
 # ---------------------------------------------------------------------------
 PARAMS = dict(
-    pipeline="dense_edge_gru",        # "dense_edge_gru" | "dense_edge"
+    pipeline="dense_edge_gru",        # "dense_edge_gru" | "dense_edge" | "dense_edge_gru_tf_node"
     label_mode="prediction",          # "prediction" or "detection"
     subjects=[1],
     window_length=30.0,               # seconds/window. Real default: 30.0
@@ -184,7 +184,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--pipeline", choices=["dense_edge_gru", "dense_edge"], default=_UNSET,
+        "--pipeline",
+        choices=["dense_edge_gru", "dense_edge", "dense_edge_gru_tf_node"],
+        default=_UNSET,
     )
     parser.add_argument("--label-mode", choices=["prediction", "detection"], default=_UNSET)
     parser.add_argument("--subjects", type=int, nargs="+", default=_UNSET)
@@ -254,7 +256,9 @@ def main() -> None:
     clf_params["early_stopping_patience"] = p["early_stopping_patience"]
     print(
         f"[smoke_test] dense_edge_temporal_mode="
-        f"{clf_params['dense_edge_temporal_mode']!r}\n"
+        f"{clf_params['dense_edge_temporal_mode']!r} "
+        f"time_frequency_node_encoder="
+        f"{clf_params.get('time_frequency_node_encoder', False)!r}\n"
     )
 
     real_stdout = sys.stdout

@@ -7,7 +7,7 @@ the Truong et al. 2018 STFT+CNN replica).
     python Epilepsy/run_pipelines.py --pipeline dense_edge --smoke
     python Epilepsy/run_pipelines.py --pipeline truong_stft_cnn --smoke
 
---pipeline {dense_edge_gru, dense_edge, truong_stft_cnn}: which CLASSIFIER
+--pipeline {dense_edge_gru, dense_edge, dense_edge_gru_tf_node, truong_stft_cnn}: which CLASSIFIER
 runs, on top of --label-mode's which TASK it's trained for. "dense_edge_gru"
 (default) is this file's own SparseEvidenceGNNClassifier with
 dense_edge_temporal_mode="rnn" (per-edge GRU) and respects --label-mode
@@ -251,6 +251,7 @@ PREDICTION_GRU_PARAMS: dict[str, object] = dict(
     batch_size=32,
     learning_rate=2e-3,
     dense_edge_temporal_mode="rnn",
+    time_frequency_node_encoder=False,
     # 2026-08-19: REVERTED to _SHARED_ARCH_PARAMS's validation_split=0.0 --
     # the apples-to-apples validation_split=0.2 fix (see git history) crashes
     # every prediction-mode dense_edge_gru run: leave_one_seizure_out_prediction
@@ -267,19 +268,41 @@ PREDICTION_GRU_PARAMS: dict[str, object] = dict(
     validation_split=0.0,
 )
 
+# CWT time-frequency node encoder + WCT dense-edge GRU. Own copies of the
+# GRU dicts so enabling the encoder cannot silently move a baseline GRU
+# run, and so results land under a separate directory (see
+# _dense_family_result_dir). time_frequency_node_encoder=True is the only
+# intentional difference.
+DENSE_EDGE_GRU_TF_NODE_PARAMS: dict[str, object] = dict(
+    DENSE_EDGE_GRU_PARAMS,
+    time_frequency_node_encoder=True,
+)
+
+PREDICTION_GRU_TF_NODE_PARAMS: dict[str, object] = dict(
+    PREDICTION_GRU_PARAMS,
+    time_frequency_node_encoder=True,
+)
+
 
 def _dense_family_params(pipeline: str, label_mode: str) -> dict:
-    """Param dict for --pipeline dense_edge / dense_edge_gru × --label-mode.
+    """Param dict for --pipeline dense_edge / dense_edge_gru /
+    dense_edge_gru_tf_node × --label-mode.
 
     Returns the module-level dict itself (caller must `dict(...)` copy
     before overlaying CLI overrides). Raises on anything that is not one
-    of the two dense-family pipelines -- truong_stft_cnn has its own
+    of the dense-family pipelines -- truong_stft_cnn has its own
     TRUONG_STFT_CNN_PARAMS path in main().
     """
     if pipeline == "dense_edge":
         return PREDICTION_DENSE_EDGE_PARAMS if label_mode == "prediction" else DENSE_EDGE_PARAMS
     if pipeline == "dense_edge_gru":
         return PREDICTION_GRU_PARAMS if label_mode == "prediction" else DENSE_EDGE_GRU_PARAMS
+    if pipeline == "dense_edge_gru_tf_node":
+        return (
+            PREDICTION_GRU_TF_NODE_PARAMS
+            if label_mode == "prediction"
+            else DENSE_EDGE_GRU_TF_NODE_PARAMS
+        )
     raise ValueError(f"not a dense-family pipeline: {pipeline!r}")
 
 
@@ -303,6 +326,11 @@ def _dense_family_result_dir(
         if label_mode == "prediction":
             return output_dir / ("prediction_shuffled_control" if shuffle_labels else "prediction")
         return output_dir / "shuffled_control" if shuffle_labels else output_dir
+    if pipeline == "dense_edge_gru_tf_node":
+        root = output_dir / "dense_edge_gru_tf_node"
+        if label_mode == "prediction":
+            return root / ("prediction_shuffled_control" if shuffle_labels else "prediction")
+        return root / "shuffled_control" if shuffle_labels else root
     raise ValueError(f"not a dense-family pipeline: {pipeline!r}")
 
 
@@ -1121,7 +1149,7 @@ def _build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--subjects", nargs="+", type=int, default=DEFAULT_SUBJECTS)
     parser.add_argument(
         "--pipeline",
-        choices=["dense_edge_gru", "dense_edge", "truong_stft_cnn"],
+        choices=["dense_edge_gru", "dense_edge", "dense_edge_gru_tf_node", "truong_stft_cnn"],
         default="dense_edge_gru",
         help=(
             "'dense_edge_gru' (default): SparseEvidenceGNNClassifier with "
@@ -1129,6 +1157,11 @@ def _build_argument_parser() -> argparse.ArgumentParser:
             "'dense_edge': the same classifier with dense_edge_temporal_mode='conv' "
             "(Conv2d + pool over time); results go under results/dense_edge/ so they "
             "are never pooled with the GRU CSVs. "
+            "'dense_edge_gru_tf_node': dense_edge_gru plus a learned CWT "
+            "time-frequency node encoder (time_frequency_node_encoder=True); "
+            "WCT edges are unchanged. Results go under "
+            "results/dense_edge_gru_tf_node/ so they are never pooled with "
+            "the WCT-only GRU CSVs. "
             "'truong_stft_cnn': Truong et al. 2018's STFT+CNN architecture replica "
             "(see Epilepsy/pipelines/truong_stft_cnn_classifier.py's module docstring) "
             "-- prediction-mode ONLY, forces --label-mode=prediction regardless of "
@@ -1416,7 +1449,9 @@ def main(args: argparse.Namespace) -> None:
     args.disable_disk_cache = resolve_disable_disk_cache(
         args.device, args.disable_disk_cache,
     )
-    if cache_flag_explicit is None and pipeline in ("dense_edge", "dense_edge_gru"):
+    if cache_flag_explicit is None and pipeline in (
+        "dense_edge", "dense_edge_gru", "dense_edge_gru_tf_node",
+    ):
         print(
             f"  disk cache: {'disabled' if args.disable_disk_cache else 'enabled'} "
             f"(default for device={args.device!r}; "

@@ -42,6 +42,7 @@ from typing import Callable, Literal, Sequence
 import numpy as np
 import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint
 from torch.utils.data import DataLoader, Dataset, Sampler
 from tqdm.auto import tqdm
 
@@ -1812,6 +1813,86 @@ class ChannelSignalEncoder(nn.Module):
         return emb.reshape(batch_size, n_channels, -1)
 
 
+class CWTTimeFrequencyNodeEncoder(nn.Module):
+    """Shared Conv2d encoder: each EEG channel's CWT (real, imag) -> one
+    window-level node embedding.
+
+    Applied independently to every channel with SHARED weights -- channels
+    are folded into the batch dim, so this is one network, not one network
+    per electrode. Consumes the pipeline's already-computed CWT real/imag
+    tensors (do NOT recompute CWT here; do NOT wrap them as a complex
+    tensor -- recent CUDA/BF16 work hit dtype issues on complex ops, and
+    ordinary Conv2d is autocast-compatible). Adaptive pooling happens only
+    AFTER the two conv layers, so the network sees local time-frequency
+    structure rather than a pre-averaged spectrogram.
+
+    Input:  w_real, w_imag each [B, C, T, F]
+    Output: [B, C, embed_dim]
+
+    Intentionally small (Conv2d 2->16->32, Linear 32->embed_dim): this
+    exists to test whether learned per-channel time-frequency information
+    adds anything to the existing WCT/coherence graph, not to grow capacity.
+
+    Native 30s CWT maps are [T=7680, F=8]. A single Conv2d(k=5) over a
+    full training batch of spectrograms (B=32, C=23 -> 736 maps) builds
+    an im2col workspace of ~9GB and OOMs on an 8-12GB GPU / MPS. The
+    architecture is unchanged -- the SAME shared convs still see full
+    time-frequency structure, with no pre-average -- but spectrograms
+    are encoded in chunks, with activation checkpointing during train
+    so backward does not keep every chunk's feature maps alive at once.
+    """
+
+    def __init__(self, embed_dim: int, chunk_size: int = 32) -> None:
+        super().__init__()
+        self.embed_dim = int(embed_dim)
+        self.chunk_size = max(1, int(chunk_size))
+        self.net = nn.Sequential(
+            nn.Conv2d(2, 16, kernel_size=5, padding=2),
+            nn.GELU(),
+            nn.Conv2d(16, 32, kernel_size=5, padding=2),
+            nn.GELU(),
+            nn.AdaptiveAvgPool2d(1),
+        )
+        self.proj = nn.Linear(32, self.embed_dim)
+
+    def _encode_flat(self, x: torch.Tensor) -> torch.Tensor:
+        return self.proj(self.net(x).flatten(1))
+
+    def forward(self, w_real: torch.Tensor, w_imag: torch.Tensor) -> torch.Tensor:
+        if w_real.shape != w_imag.shape:
+            raise ValueError(
+                f"w_real/w_imag shape mismatch: {tuple(w_real.shape)} vs "
+                f"{tuple(w_imag.shape)}."
+            )
+        if w_real.ndim != 4:
+            raise ValueError(
+                f"CWT node encoder expects [B, C, T, F] real/imag, got "
+                f"{tuple(w_real.shape)}."
+            )
+        batch_size, n_channels, n_time, nfreqs = w_real.shape
+        # [B, C, T, F] x2 -> [B*C, 2, T, F] so Conv2d sees real/imag as
+        # ordinary input channels and the same weights run on every electrode.
+        x = torch.stack((w_real, w_imag), dim=2).reshape(
+            batch_size * n_channels, 2, n_time, nfreqs
+        )
+        n = x.shape[0]
+        if n <= self.chunk_size:
+            h = self._encode_flat(x)
+        else:
+            use_ckpt = bool(self.training and torch.is_grad_enabled())
+            pieces: list[torch.Tensor] = []
+            for start in range(0, n, self.chunk_size):
+                sl = x[start : start + self.chunk_size]
+                if use_ckpt:
+                    pieces.append(
+                        checkpoint(self._encode_flat, sl, use_reentrant=False)
+                    )
+                else:
+                    pieces.append(self._encode_flat(sl))
+            h = torch.cat(pieces, dim=0)
+        return h.view(batch_size, n_channels, self.embed_dim)
+
+
 class SparseEvidenceGNNCore(nn.Module):
     """Torch core: full-resolution coherence -> region-consolidated sparse
     events -> per-channel-conditioned message passing -> flatten -> classify.
@@ -2189,6 +2270,34 @@ class SparseEvidenceGNNCore(nn.Module):
         # two modes' sparse_message_mlp/sparse_classifier stay comparably
         # sized, not because it's been tuned.
         temporal_graph_edge_dim: int = 8,
+        # Learned per-channel CWT time-frequency node encoder -- additive to
+        # the existing WCT/coherence EDGE pathway, not a replacement. False
+        # (default) is bit-identical to before this param existed:
+        # ChannelSignalEncoder stays unused (feature_ablation locked to
+        # zero_channel_embed), sparse_message_mlp still sees edge features
+        # only, and CWT is discarded after WCT construction. True builds
+        # CWTTimeFrequencyNodeEncoder (shared Conv2d over each channel's
+        # CWT real/imag), produces one window-level embedding per node, and
+        # concatenates (h_src, h_dst, e_ij) into sparse_message_mlp so the
+        # learned message is f(node_i, node_j, edge_ij). event_mode="dense"
+        # only -- rejected otherwise. See time_frequency_node_ablation for
+        # the in-architecture disable / node-only switches; the WCT-only
+        # baseline is this flag False, not a zeroed approximation of the
+        # new model.
+        time_frequency_node_encoder: bool = False,
+        # Width of the CWT node embedding. None (default) uses hidden_dim
+        # so the node vector is the same width as the existing per-edge
+        # hidden state. Only read when time_frequency_node_encoder=True.
+        node_embedding_dim: int | None = None,
+        # In-architecture ablation of the CWT node pathway. "none" (default)
+        # uses both node embeddings and WCT edge features. "zero_node_embed"
+        # keeps the same message MLP (src/dst slots exist) but zeros the
+        # node embeddings -- the exact same code path with nodes removed.
+        # "node_only" zeros the WCT edge features after dense_edge_conv so
+        # messages see (h_i, h_j, 0). Requires time_frequency_node_encoder
+        # =True (rejected otherwise) -- the WCT-only baseline is that flag
+        # False, not zero_node_embed.
+        time_frequency_node_ablation: Literal["none", "zero_node_embed", "node_only"] = "none",
         **kwargs,
     ) -> None:
         super().__init__()
@@ -2348,6 +2457,24 @@ class SparseEvidenceGNNCore(nn.Module):
                 "_dense_edge_features' input to the 'rnn' path (see "
                 "shuffle_time_order's docstring above)."
             )
+        if time_frequency_node_ablation not in ("none", "zero_node_embed", "node_only"):
+            raise ValueError(
+                "time_frequency_node_ablation must be 'none', 'zero_node_embed', "
+                f"or 'node_only', got {time_frequency_node_ablation!r}."
+            )
+        if time_frequency_node_encoder and event_mode != "dense":
+            raise ValueError(
+                "time_frequency_node_encoder=True has no meaning when "
+                f"event_mode={event_mode!r} -- the CWT node encoder is wired "
+                "into the dense-edge message path only (see "
+                "time_frequency_node_encoder's docstring above)."
+            )
+        if time_frequency_node_ablation != "none" and not time_frequency_node_encoder:
+            raise ValueError(
+                "time_frequency_node_ablation != 'none' requires "
+                "time_frequency_node_encoder=True -- the WCT-only baseline is "
+                "that flag False, not a zeroed approximation of the new model."
+            )
 
         self.n_channels = n_channels
         self.nfreqs = nfreqs
@@ -2457,6 +2584,16 @@ class SparseEvidenceGNNCore(nn.Module):
         self.dense_edge_time_downsample = int(dense_edge_time_downsample)
         self.time_averaged_graph = bool(time_averaged_graph)
         self.temporal_graph_edge_dim = temporal_graph_edge_dim
+        self.time_frequency_node_encoder = bool(time_frequency_node_encoder)
+        self.node_embedding_dim = int(
+            hidden_dim if node_embedding_dim is None else node_embedding_dim
+        )
+        self.time_frequency_node_ablation = time_frequency_node_ablation
+        # Constructed LAST (after dense_edge_conv / temporal_graph modules)
+        # when enabled, so existing submodule init is unchanged at the
+        # default (this flag False). None here is just a slot -- no RNG.
+        self.cwt_node_encoder = None
+        self._tf_forward_logged = False
         # event_mode="sparse": 5 event scalars. "dense": dense_edge_conv
         # out_channels. "temporal_graph": temporal_edge_proj width.
         # No src/dst channel-embed slots -- those were always zeroed.
@@ -2467,6 +2604,13 @@ class SparseEvidenceGNNCore(nn.Module):
         else:  # "temporal_graph"
             event_feature_dim = temporal_graph_edge_dim
         message_in = event_feature_dim
+        if self.time_frequency_node_encoder:
+            # m_ij = f(h_i, h_j, e_ij): src embedding, dst embedding, edge
+            # features. Only widens sparse_message_mlp when the new encoder
+            # is on -- baseline message_in (and therefore its init) is
+            # unchanged.
+            message_in = event_feature_dim + 2 * self.node_embedding_dim
+        self.event_feature_dim = event_feature_dim
         self.sparse_message_mlp = nn.Sequential(
             nn.Linear(message_in, hidden_dim), nn.GELU(), nn.Linear(hidden_dim, hidden_dim)
         )
@@ -2679,6 +2823,16 @@ class SparseEvidenceGNNCore(nn.Module):
             self.temporal_edge_proj = None
             self.temporal_node_gru = None
 
+        # CWT node encoder LAST -- same init-order precedent as
+        # dense_edge_conv / temporal_edge_proj above. Unused (stays None)
+        # when time_frequency_node_encoder=False, so every pre-existing
+        # submodule's random init is bit-identical to before this feature
+        # existed.
+        if self.time_frequency_node_encoder:
+            self.cwt_node_encoder = CWTTimeFrequencyNodeEncoder(
+                embed_dim=self.node_embedding_dim,
+            )
+
     def configure_summary_context(
         self,
         *,
@@ -2720,7 +2874,10 @@ class SparseEvidenceGNNCore(nn.Module):
             f"dense_edge_temporal_mode={self.dense_edge_temporal_mode} "
             f"shuffle_time_order={self.shuffle_time_order} "
             f"temporal_graph_edge_dim={self.temporal_graph_edge_dim} "
-            f"dense_edge_time_downsample={self.dense_edge_time_downsample}"
+            f"dense_edge_time_downsample={self.dense_edge_time_downsample} "
+            f"time_frequency_node_encoder={self.time_frequency_node_encoder} "
+            f"node_embedding_dim={self.node_embedding_dim} "
+            f"time_frequency_node_ablation={self.time_frequency_node_ablation}"
         )
         context = self._summary_context
         if context is None:
@@ -4178,6 +4335,97 @@ class SparseEvidenceGNNCore(nn.Module):
         evidence = h_n.squeeze(0).reshape(batch_size_actual, self.n_channels, self.hidden_dim)
         return evidence
 
+    def _cwt_node_embeddings(
+        self, w_real: torch.Tensor, w_imag: torch.Tensor
+    ) -> torch.Tensor:
+        """Trainable CWT node encoder: [B, C, T, F] real/imag -> [B, C, D].
+
+        CWT is computed once per window upstream and encoded once per
+        forward here -- never recomputed inside a GNN layer. Ablation
+        `zero_node_embed` skips the encoder and returns zeros of the
+        same shape so the message MLP still sees src/dst slots.
+        """
+        if self.cwt_node_encoder is None:
+            raise RuntimeError(
+                "_cwt_node_embeddings called without cwt_node_encoder -- "
+                "time_frequency_node_encoder must be True."
+            )
+        if self.time_frequency_node_ablation == "zero_node_embed":
+            batch_size, n_channels = w_real.shape[0], w_real.shape[1]
+            return w_real.new_zeros(
+                batch_size, n_channels, self.node_embedding_dim
+            )
+        return self.cwt_node_encoder(w_real, w_imag)
+
+    def _compose_message_features(
+        self,
+        events_padded: torch.Tensor,
+        src_padded: torch.Tensor,
+        dst_padded: torch.Tensor,
+        node_embed: torch.Tensor,
+    ) -> torch.Tensor:
+        """Per-edge message input: concat(h_src, h_dst, e_ij).
+
+        `node_embed` is [B, C, D], `events_padded` is [B, E, edge_dim],
+        `src_padded`/`dst_padded` are the canonical (i<j) indices already
+        used by the dense-edge path. Source and destination stay distinct
+        even though the coherence graph is undirected.
+        """
+        # Advanced indexing: node_embed[b, src[b, e]] -> [B, E, D]
+        h_src = node_embed[torch.arange(node_embed.shape[0], device=node_embed.device).unsqueeze(1), src_padded]
+        h_dst = node_embed[torch.arange(node_embed.shape[0], device=node_embed.device).unsqueeze(1), dst_padded]
+        return torch.cat([h_src, h_dst, events_padded], dim=-1)
+
+    def _maybe_log_tf_forward(
+        self,
+        *,
+        w_real: torch.Tensor | None,
+        w_imag: torch.Tensor | None,
+        node_embed: torch.Tensor | None,
+        events_padded: torch.Tensor,
+        full_features: torch.Tensor,
+        timings: dict[str, float] | None,
+    ) -> None:
+        """One-shot shape (+ optional timing) dump; subsequent forwards stay quiet."""
+        if self._tf_forward_logged or not self.time_frequency_node_encoder:
+            return
+        self._tf_forward_logged = True
+        n_params = sum(int(p.numel()) for p in self.parameters())
+        n_trainable = sum(int(p.numel()) for p in self.parameters() if p.requires_grad)
+        n_enc = (
+            0
+            if self.cwt_node_encoder is None
+            else sum(int(p.numel()) for p in self.cwt_node_encoder.parameters())
+        )
+        parts = [
+            "[TF-node] first forward "
+            f"node_embed={None if node_embed is None else tuple(node_embed.shape)} "
+            f"edge_embed={tuple(events_padded.shape)} "
+            f"message_in={tuple(full_features.shape)} "
+            f"trainable_params={n_trainable} (node_encoder={n_enc}, total={n_params})"
+        ]
+        if w_real is not None and w_imag is not None:
+            parts.append(
+                f"[TF-node] CWT input w_real={tuple(w_real.shape)} "
+                f"w_imag={tuple(w_imag.shape)} dtype={w_real.dtype} "
+                f"device={w_real.device}"
+            )
+        if timings:
+            parts.append(
+                "[TF-node] timings "
+                + " ".join(f"{k}={v*1000:.2f}ms" for k, v in timings.items())
+            )
+        device = events_padded.device
+        if device.type == "cuda":
+            allocated = torch.cuda.memory_allocated(device) / (1024 ** 2)
+            peak = torch.cuda.max_memory_allocated(device) / (1024 ** 2)
+            parts.append(
+                f"[TF-node] CUDA memory allocated={allocated:.1f}MiB "
+                f"peak={peak:.1f}MiB"
+            )
+        for line in parts:
+            emit_initial_detail(line)
+
     def forward(self, raw_x, *event_inputs):
         """Trainable forward pass. `event_inputs` depends on self.event_mode:
 
@@ -4198,6 +4446,13 @@ class SparseEvidenceGNNCore(nn.Module):
         batch_idx shape the "sparse" branch produces, so the rest of this
         method is identical between the two modes.
 
+        "dense" + time_frequency_node_encoder=True: (dense_edge_raw,
+        w_real, w_imag) -- same WCT stack PLUS the window's CWT real/imag
+        ([B, C, T, F] each). The trainable CWTTimeFrequencyNodeEncoder
+        runs here (autograd), not during precompute. Messages become
+        f(h_src, h_dst, e_ij). The default (flag False) still unpacks
+        (dense_edge_raw,) only -- bit-identical to before this existed.
+
         "temporal_graph": (dense_edge_raw,) -- the SAME precomputed stack
         "dense" consumes (reused unchanged, see event_mode's own docstring),
         but processed step-by-step through time by
@@ -4211,6 +4466,11 @@ class SparseEvidenceGNNCore(nn.Module):
         inside the sequence the GRU walked through).
         """
         batch_size = raw_x.shape[0]
+        w_real_in = None
+        w_imag_in = None
+        node_embed = None
+        profile = bool(self.time_frequency_node_encoder) and not self._tf_forward_logged
+        timings: dict[str, float] = {}
 
         if self.event_mode == "sparse":
             events_padded, src_padded, dst_padded, freq_idx_padded, valid_mask = event_inputs
@@ -4223,10 +4483,21 @@ class SparseEvidenceGNNCore(nn.Module):
                 -1, max_count
             )
         elif self.event_mode == "dense":
-            (dense_edge_raw,) = event_inputs
+            if self.time_frequency_node_encoder:
+                dense_edge_raw = event_inputs[0]
+                w_real_in = event_inputs[1]
+                w_imag_in = event_inputs[2]
+            else:
+                (dense_edge_raw,) = event_inputs
+            if profile:
+                _sync_device(dense_edge_raw.device)
+                t_edge0 = time.perf_counter()
             events_padded, src_padded, dst_padded, freq_idx_padded, valid_mask, batch_idx = (
                 self._dense_edge_features(dense_edge_raw.to(raw_x.dtype))
             )
+            if profile:
+                _sync_device(events_padded.device)
+                timings["edge_encoding"] = time.perf_counter() - t_edge0
         else:  # "temporal_graph"
             (dense_edge_raw,) = event_inputs
 
@@ -4243,12 +4514,38 @@ class SparseEvidenceGNNCore(nn.Module):
         else:
             if self.feature_ablation == "zero_event_features":
                 events_padded = torch.zeros_like(events_padded)
-            full_features = events_padded
+            if (
+                self.time_frequency_node_encoder
+                and self.event_mode == "dense"
+                and w_real_in is not None
+                and w_imag_in is not None
+            ):
+                if profile:
+                    _sync_device(w_real_in.device)
+                    t_node0 = time.perf_counter()
+                node_embed = self._cwt_node_embeddings(w_real_in, w_imag_in)
+                if profile:
+                    _sync_device(node_embed.device)
+                    timings["cwt_node_encoding"] = time.perf_counter() - t_node0
+                edge_for_msg = events_padded
+                if self.time_frequency_node_ablation == "node_only":
+                    edge_for_msg = torch.zeros_like(events_padded)
+                if profile:
+                    t_msg0 = time.perf_counter()
+                full_features = self._compose_message_features(
+                    edge_for_msg, src_padded, dst_padded, node_embed
+                )
+            else:
+                full_features = events_padded
+                t_msg0 = time.perf_counter() if profile else None
             msg = self.sparse_message_mlp(full_features)
 
             evidence = self._aggregate_events(
                 msg, full_features, dst_padded, valid_mask, batch_idx, raw_x.dtype
             )
+            if profile:
+                _sync_device(evidence.device)
+                timings["graph_message_passing"] = time.perf_counter() - t_msg0
             valid_edge_count = float(valid_mask.sum().item())
 
         if self.n_hops > 1:
@@ -4284,7 +4581,23 @@ class SparseEvidenceGNNCore(nn.Module):
             )
         else:
             readout = evidence.reshape(batch_size, self.n_channels * self.hidden_dim)
+        if profile:
+            t_clf0 = time.perf_counter()
         logits = self.sparse_classifier(readout)
+        if profile:
+            _sync_device(logits.device)
+            timings["classifier"] = time.perf_counter() - t_clf0
+            if "edge_encoding" in timings and self.dense_edge_temporal_mode == "rnn":
+                timings["gru"] = timings["edge_encoding"]
+        if self.time_frequency_node_encoder and self.event_mode != "temporal_graph":
+            self._maybe_log_tf_forward(
+                w_real=w_real_in,
+                w_imag=w_imag_in,
+                node_embed=node_embed,
+                events_padded=events_padded,
+                full_features=full_features,
+                timings=timings if profile else None,
+            )
         # matches the old event_density = n_runs / max(B*E*F, 1) exactly:
         # valid_mask.sum() over a batch IS that batch's n_runs. In "dense"
         # and "temporal_graph" modes every edge always "fires" (see
@@ -4511,6 +4824,13 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         # Default (8) matches dense_conv_out_channels's own default purely
         # for comparable sizing, not because it's been tuned.
         temporal_graph_edge_dim: int = 8,
+        # Forwarded to SparseEvidenceGNNCore -- False (default) leaves the
+        # existing dense-edge GRU path unchanged. True adds a shared CWT
+        # time-frequency node encoder whose embeddings join WCT edge
+        # features in the message MLP. See Core's matching docstring.
+        time_frequency_node_encoder: bool = False,
+        node_embedding_dim: int | None = None,
+        time_frequency_node_ablation: Literal["none", "zero_node_embed", "node_only"] = "none",
         channel_subset: list[int] | list[str] | None = None,
         # Epilepsy fork only -- see _BaseCWTGNNClassifier._init_cwt_gnn_classifier's
         # docstring (xwt_phase_gnn_classifier.py) for why this defaults to
@@ -4905,6 +5225,26 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         self.dense_edge_temporal_mode = dense_edge_temporal_mode
         self.shuffle_time_order = bool(shuffle_time_order)
         self.temporal_graph_edge_dim = temporal_graph_edge_dim
+        if time_frequency_node_ablation not in ("none", "zero_node_embed", "node_only"):
+            raise ValueError(
+                "time_frequency_node_ablation must be 'none', 'zero_node_embed', "
+                f"or 'node_only', got {time_frequency_node_ablation!r}."
+            )
+        if time_frequency_node_encoder and event_mode != "dense":
+            raise ValueError(
+                "time_frequency_node_encoder=True has no meaning when "
+                f"event_mode={event_mode!r} -- see SparseEvidenceGNNCore's "
+                "time_frequency_node_encoder docstring."
+            )
+        if time_frequency_node_ablation != "none" and not time_frequency_node_encoder:
+            raise ValueError(
+                "time_frequency_node_ablation != 'none' requires "
+                "time_frequency_node_encoder=True -- the WCT-only baseline is "
+                "that flag False, not a zeroed approximation of the new model."
+            )
+        self.time_frequency_node_encoder = bool(time_frequency_node_encoder)
+        self.node_embedding_dim = node_embedding_dim
+        self.time_frequency_node_ablation = time_frequency_node_ablation
         if coherence_threshold_mode not in ("fixed", "surrogate", "surrogate_cluster"):
             raise ValueError(
                 "coherence_threshold_mode must be 'fixed', 'surrogate', or "
@@ -5109,10 +5449,16 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         # below reassigns its own local copy without mutating this one.
         raw_x_native = self._apply_channel_subset(np.asarray(X, dtype=np.float32))
         # Streaming batches call this with fit=False. On a complete dense-edge
-        # cache hit, CWT is unused (w_real/w_imag are only an input to
-        # compute_dense_edge_input) -- skip it. keep_on_device already bypasses
-        # the CWT disk cache, so without this skip every epoch re-ran CWT for
-        # 32*C 30s windows even at 100% dense-edge hits.
+        # cache hit, CWT is unused for the WCT path (w_real/w_imag are only
+        # an input to compute_dense_edge_input) -- skip it UNLESS the CWT
+        # node encoder is on, in which case the trainable encoder still
+        # needs those tensors. keep_on_device already bypasses the CWT disk
+        # cache, so without this skip every epoch re-ran CWT for 32*C 30s
+        # windows even at 100% dense-edge hits (the original WCT-only
+        # default). The encoder path uses the same GPU-resident CWT call
+        # as super()._prepare_features; it does not round-trip through
+        # CPU/NumPy just to feed the node encoder.
+        cached_dense = None
         if (
             (not fit)
             and self.event_mode in ("dense", "temporal_graph")
@@ -5121,7 +5467,7 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
             cached_dense = self._try_load_complete_dense_edge_batch(
                 raw_x_native, dense_edge_keys,
             )
-            if cached_dense is not None:
+            if cached_dense is not None and not self.time_frequency_node_encoder:
                 raw_x = self._raw_x_tensor_from_windows(raw_x_native)
                 if self.raw_x_resample_n_time is not None and int(
                     self.raw_x_resample_n_time
@@ -5169,11 +5515,20 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
             # the GNN always sees full C / full E; live-edge WCT + scatter
             # into a zero full-E tensor happens inside
             # _precompute_dense_edge_inputs.
-            dense_edge_raw = self._precompute_dense_edge_inputs(
-                raw_x, w_real, w_imag, freqs,
-                raw_x_native=raw_x_native,
-                cache_keys=dense_edge_keys,
-            )
+            if cached_dense is not None:
+                dense_edge_raw = cached_dense
+            else:
+                dense_edge_raw = self._precompute_dense_edge_inputs(
+                    raw_x, w_real, w_imag, freqs,
+                    raw_x_native=raw_x_native,
+                    cache_keys=dense_edge_keys,
+                )
+            if self.time_frequency_node_encoder:
+                # CWT tensors stay on whatever device super()._prepare_features
+                # produced (GPU-resident for the streaming classifier). They
+                # are model INPUTS, not precomputed embeddings -- the
+                # trainable node encoder runs in forward().
+                return raw_x, dense_edge_raw, w_real, w_imag
             return raw_x, dense_edge_raw
         events_padded, src_padded, dst_padded, freq_idx_padded, valid_mask = self._precompute_sparse_events(
             raw_x, w_real, w_imag, freqs, raw_x_native=raw_x_native
@@ -6303,6 +6658,9 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
             dense_edge_temporal_mode=self.dense_edge_temporal_mode,
             shuffle_time_order=self.shuffle_time_order,
             temporal_graph_edge_dim=self.temporal_graph_edge_dim,
+            time_frequency_node_encoder=self.time_frequency_node_encoder,
+            node_embedding_dim=self.node_embedding_dim,
+            time_frequency_node_ablation=self.time_frequency_node_ablation,
             **kwargs,
         )
 
@@ -6489,11 +6847,16 @@ class _LazyFeatureBatchDataset(Dataset):
         # the whole training set in fit() below -- must NOT refit per
         # batch, which would normalize each batch by its own, different,
         # wrong mean/std instead of a single consistent training-set one.
-        raw_x, dense_edge_raw = self.classifier._prepare_features(
+        # With time_frequency_node_encoder=True this is
+        # (raw_x, dense_edge_raw, w_real, w_imag); otherwise
+        # (raw_x, dense_edge_raw). _train_loop unpacks *features, y.
+        features = self.classifier._prepare_features(
             X_batch, fit=False, window_keys=batch_keys, dense_edge_keys=dense_keys
         )
         y_batch = torch.from_numpy(self.y_idx[idx]).long()
-        return raw_x, dense_edge_raw, y_batch
+        if isinstance(features, tuple):
+            return (*features, y_batch)
+        return features, y_batch
 
     def __len__(self) -> int:
         return int(self.X_raw.shape[0])
@@ -6667,9 +7030,9 @@ class StreamingSparseEvidenceGNNClassifier(SparseEvidenceGNNClassifier):
         with torch.no_grad():
             for start in range(0, n, batch_size):
                 indices = list(range(start, min(start + batch_size, n)))
-                raw_x, dense_edge_raw, _ = dataset[indices]
+                *batch_features, _ = dataset[indices]
                 batch_inputs = tuple(
-                    t.to(self.device_) for t in (raw_x, dense_edge_raw)
+                    t.to(self.device_) for t in batch_features
                 )
                 logits, _ = self._model_forward(batch_inputs)
                 logits_list.append(logits.cpu().numpy())
