@@ -35,13 +35,13 @@ WORKDIR /workspace
 # invalidated by a dependency bump, and before any code sync so a
 # code-only pod launch never needs to touch the network for data.
 #
-# Downloaded from the same public, no-auth S3 mirror
-# datasets/epilepsy/chb_mit.py itself uses (BASE_URL) -- PhysioNet's own
-# HTTPS server throttles to ~180KB/s/connection; this mirror doesn't (see
-# that module's own comment). File list is read from chb01's own
-# -summary.txt (same "File Name: <name>" regex chb_mit.py's parse_summary
-# uses) rather than hardcoded, so it can't drift from what the pipeline
-# actually expects to find.
+# Downloaded as one GitHub Release tarball (same archive
+# datasets/epilepsy/chb_mit.py prefetches for subject 1). PhysioNet's
+# HTTPS server throttles to ~180KB/s/connection and the official S3
+# mirror is still slow for a full 42-file chb01 fetch; the release is
+# the same bytes, ODC-By 1.0, extracted into the S3-shaped MNE cache
+# layout so a later per-file data_dl lookup hits disk. Other subjects
+# still download on demand from S3.
 #
 # Lands at /root/mne_data/MNE-chbmit-data/chbmit/1.0.0/chb01/, MNE's
 # get_dataset_path("CHBMIT", ...) convention for this dataset (verified
@@ -58,17 +58,16 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 COPY THIRD_PARTY_NOTICES.md /workspace/THIRD_PARTY_NOTICES.md
 RUN set -euo pipefail; \
-    BASE_URL="https://physionet-open.s3.amazonaws.com/chbmit/1.0.0/chb01"; \
-    DEST="/root/mne_data/MNE-chbmit-data/chbmit/1.0.0/chb01"; \
-    mkdir -p "$DEST"; \
-    curl -fSL --retry 5 --retry-delay 2 -o "$DEST/chb01-summary.txt" \
-        "$BASE_URL/chb01-summary.txt"; \
-    grep -oP 'File Name:\s*\K\S+' "$DEST/chb01-summary.txt" | while read -r fname; do \
-        echo "Downloading $fname"; \
-        curl -fSL --retry 5 --retry-delay 2 -o "$DEST/$fname" "$BASE_URL/$fname"; \
-    done; \
-    n_edf=$(find "$DEST" -name '*.edf' | wc -l); \
-    echo "Downloaded $n_edf .edf files for chb01"; \
+    ARCHIVE_URL="https://github.com/noshore5/EEG_Benchmarks/releases/download/chbmit-chb01-1.0.0/chb01.tar.gz"; \
+    ARCHIVE_SHA="bf91e579c8b61a6813442d9351fa6e111dd6078d43ab2b04fd66d4660324b6f9"; \
+    DEST_ROOT="/root/mne_data/MNE-chbmit-data/chbmit/1.0.0"; \
+    mkdir -p "$DEST_ROOT"; \
+    curl -fSL --retry 5 --retry-delay 2 -o /tmp/chb01.tar.gz "$ARCHIVE_URL"; \
+    echo "$ARCHIVE_SHA  /tmp/chb01.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/chb01.tar.gz -C "$DEST_ROOT"; \
+    rm -f /tmp/chb01.tar.gz; \
+    n_edf=$(find "$DEST_ROOT/chb01" -name '*.edf' | wc -l); \
+    echo "Extracted $n_edf .edf files for chb01"; \
     [ "$n_edf" -ge 40 ]
 
 # 2026-08-20: no apt build-toolchain step here anymore. It used to install
