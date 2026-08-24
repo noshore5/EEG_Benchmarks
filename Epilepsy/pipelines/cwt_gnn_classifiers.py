@@ -2300,17 +2300,17 @@ class SparseEvidenceGNNCore(nn.Module):
         # the in-architecture disable / node-only switches; the WCT-only
         # baseline is this flag False, not a zeroed approximation of the
         # new model.
-        time_frequency_node_encoder: bool = False,
+        cwt_encoder: bool = False,
         # Width of the CWT node embedding. None (default) uses hidden_dim
         # so the node vector is the same width as the existing per-edge
-        # hidden state. Only read when time_frequency_node_encoder=True.
+        # hidden state. Only read when cwt_encoder=True.
         node_embedding_dim: int | None = None,
         # In-architecture ablation of the CWT node pathway. "none" (default)
         # uses both node embeddings and WCT edge features. "zero_node_embed"
         # keeps the same message MLP (src/dst slots exist) but zeros the
         # node embeddings -- the exact same code path with nodes removed.
         # "node_only" zeros the WCT edge features after dense_edge_conv so
-        # messages see (h_i, h_j, 0). Requires time_frequency_node_encoder
+        # messages see (h_i, h_j, 0). Requires cwt_encoder
         # =True (rejected otherwise) -- the WCT-only baseline is that flag
         # False, not zero_node_embed.
         time_frequency_node_ablation: Literal["none", "zero_node_embed", "node_only"] = "none",
@@ -2478,17 +2478,17 @@ class SparseEvidenceGNNCore(nn.Module):
                 "time_frequency_node_ablation must be 'none', 'zero_node_embed', "
                 f"or 'node_only', got {time_frequency_node_ablation!r}."
             )
-        if time_frequency_node_encoder and event_mode != "dense":
+        if cwt_encoder and event_mode != "dense":
             raise ValueError(
-                "time_frequency_node_encoder=True has no meaning when "
+                "cwt_encoder=True has no meaning when "
                 f"event_mode={event_mode!r} -- the CWT node encoder is wired "
                 "into the dense-edge message path only (see "
-                "time_frequency_node_encoder's docstring above)."
+                "cwt_encoder's docstring above)."
             )
-        if time_frequency_node_ablation != "none" and not time_frequency_node_encoder:
+        if time_frequency_node_ablation != "none" and not cwt_encoder:
             raise ValueError(
                 "time_frequency_node_ablation != 'none' requires "
-                "time_frequency_node_encoder=True -- the WCT-only baseline is "
+                "cwt_encoder=True -- the WCT-only baseline is "
                 "that flag False, not a zeroed approximation of the new model."
             )
 
@@ -2600,7 +2600,7 @@ class SparseEvidenceGNNCore(nn.Module):
         self.dense_edge_time_downsample = int(dense_edge_time_downsample)
         self.time_averaged_graph = bool(time_averaged_graph)
         self.temporal_graph_edge_dim = temporal_graph_edge_dim
-        self.time_frequency_node_encoder = bool(time_frequency_node_encoder)
+        self.cwt_encoder = bool(cwt_encoder)
         self.node_embedding_dim = int(
             hidden_dim if node_embedding_dim is None else node_embedding_dim
         )
@@ -2620,7 +2620,7 @@ class SparseEvidenceGNNCore(nn.Module):
         else:  # "temporal_graph"
             event_feature_dim = temporal_graph_edge_dim
         message_in = event_feature_dim
-        if self.time_frequency_node_encoder:
+        if self.cwt_encoder:
             # m_ij = f(h_i, h_j, e_ij): src embedding, dst embedding, edge
             # features. Only widens sparse_message_mlp when the new encoder
             # is on -- baseline message_in (and therefore its init) is
@@ -2841,10 +2841,10 @@ class SparseEvidenceGNNCore(nn.Module):
 
         # CWT node encoder LAST -- same init-order precedent as
         # dense_edge_conv / temporal_edge_proj above. Unused (stays None)
-        # when time_frequency_node_encoder=False, so every pre-existing
+        # when cwt_encoder=False, so every pre-existing
         # submodule's random init is bit-identical to before this feature
         # existed.
-        if self.time_frequency_node_encoder:
+        if self.cwt_encoder:
             # Match the WCT edge path's temporal grain when it downsamples;
             # otherwise still pool by 16 so a 30s native CWT (T=7680) cannot
             # turn the node CNN into the epoch bottleneck.
@@ -2900,7 +2900,7 @@ class SparseEvidenceGNNCore(nn.Module):
             f"shuffle_time_order={self.shuffle_time_order} "
             f"temporal_graph_edge_dim={self.temporal_graph_edge_dim} "
             f"dense_edge_time_downsample={self.dense_edge_time_downsample} "
-            f"time_frequency_node_encoder={self.time_frequency_node_encoder} "
+            f"cwt_encoder={self.cwt_encoder} "
             f"node_embedding_dim={self.node_embedding_dim} "
             f"time_frequency_node_ablation={self.time_frequency_node_ablation}"
             + (
@@ -4378,7 +4378,7 @@ class SparseEvidenceGNNCore(nn.Module):
         if self.cwt_node_encoder is None:
             raise RuntimeError(
                 "_cwt_node_embeddings called without cwt_node_encoder -- "
-                "time_frequency_node_encoder must be True."
+                "cwt_encoder must be True."
             )
         if self.time_frequency_node_ablation == "zero_node_embed":
             batch_size, n_channels = w_real.shape[0], w_real.shape[1]
@@ -4406,6 +4406,25 @@ class SparseEvidenceGNNCore(nn.Module):
         h_dst = node_embed[torch.arange(node_embed.shape[0], device=node_embed.device).unsqueeze(1), dst_padded]
         return torch.cat([h_src, h_dst, events_padded], dim=-1)
 
+    def _dense_topology_placeholders(self, raw_x: torch.Tensor):
+        """Canonical dense-graph index tensors with zero edge features.
+
+        Used by time_frequency_node_ablation='node_only' so the CWT encoder
+        can train on (h_i, h_j, 0) without running dense_edge_conv/GRU.
+        """
+        batch_size = raw_x.shape[0]
+        num_edges = int(self.src_idx.numel())
+        device = raw_x.device
+        events_padded = raw_x.new_zeros(batch_size, num_edges, self.event_feature_dim)
+        src_padded = self.src_idx.to(device=device).unsqueeze(0).expand(batch_size, -1)
+        dst_padded = self.dst_idx.to(device=device).unsqueeze(0).expand(batch_size, -1)
+        freq_idx_padded = torch.zeros_like(src_padded)
+        valid_mask = torch.ones(batch_size, num_edges, dtype=torch.bool, device=device)
+        batch_idx = torch.arange(batch_size, device=device).unsqueeze(1).expand(
+            -1, num_edges
+        )
+        return events_padded, src_padded, dst_padded, freq_idx_padded, valid_mask, batch_idx
+
     def _maybe_log_tf_forward(
         self,
         *,
@@ -4417,7 +4436,7 @@ class SparseEvidenceGNNCore(nn.Module):
         timings: dict[str, float] | None,
     ) -> None:
         """One-shot shape (+ optional timing) dump; subsequent forwards stay quiet."""
-        if self._tf_forward_logged or not self.time_frequency_node_encoder:
+        if self._tf_forward_logged or not self.cwt_encoder:
             return
         self._tf_forward_logged = True
         n_params = sum(int(p.numel()) for p in self.parameters())
@@ -4476,7 +4495,7 @@ class SparseEvidenceGNNCore(nn.Module):
         batch_idx shape the "sparse" branch produces, so the rest of this
         method is identical between the two modes.
 
-        "dense" + time_frequency_node_encoder=True: (dense_edge_raw,
+        "dense" + cwt_encoder=True: (dense_edge_raw,
         w_real, w_imag) -- same WCT stack PLUS the window's CWT real/imag
         ([B, C, T, F] each). The trainable CWTTimeFrequencyNodeEncoder
         runs here (autograd), not during precompute. Messages become
@@ -4499,7 +4518,7 @@ class SparseEvidenceGNNCore(nn.Module):
         w_real_in = None
         w_imag_in = None
         node_embed = None
-        profile = bool(self.time_frequency_node_encoder) and not self._tf_forward_logged
+        profile = bool(self.cwt_encoder) and not self._tf_forward_logged
         timings: dict[str, float] = {}
 
         if self.event_mode == "sparse":
@@ -4513,21 +4532,28 @@ class SparseEvidenceGNNCore(nn.Module):
                 -1, max_count
             )
         elif self.event_mode == "dense":
-            if self.time_frequency_node_encoder:
+            if self.cwt_encoder:
                 dense_edge_raw = event_inputs[0]
                 w_real_in = event_inputs[1]
                 w_imag_in = event_inputs[2]
             else:
                 (dense_edge_raw,) = event_inputs
-            if profile:
-                _sync_device(dense_edge_raw.device)
-                t_edge0 = time.perf_counter()
-            events_padded, src_padded, dst_padded, freq_idx_padded, valid_mask, batch_idx = (
-                self._dense_edge_features(dense_edge_raw.to(raw_x.dtype))
-            )
-            if profile:
-                _sync_device(events_padded.device)
-                timings["edge_encoding"] = time.perf_counter() - t_edge0
+            if self.time_frequency_node_ablation == "node_only":
+                # Topology only: messages see (h_i, h_j, 0). Skip the WCT
+                # GRU/conv so this ablation does not still train on edges.
+                events_padded, src_padded, dst_padded, freq_idx_padded, valid_mask, batch_idx = (
+                    self._dense_topology_placeholders(raw_x)
+                )
+            else:
+                if profile:
+                    _sync_device(dense_edge_raw.device)
+                    t_edge0 = time.perf_counter()
+                events_padded, src_padded, dst_padded, freq_idx_padded, valid_mask, batch_idx = (
+                    self._dense_edge_features(dense_edge_raw.to(raw_x.dtype))
+                )
+                if profile:
+                    _sync_device(events_padded.device)
+                    timings["edge_encoding"] = time.perf_counter() - t_edge0
         else:  # "temporal_graph"
             (dense_edge_raw,) = event_inputs
 
@@ -4545,7 +4571,7 @@ class SparseEvidenceGNNCore(nn.Module):
             if self.feature_ablation == "zero_event_features":
                 events_padded = torch.zeros_like(events_padded)
             if (
-                self.time_frequency_node_encoder
+                self.cwt_encoder
                 and self.event_mode == "dense"
                 and w_real_in is not None
                 and w_imag_in is not None
@@ -4619,7 +4645,7 @@ class SparseEvidenceGNNCore(nn.Module):
             timings["classifier"] = time.perf_counter() - t_clf0
             if "edge_encoding" in timings and self.dense_edge_temporal_mode == "rnn":
                 timings["gru"] = timings["edge_encoding"]
-        if self.time_frequency_node_encoder and self.event_mode != "temporal_graph":
+        if self.cwt_encoder and self.event_mode != "temporal_graph":
             self._maybe_log_tf_forward(
                 w_real=w_real_in,
                 w_imag=w_imag_in,
@@ -4858,7 +4884,7 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         # existing dense-edge GRU path unchanged. True adds a shared CWT
         # time-frequency node encoder whose embeddings join WCT edge
         # features in the message MLP. See Core's matching docstring.
-        time_frequency_node_encoder: bool = False,
+        cwt_encoder: bool = False,
         node_embedding_dim: int | None = None,
         time_frequency_node_ablation: Literal["none", "zero_node_embed", "node_only"] = "none",
         channel_subset: list[int] | list[str] | None = None,
@@ -5260,19 +5286,19 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
                 "time_frequency_node_ablation must be 'none', 'zero_node_embed', "
                 f"or 'node_only', got {time_frequency_node_ablation!r}."
             )
-        if time_frequency_node_encoder and event_mode != "dense":
+        if cwt_encoder and event_mode != "dense":
             raise ValueError(
-                "time_frequency_node_encoder=True has no meaning when "
+                "cwt_encoder=True has no meaning when "
                 f"event_mode={event_mode!r} -- see SparseEvidenceGNNCore's "
-                "time_frequency_node_encoder docstring."
+                "cwt_encoder docstring."
             )
-        if time_frequency_node_ablation != "none" and not time_frequency_node_encoder:
+        if time_frequency_node_ablation != "none" and not cwt_encoder:
             raise ValueError(
                 "time_frequency_node_ablation != 'none' requires "
-                "time_frequency_node_encoder=True -- the WCT-only baseline is "
+                "cwt_encoder=True -- the WCT-only baseline is "
                 "that flag False, not a zeroed approximation of the new model."
             )
-        self.time_frequency_node_encoder = bool(time_frequency_node_encoder)
+        self.cwt_encoder = bool(cwt_encoder)
         self.node_embedding_dim = node_embedding_dim
         self.time_frequency_node_ablation = time_frequency_node_ablation
         if coherence_threshold_mode not in ("fixed", "surrogate", "surrogate_cluster"):
@@ -5488,16 +5514,20 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         # default). The encoder path uses the same GPU-resident CWT call
         # as super()._prepare_features; it does not round-trip through
         # CPU/NumPy just to feed the node encoder.
+        node_only = (
+            bool(self.cwt_encoder) and self.time_frequency_node_ablation == "node_only"
+        )
         cached_dense = None
         if (
             (not fit)
+            and (not node_only)
             and self.event_mode in ("dense", "temporal_graph")
             and not self._uses_noise_augmentation()
         ):
             cached_dense = self._try_load_complete_dense_edge_batch(
                 raw_x_native, dense_edge_keys,
             )
-            if cached_dense is not None and not self.time_frequency_node_encoder:
+            if cached_dense is not None and not self.cwt_encoder:
                 raw_x = self._raw_x_tensor_from_windows(raw_x_native)
                 if self.raw_x_resample_n_time is not None and int(
                     self.raw_x_resample_n_time
@@ -5545,7 +5575,12 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
             # the GNN always sees full C / full E; live-edge WCT + scatter
             # into a zero full-E tensor happens inside
             # _precompute_dense_edge_inputs.
-            if cached_dense is not None:
+            # node_only: WCT is unused (messages see (h_i, h_j, 0)), so skip
+            # the dense-edge helper entirely -- a zero placeholder keeps the
+            # (raw_x, dense_edge_raw, w_real, w_imag) tuple shape.
+            if node_only:
+                dense_edge_raw = self._zero_dense_edge_placeholder(raw_x, w_real)
+            elif cached_dense is not None:
                 dense_edge_raw = cached_dense
             else:
                 dense_edge_raw = self._precompute_dense_edge_inputs(
@@ -5553,7 +5588,7 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
                     raw_x_native=raw_x_native,
                     cache_keys=dense_edge_keys,
                 )
-            if self.time_frequency_node_encoder:
+            if self.cwt_encoder:
                 # CWT tensors stay on whatever device super()._prepare_features
                 # produced (GPU-resident for the streaming classifier). They
                 # are model INPUTS, not precomputed embeddings -- the
@@ -5564,6 +5599,25 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
             raw_x, w_real, w_imag, freqs, raw_x_native=raw_x_native
         )
         return raw_x, events_padded, src_padded, dst_padded, freq_idx_padded, valid_mask
+
+    def _zero_dense_edge_placeholder(self, raw_x, w_real):
+        """Full-E zeros in the dense-edge layout, used when WCT is unused.
+
+        Shape matches `_build_dense_edge_input`: [B, 4, E, T_out, F].
+        """
+        n_samples = int(raw_x.shape[0])
+        n_channels = int(raw_x.shape[1])
+        n_edges = n_channels * (n_channels - 1) // 2
+        t_in = int(w_real.shape[2])
+        if self.time_averaged_graph:
+            t_out = 1
+        elif int(self.dense_edge_time_downsample) > 1:
+            t_out = t_in // int(self.dense_edge_time_downsample)
+        else:
+            t_out = t_in
+        return w_real.new_zeros(
+            n_samples, 4, n_edges, t_out, int(self.nfreqs)
+        )
 
     def _resolved_surrogate_cache_dir(self):
         return (
@@ -6688,7 +6742,7 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
             dense_edge_temporal_mode=self.dense_edge_temporal_mode,
             shuffle_time_order=self.shuffle_time_order,
             temporal_graph_edge_dim=self.temporal_graph_edge_dim,
-            time_frequency_node_encoder=self.time_frequency_node_encoder,
+            cwt_encoder=self.cwt_encoder,
             node_embedding_dim=self.node_embedding_dim,
             time_frequency_node_ablation=self.time_frequency_node_ablation,
             **kwargs,
@@ -6877,7 +6931,7 @@ class _LazyFeatureBatchDataset(Dataset):
         # the whole training set in fit() below -- must NOT refit per
         # batch, which would normalize each batch by its own, different,
         # wrong mean/std instead of a single consistent training-set one.
-        # With time_frequency_node_encoder=True this is
+        # With cwt_encoder=True this is
         # (raw_x, dense_edge_raw, w_real, w_imag); otherwise
         # (raw_x, dense_edge_raw). _train_loop unpacks *features, y.
         features = self.classifier._prepare_features(

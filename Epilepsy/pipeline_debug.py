@@ -660,6 +660,14 @@ def run_debug(args):
         clf_params["precompute_chunk_size"] = args.precompute_chunk_size
         clf_params["compile_dense_edge_helper"] = args.compile_dense_edge_helper
         clf_params["dense_edge_amp_bf16"] = args.dense_edge_amp_bf16
+        if args.cwt_encoder is not None:
+            clf_params["cwt_encoder"] = bool(
+                args.cwt_encoder
+            )
+        if args.cwt_encoder_ablation is not None:
+            clf_params["time_frequency_node_ablation"] = args.cwt_encoder_ablation
+            if args.cwt_encoder_ablation != "none":
+                clf_params["cwt_encoder"] = True
         if not args.disable_disk_cache:
             clf_params["cwt_cache"] = rp.DiskCWTCache(rp.default_cwt_cache_root())
             clf_params["dense_edge_cache_dir"] = rp.default_dense_edge_cache_root()
@@ -1080,6 +1088,27 @@ def parse_args():
             "non-trainable dense-edge helper's compute_dense_edge_input call -- see that "
             "constructor param's 2026-08-22 docstring in cwt_gnn_classifiers.py. CUDA only; "
             "no-op elsewhere."
+        ),
+    )
+
+    parser.add_argument(
+        "--cwt-encoder",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "dense_edge / dense_edge_gru only: learned CWT time-frequency "
+            "node encoder on top of WCT edges. Off by default. "
+            "--no-cwt-encoder forces it off."
+        ),
+    )
+
+    parser.add_argument(
+        "--cwt-encoder-ablation",
+        choices=["none", "zero_node_embed", "node_only"],
+        default=None,
+        help=(
+            "'node_only': CWT encoder with WCT features and WCT compute "
+            "off. Other values besides 'none' turn --cwt-encoder on."
         ),
     )
 

@@ -5,9 +5,10 @@ the Truong et al. 2018 STFT+CNN replica).
     python Epilepsy/run_pipelines.py --smoke
     python Epilepsy/run_pipelines.py --label-mode prediction --smoke
     python Epilepsy/run_pipelines.py --pipeline dense_edge --smoke
+    python Epilepsy/run_pipelines.py --pipeline dense_edge_gru --cwt-encoder --smoke
     python Epilepsy/run_pipelines.py --pipeline truong_stft_cnn --smoke
 
---pipeline {dense_edge_gru, dense_edge, dense_edge_gru_tf_node, truong_stft_cnn}: which CLASSIFIER
+--pipeline {dense_edge_gru, dense_edge, truong_stft_cnn}: which CLASSIFIER
 runs, on top of --label-mode's which TASK it's trained for. "dense_edge_gru"
 (default) is this file's own SparseEvidenceGNNClassifier with
 dense_edge_temporal_mode="rnn" (per-edge GRU) and respects --label-mode
@@ -15,7 +16,12 @@ normally. "dense_edge" is the same classifier with
 dense_edge_temporal_mode="conv" (Conv2d + pool over time) -- same
 event_mode="dense" graph, same leave-one-seizure-out loops, same
 --label-mode. Results go under results/dense_edge/ so they are never pooled
-with the GRU CSVs under results/ and results/prediction/. "truong_stft_cnn"
+with the GRU CSVs under results/ and results/prediction/.
+--cwt-encoder (default off) is a FLAG on either dense-family
+pipeline, not a third pipeline: it adds a learned CWT time-frequency node
+encoder on top of the existing WCT edges (cwt_encoder=True).
+Those CSVs nest under cwt_encoder/ inside the pipeline's usual result dir so
+they cannot be globbed with WCT-only numbers. "truong_stft_cnn"
 is TruongSTFTCNNClassifier (see
 Epilepsy/pipelines/truong_stft_cnn_classifier.py's module docstring for
 exactly what it replicates from the paper) -- a prediction-only classifier
@@ -207,6 +213,14 @@ _SHARED_ARCH_PARAMS: dict[str, object] = dict(
     # see cwt_gnn_classifiers.py's cwt_backend param for the revert switch
     # if this ever needs to go back ("fcwt", no code change required).
     cwt_backend="torch",
+    # Default off. --cwt-encoder flips this True for
+    # either dense_edge or dense_edge_gru; WCT edges stay in place.
+    cwt_encoder=False,
+    # "none": CWT nodes + WCT edges. "node_only": CWT encoder with WCT
+    # features (and WCT compute) off. "zero_node_embed": keep WCT, zero
+    # the node slots. Requires cwt_encoder=True; --cwt-encoder-ablation
+    # node_only turns the encoder on automatically.
+    time_frequency_node_ablation="none",
 )
 
 # label_mode="detection" training dynamics (device × batch-size × epochs
@@ -253,7 +267,6 @@ PREDICTION_GRU_PARAMS: dict[str, object] = dict(
     batch_size=32,
     learning_rate=2e-3,
     dense_edge_temporal_mode="rnn",
-    time_frequency_node_encoder=False,
     # StreamingSparseEvidenceGNNClassifier now supports validation_split > 0
     # (lazy val_loader via _LazyFeatureBatchDataset; the 2026-08-19
     # NotImplementedError is gone). Default matches _SHARED_ARCH_PARAMS:
@@ -263,41 +276,21 @@ PREDICTION_GRU_PARAMS: dict[str, object] = dict(
     validation_split=0.2,
 )
 
-# CWT time-frequency node encoder + WCT dense-edge GRU. Own copies of the
-# GRU dicts so enabling the encoder cannot silently move a baseline GRU
-# run, and so results land under a separate directory (see
-# _dense_family_result_dir). time_frequency_node_encoder=True is the only
-# intentional difference.
-DENSE_EDGE_GRU_TF_NODE_PARAMS: dict[str, object] = dict(
-    DENSE_EDGE_GRU_PARAMS,
-    time_frequency_node_encoder=True,
-)
-
-PREDICTION_GRU_TF_NODE_PARAMS: dict[str, object] = dict(
-    PREDICTION_GRU_PARAMS,
-    time_frequency_node_encoder=True,
-)
-
 
 def _dense_family_params(pipeline: str, label_mode: str) -> dict:
-    """Param dict for --pipeline dense_edge / dense_edge_gru /
-    dense_edge_gru_tf_node × --label-mode.
+    """Param dict for --pipeline dense_edge / dense_edge_gru × --label-mode.
 
     Returns the module-level dict itself (caller must `dict(...)` copy
     before overlaying CLI overrides). Raises on anything that is not one
     of the dense-family pipelines -- truong_stft_cnn has its own
-    TRUONG_STFT_CNN_PARAMS path in main().
+    TRUONG_STFT_CNN_PARAMS path in main(). The CWT node encoder is a
+    flag on these dicts (cwt_encoder, default False),
+    not a third pipeline.
     """
     if pipeline == "dense_edge":
         return PREDICTION_DENSE_EDGE_PARAMS if label_mode == "prediction" else DENSE_EDGE_PARAMS
     if pipeline == "dense_edge_gru":
         return PREDICTION_GRU_PARAMS if label_mode == "prediction" else DENSE_EDGE_GRU_PARAMS
-    if pipeline == "dense_edge_gru_tf_node":
-        return (
-            PREDICTION_GRU_TF_NODE_PARAMS
-            if label_mode == "prediction"
-            else DENSE_EDGE_GRU_TF_NODE_PARAMS
-        )
     raise ValueError(f"not a dense-family pipeline: {pipeline!r}")
 
 
@@ -306,27 +299,55 @@ def _dense_family_result_dir(
     pipeline: str,
     label_mode: str,
     shuffle_labels: bool,
+    cwt_encoder: bool = False,
+    time_frequency_node_ablation: str = "none",
 ) -> Path:
     """Where dense-family CSVs land. dense_edge_gru keeps the historical
     layout (results/leave_one_seizure_out_*.csv and results/prediction/)
     so existing GRU numbers stay GRU numbers. dense_edge goes under
     results/dense_edge/ so conv vs GRU cannot be pooled by a glob.
+    cwt_encoder=True nests under cwt_encoder/ inside that
+    pipeline's root so CWT-node runs cannot be globbed with WCT-only CSVs.
+    node_only / zero_node_embed nest one level deeper so those ablations
+    cannot be globbed with the joint CWT+WCT encoder runs.
     """
     if pipeline == "dense_edge":
         root = output_dir / "dense_edge"
-        if label_mode == "prediction":
-            return root / ("prediction_shuffled_control" if shuffle_labels else "prediction")
-        return root / "shuffled_control" if shuffle_labels else root
-    if pipeline == "dense_edge_gru":
-        if label_mode == "prediction":
-            return output_dir / ("prediction_shuffled_control" if shuffle_labels else "prediction")
-        return output_dir / "shuffled_control" if shuffle_labels else output_dir
-    if pipeline == "dense_edge_gru_tf_node":
-        root = output_dir / "dense_edge_gru_tf_node"
-        if label_mode == "prediction":
-            return root / ("prediction_shuffled_control" if shuffle_labels else "prediction")
-        return root / "shuffled_control" if shuffle_labels else root
-    raise ValueError(f"not a dense-family pipeline: {pipeline!r}")
+    elif pipeline == "dense_edge_gru":
+        root = output_dir
+    else:
+        raise ValueError(f"not a dense-family pipeline: {pipeline!r}")
+    if cwt_encoder:
+        root = root / "cwt_encoder"
+        if time_frequency_node_ablation in ("node_only", "zero_node_embed"):
+            root = root / time_frequency_node_ablation
+    if label_mode == "prediction":
+        return root / ("prediction_shuffled_control" if shuffle_labels else "prediction")
+    return root / "shuffled_control" if shuffle_labels else root
+
+
+def _apply_dense_family_cli_overrides(clf_params: dict, args: argparse.Namespace) -> None:
+    """Overlay run_pipelines CLI flags onto a dense-family param dict in place."""
+    clf_params["seed"] = args.seed
+    clf_params["device"] = args.device
+    clf_params["precompute_chunk_size"] = args.precompute_chunk_size
+    clf_params["compile_dense_edge_helper"] = args.compile_dense_edge_helper
+    clf_params["dense_edge_amp_bf16"] = args.dense_edge_amp_bf16
+    clf_params["train_amp_bf16"] = args.train_amp_bf16
+    clf_params["channel_subset_k"] = args.channel_subset_k
+    clf_params["channel_subset_metric"] = args.channel_subset_metric
+    if args.verbose is not None:
+        clf_params["verbose"] = args.verbose
+    if args.validation_split is not None:
+        clf_params["validation_split"] = args.validation_split
+    if args.early_stopping_patience is not None:
+        clf_params["early_stopping_patience"] = args.early_stopping_patience
+    if args.cwt_encoder is not None:
+        clf_params["cwt_encoder"] = bool(args.cwt_encoder)
+    if args.cwt_encoder_ablation is not None:
+        clf_params["time_frequency_node_ablation"] = args.cwt_encoder_ablation
+        if args.cwt_encoder_ablation != "none":
+            clf_params["cwt_encoder"] = True
 
 
 DEFAULT_DETECTION_EPOCHS = 20
@@ -1144,7 +1165,7 @@ def _build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--subjects", nargs="+", type=int, default=DEFAULT_SUBJECTS)
     parser.add_argument(
         "--pipeline",
-        choices=["dense_edge_gru", "dense_edge", "dense_edge_gru_tf_node", "truong_stft_cnn"],
+        choices=["dense_edge_gru", "dense_edge", "truong_stft_cnn"],
         default="dense_edge_gru",
         help=(
             "'dense_edge_gru' (default): SparseEvidenceGNNClassifier with "
@@ -1152,18 +1173,16 @@ def _build_argument_parser() -> argparse.ArgumentParser:
             "'dense_edge': the same classifier with dense_edge_temporal_mode='conv' "
             "(Conv2d + pool over time); results go under results/dense_edge/ so they "
             "are never pooled with the GRU CSVs. "
-            "'dense_edge_gru_tf_node': dense_edge_gru plus a learned CWT "
-            "time-frequency node encoder (time_frequency_node_encoder=True); "
-            "WCT edges are unchanged. Results go under "
-            "results/dense_edge_gru_tf_node/ so they are never pooled with "
-            "the WCT-only GRU CSVs. "
             "'truong_stft_cnn': Truong et al. 2018's STFT+CNN architecture replica "
             "(see Epilepsy/pipelines/truong_stft_cnn_classifier.py's module docstring) "
             "-- prediction-mode ONLY, forces --label-mode=prediction regardless of "
             "what's passed. Uses its own hyperparameters (TRUONG_STFT_CNN_PARAMS, "
             "DEFAULT_TRUONG_* constants above), --window-length/--step-size default "
             "to 30s/30s instead of 4s/8s to match the paper, and results are written "
-            "to their own results/truong_stft_cnn/ subdirectory."
+            "to their own results/truong_stft_cnn/ subdirectory. "
+            "The CWT time-frequency node encoder is --cwt-encoder "
+            "(off by default), not a fourth pipeline -- it works on dense_edge and "
+            "dense_edge_gru."
         ),
     )
     parser.add_argument(
@@ -1343,6 +1362,35 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--cwt-encoder",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "--pipeline=dense_edge / dense_edge_gru only: learned CWT "
+            "time-frequency node encoder on top of the existing WCT edges "
+            "(cwt_encoder=True). Off by default. Works with "
+            "either dense_edge_temporal_mode. Results nest under cwt_encoder/ "
+            "inside that pipeline's usual result dir so they cannot be "
+            "globbed with WCT-only CSVs. --no-cwt-encoder "
+            "forces the flag off if a caller had set it in the param dict."
+        ),
+    )
+    parser.add_argument(
+        "--cwt-encoder-ablation",
+        choices=["none", "zero_node_embed", "node_only"],
+        default=None,
+        help=(
+            "--pipeline=dense_edge / dense_edge_gru only. In-architecture "
+            "ablation of the CWT-encoder model. 'none' (default): node "
+            "embeddings AND WCT edges. 'node_only': CWT encoder with no "
+            "help from WCT -- edge features are zeros, WCT is not computed "
+            "(this is the flag you want, not --channel-subset-k 0, which "
+            "is full-mesh WCT). 'zero_node_embed': keep WCT, zero the node "
+            "slots. Values other than 'none' turn --cwt-encoder on. "
+            "Results nest under cwt_encoder/<ablation>/."
+        ),
+    )
+    parser.add_argument(
         "--channel-subset-k",
         type=int,
         default=None,
@@ -1444,9 +1492,7 @@ def main(args: argparse.Namespace) -> None:
     args.disable_disk_cache = resolve_disable_disk_cache(
         args.device, args.disable_disk_cache,
     )
-    if cache_flag_explicit is None and pipeline in (
-        "dense_edge", "dense_edge_gru", "dense_edge_gru_tf_node",
-    ):
+    if cache_flag_explicit is None and pipeline in ("dense_edge", "dense_edge_gru"):
         print(
             f"  disk cache: {'disabled' if args.disable_disk_cache else 'enabled'} "
             f"(default for device={args.device!r}; "
@@ -1607,24 +1653,13 @@ def main(args: argparse.Namespace) -> None:
         print(f"event-level hit rate (k-of-n): {n_hits_smoothed}/{n_seizures} ({100 * n_hits_smoothed / n_seizures:.1f}%)")
     elif label_mode == "prediction":
         clf_params = dict(_dense_family_params(pipeline, "prediction"))
-        clf_params["seed"] = args.seed
-        clf_params["device"] = args.device
-        clf_params["precompute_chunk_size"] = args.precompute_chunk_size
-        clf_params["compile_dense_edge_helper"] = args.compile_dense_edge_helper
-        clf_params["dense_edge_amp_bf16"] = args.dense_edge_amp_bf16
-        clf_params["train_amp_bf16"] = args.train_amp_bf16
-        clf_params["channel_subset_k"] = args.channel_subset_k
-        clf_params["channel_subset_metric"] = args.channel_subset_metric
-        if args.verbose is not None:
-            clf_params["verbose"] = args.verbose
-        if args.validation_split is not None:
-            clf_params["validation_split"] = args.validation_split
-        if args.early_stopping_patience is not None:
-            clf_params["early_stopping_patience"] = args.early_stopping_patience
+        _apply_dense_family_cli_overrides(clf_params, args)
 
         print(
             f"Running leave-one-seizure-out prediction (pipeline={pipeline}, "
             f"dense_edge_temporal_mode={clf_params['dense_edge_temporal_mode']}, "
+            f"cwt_encoder={clf_params.get('cwt_encoder', False)}, "
+            f"time_frequency_node_ablation={clf_params.get('time_frequency_node_ablation', 'none')}, "
             f"epochs={epochs}, sph={args.sph}s, sop={args.sop}s, "
             f"validation_split={clf_params['validation_split']}, "
             f"early_stopping_patience={clf_params['early_stopping_patience']})..."
@@ -1644,9 +1679,16 @@ def main(args: argparse.Namespace) -> None:
         # --shuffle-labels gets its OWN separate subdirectory for the same
         # reason -- a null-control run must never be readable as a real one.
         # dense_edge vs dense_edge_gru: conv CSVs never land next to GRU CSVs
-        # (results/dense_edge/prediction/ vs results/prediction/).
+        # (results/dense_edge/prediction/ vs results/prediction/). CWT-node
+        # runs nest under cwt_encoder/ inside that pipeline root.
         prediction_dir = _dense_family_result_dir(
             output_dir, pipeline, "prediction", args.shuffle_labels,
+            cwt_encoder=bool(
+                clf_params.get("cwt_encoder", False)
+            ),
+            time_frequency_node_ablation=str(
+                clf_params.get("time_frequency_node_ablation", "none")
+            ),
         )
         prediction_dir.mkdir(parents=True, exist_ok=True)
         results_path = prediction_dir / f"prediction_leave_one_seizure_out_{run_id}.csv"
@@ -1674,24 +1716,13 @@ def main(args: argparse.Namespace) -> None:
         print(f"event-level hit rate (k-of-n): {n_hits_smoothed}/{n_seizures} ({100 * n_hits_smoothed / n_seizures:.1f}%)")
     else:
         clf_params = dict(_dense_family_params(pipeline, "detection"))
-        clf_params["seed"] = args.seed
-        clf_params["device"] = args.device
-        clf_params["precompute_chunk_size"] = args.precompute_chunk_size
-        clf_params["compile_dense_edge_helper"] = args.compile_dense_edge_helper
-        clf_params["dense_edge_amp_bf16"] = args.dense_edge_amp_bf16
-        clf_params["train_amp_bf16"] = args.train_amp_bf16
-        clf_params["channel_subset_k"] = args.channel_subset_k
-        clf_params["channel_subset_metric"] = args.channel_subset_metric
-        if args.verbose is not None:
-            clf_params["verbose"] = args.verbose
-        if args.validation_split is not None:
-            clf_params["validation_split"] = args.validation_split
-        if args.early_stopping_patience is not None:
-            clf_params["early_stopping_patience"] = args.early_stopping_patience
+        _apply_dense_family_cli_overrides(clf_params, args)
 
         print(
             f"Running leave-one-seizure-out detection (pipeline={pipeline}, "
             f"dense_edge_temporal_mode={clf_params['dense_edge_temporal_mode']}, "
+            f"cwt_encoder={clf_params.get('cwt_encoder', False)}, "
+            f"time_frequency_node_ablation={clf_params.get('time_frequency_node_ablation', 'none')}, "
             f"epochs={epochs}, "
             f"validation_split={clf_params['validation_split']}, "
             f"early_stopping_patience={clf_params['early_stopping_patience']})..."
@@ -1707,6 +1738,12 @@ def main(args: argparse.Namespace) -> None:
         # the same place as (or be mistaken for) a real detection result.
         detection_dir = _dense_family_result_dir(
             output_dir, pipeline, "detection", args.shuffle_labels,
+            cwt_encoder=bool(
+                clf_params.get("cwt_encoder", False)
+            ),
+            time_frequency_node_ablation=str(
+                clf_params.get("time_frequency_node_ablation", "none")
+            ),
         )
         detection_dir.mkdir(parents=True, exist_ok=True)
         results_path = detection_dir / f"leave_one_seizure_out_{run_id}.csv"
@@ -1766,7 +1803,15 @@ def _write_results_readme(output_dir: Path) -> None:
         "`dense_edge_gru`, but `dense_edge_temporal_mode=\"conv\"` (Conv2d "
         "over time) instead of `\"rnn\"` (per-edge GRU). Do not pool these "
         "with `leave_one_seizure_out_*.csv` / `prediction/` -- those are "
-        "the GRU pipeline's historical layout.\n",
+        "the GRU pipeline's historical layout.\n\n"
+        "- `cwt_encoder/` (GRU) and `dense_edge/cwt_encoder/`: "
+        "`--cwt-encoder` on the corresponding dense-family "
+        "pipeline -- learned CWT node embeddings on top of WCT edges. Do "
+        "not pool these with the WCT-only CSVs in `prediction/` / "
+        "`dense_edge/prediction/`.\n"
+        "- `cwt_encoder/node_only/`: `--cwt-encoder-ablation node_only` -- "
+        "CWT encoder with WCT edge features (and WCT compute) off. Not "
+        "comparable to joint CWT+WCT runs under `cwt_encoder/`.\n",
         encoding="utf-8",
     )
 

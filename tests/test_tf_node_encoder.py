@@ -8,7 +8,7 @@ architectural contract of the `tf-node-encoding` branch:
   * encoder weights are shared across electrodes
   * messages see (h_src, h_dst, e_ij)
   * gradients flow through both the new node encoder and the existing edge GRU
-  * the WCT-only baseline (time_frequency_node_encoder=False) is unchanged
+  * the WCT-only baseline (cwt_encoder=False) is unchanged
 """
 
 from __future__ import annotations
@@ -50,7 +50,7 @@ def _tiny_core(**overrides) -> SparseEvidenceGNNCore:
         event_aggregation="concat",
         dense_edge_temporal_mode="rnn",
         dense_conv_out_channels=HIDDEN,
-        time_frequency_node_encoder=False,
+        cwt_encoder=False,
         sampling_rate=64,
         n_hops=1,
     )
@@ -171,7 +171,7 @@ def test_encoder_uses_real_and_imag_as_ordinary_channels() -> None:
 
 
 def test_baseline_core_has_no_node_encoder_and_edge_only_message() -> None:
-    core = _tiny_core(time_frequency_node_encoder=False)
+    core = _tiny_core(cwt_encoder=False)
     assert core.cwt_node_encoder is None
     assert core.channel_encoder is None
     first = core.sparse_message_mlp[0]
@@ -179,17 +179,17 @@ def test_baseline_core_has_no_node_encoder_and_edge_only_message() -> None:
     assert first.in_features == HIDDEN  # dense_conv_out_channels only
 
 
-def test_tf_node_core_widens_message_mlp() -> None:
-    core = _tiny_core(time_frequency_node_encoder=True)
+def test_cwt_encoder_core_widens_message_mlp() -> None:
+    core = _tiny_core(cwt_encoder=True)
     assert core.cwt_node_encoder is not None
     first = core.sparse_message_mlp[0]
     assert isinstance(first, nn.Linear)
     assert first.in_features == HIDDEN + 2 * HIDDEN  # e_ij + h_src + h_dst
 
 
-def test_tf_node_parameter_count_stays_small() -> None:
-    baseline = _tiny_core(time_frequency_node_encoder=False)
-    new = _tiny_core(time_frequency_node_encoder=True)
+def test_cwt_encoder_parameter_count_stays_small() -> None:
+    baseline = _tiny_core(cwt_encoder=False)
+    new = _tiny_core(cwt_encoder=True)
     n_base = _n_params(baseline)
     n_new = _n_params(new)
     n_enc = _n_params(new.cwt_node_encoder)
@@ -207,7 +207,7 @@ def test_tf_node_parameter_count_stays_small() -> None:
 
 def test_node_and_edge_gradients_flow() -> None:
     torch.manual_seed(0)
-    core = _tiny_core(time_frequency_node_encoder=True)
+    core = _tiny_core(cwt_encoder=True)
     core.train()
     raw_x = torch.randn(BATCH, N_CHANNELS, CWT_T)
     dense_edge = _synthetic_dense_edge()
@@ -236,7 +236,7 @@ def test_node_and_edge_gradients_flow() -> None:
 
 def test_message_sees_src_dst_and_edge() -> None:
     torch.manual_seed(1)
-    core = _tiny_core(time_frequency_node_encoder=True)
+    core = _tiny_core(cwt_encoder=True)
     core.eval()
     dense_edge = _synthetic_dense_edge()
     w_real, w_imag = _synthetic_cwt()
@@ -269,7 +269,7 @@ def test_message_sees_src_dst_and_edge() -> None:
 
 def test_zero_node_embed_ablation_matches_zero_slots() -> None:
     core = _tiny_core(
-        time_frequency_node_encoder=True,
+        cwt_encoder=True,
         time_frequency_node_ablation="zero_node_embed",
     )
     w_real, w_imag = _synthetic_cwt()
@@ -280,7 +280,7 @@ def test_zero_node_embed_ablation_matches_zero_slots() -> None:
 def test_node_only_ablation_zeros_edge_features_in_forward() -> None:
     torch.manual_seed(2)
     core = _tiny_core(
-        time_frequency_node_encoder=True,
+        cwt_encoder=True,
         time_frequency_node_ablation="node_only",
     )
     core.eval()
@@ -306,10 +306,26 @@ def test_node_only_ablation_zeros_edge_features_in_forward() -> None:
     )
     node_part = feats[..., : 2 * HIDDEN]
     assert node_part.abs().sum() > 0, "node slots must still carry CWT embeddings"
+    # WCT GRU/conv must not run: no edge-network gradient.
+    core.zero_grad(set_to_none=True)
+    core.train()
+    logits, _ = core(raw_x, dense_edge, w_real, w_imag)
+    logits.sum().backward()
+    assert any(
+        p.grad is not None and p.grad.abs().sum() > 0
+        for p in core.cwt_node_encoder.parameters()
+    )
+    edge_grads = [
+        p.grad for p in core.dense_edge_conv.parameters() if p.requires_grad
+    ]
+    assert edge_grads, "edge network has no trainable parameters"
+    assert all(g is None or g.abs().sum() == 0 for g in edge_grads), (
+        "node_only must not train the WCT edge network"
+    )
 
 
 def test_baseline_forward_rejects_cwt_tensors() -> None:
-    core = _tiny_core(time_frequency_node_encoder=False)
+    core = _tiny_core(cwt_encoder=False)
     raw_x = torch.randn(BATCH, N_CHANNELS, CWT_T)
     dense_edge = _synthetic_dense_edge()
     w_real, w_imag = _synthetic_cwt()
@@ -319,7 +335,7 @@ def test_baseline_forward_rejects_cwt_tensors() -> None:
 
 def test_tf_forward_uses_cwt_and_runs_under_optional_cuda_bf16() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    core = _tiny_core(time_frequency_node_encoder=True).to(device)
+    core = _tiny_core(cwt_encoder=True).to(device)
     core.train()
     raw_x = torch.randn(BATCH, N_CHANNELS, CWT_T, device=device)
     dense_edge = _synthetic_dense_edge().to(device)
@@ -358,7 +374,7 @@ def test_prepare_features_keeps_cwt_for_node_encoder() -> None:
         event_mode="dense",
         event_aggregation="concat",
         dense_edge_temporal_mode="rnn",
-        time_frequency_node_encoder=True,
+        cwt_encoder=True,
         cwt_backend="torch",
         device="cpu",
         verbose=0,
@@ -393,3 +409,135 @@ def test_prepare_features_keeps_cwt_for_node_encoder() -> None:
         p.grad is not None and p.grad.abs().sum() > 0
         for p in model.dense_edge_conv.parameters()
     )
+
+
+def test_node_only_prepare_features_skips_wct() -> None:
+    """node_only must not compute WCT; encoder still trains; edge net does not."""
+    torch.manual_seed(4)
+    n_time = 64
+    X = torch.randn(2, 3, n_time).numpy().astype("float32")
+    clf = SparseEvidenceGNNClassifier(
+        sampling_rate=64,
+        lowest=8.0,
+        highest=24.0,
+        nfreqs=4,
+        hidden_dim=8,
+        event_mode="dense",
+        event_aggregation="concat",
+        dense_edge_temporal_mode="rnn",
+        cwt_encoder=True,
+        time_frequency_node_ablation="node_only",
+        cwt_backend="torch",
+        device="cpu",
+        verbose=0,
+        dense_edge_cache_dir=None,
+        cwt_cache=None,
+        normalize_input=False,
+        epochs=1,
+        batch_size=2,
+    )
+    clf.device_ = torch.device("cpu")
+    clf.X_mean_, clf.X_std_ = 0.0, 1.0
+
+    def _wct_should_not_run(*_args, **_kwargs):
+        raise AssertionError("node_only must not call _precompute_dense_edge_inputs")
+
+    clf._precompute_dense_edge_inputs = _wct_should_not_run
+    features = clf._prepare_features(X, fit=False)
+    raw_x, dense_edge_raw, w_real, w_imag = features
+    assert torch.equal(dense_edge_raw, torch.zeros_like(dense_edge_raw))
+    assert w_real.ndim == 4 and w_imag.ndim == 4
+
+    model = clf._build_model(n_channels=3, n_classes=2)
+    model.train()
+    logits, _ = model(raw_x, dense_edge_raw, w_real, w_imag)
+    logits.sum().backward()
+    assert any(
+        p.grad is not None and p.grad.abs().sum() > 0
+        for p in model.cwt_node_encoder.parameters()
+    )
+    assert all(
+        p.grad is None or p.grad.abs().sum() == 0
+        for p in model.dense_edge_conv.parameters()
+        if p.requires_grad
+    )
+
+
+def test_tf_encoder_works_with_conv_temporal_mode() -> None:
+    """The encoder is a flag on either dense-family temporal mode, not a GRU-only pipeline."""
+    core = _tiny_core(
+        cwt_encoder=True,
+        dense_edge_temporal_mode="conv",
+    )
+    assert core.cwt_node_encoder is not None
+    first = core.sparse_message_mlp[0]
+    assert isinstance(first, nn.Linear)
+    assert first.in_features == HIDDEN + 2 * HIDDEN
+    # Construction is the contract here. The toy EDGE_T is too short for
+    # the default Conv2d+pool stack; GRU tests already cover encoder
+    # forward + grads, which are temporal-mode independent.
+
+
+def test_tf_encoder_is_a_flag_not_a_pipeline() -> None:
+    from Epilepsy.run_pipelines import (
+        _build_argument_parser,
+        _dense_family_params,
+        _dense_family_result_dir,
+    )
+
+    parser = _build_argument_parser()
+    pipeline_action = next(
+        action for action in parser._actions if "--pipeline" in action.option_strings
+    )
+    assert "dense_edge_gru_tf_node" not in pipeline_action.choices
+    assert set(pipeline_action.choices) == {
+        "dense_edge_gru",
+        "dense_edge",
+        "truong_stft_cnn",
+    }
+    encoder_action = next(
+        action
+        for action in parser._actions
+        if "--cwt-encoder" in action.option_strings
+        and "--cwt-encoder-ablation" not in action.option_strings
+    )
+    assert "--no-cwt-encoder" in encoder_action.option_strings
+    ablation_action = next(
+        action
+        for action in parser._actions
+        if "--cwt-encoder-ablation" in action.option_strings
+    )
+    assert set(ablation_action.choices) == {"none", "zero_node_embed", "node_only"}
+
+    for pipeline in ("dense_edge_gru", "dense_edge"):
+        for label_mode in ("prediction", "detection"):
+            params = _dense_family_params(pipeline, label_mode)
+            assert params["cwt_encoder"] is False
+
+    with pytest.raises(ValueError, match="not a dense-family pipeline"):
+        _dense_family_params("dense_edge_gru_tf_node", "prediction")
+
+    root = Path("/tmp/results")
+    gru_off = _dense_family_result_dir(root, "dense_edge_gru", "prediction", False)
+    gru_on = _dense_family_result_dir(
+        root, "dense_edge_gru", "prediction", False, cwt_encoder=True
+    )
+    conv_off = _dense_family_result_dir(root, "dense_edge", "prediction", False)
+    conv_on = _dense_family_result_dir(
+        root, "dense_edge", "prediction", False, cwt_encoder=True
+    )
+    gru_node_only = _dense_family_result_dir(
+        root,
+        "dense_edge_gru",
+        "prediction",
+        False,
+        cwt_encoder=True,
+        time_frequency_node_ablation="node_only",
+    )
+    assert gru_off == root / "prediction"
+    assert gru_on == root / "cwt_encoder" / "prediction"
+    assert conv_off == root / "dense_edge" / "prediction"
+    assert conv_on == root / "dense_edge" / "cwt_encoder" / "prediction"
+    assert gru_node_only == root / "cwt_encoder" / "node_only" / "prediction"
+    assert "cwt_encoder" not in gru_off.parts
+    assert "cwt_encoder" not in conv_off.parts
