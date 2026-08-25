@@ -78,6 +78,12 @@ PARAMS = dict(
     max_folds=1,                      # None = every leave-one-seizure-out
                                        # fold (slow -- see run_pipelines.py's
                                        # --max-folds docstring).
+    start_fold=0,                     # label_mode="prediction" only. Skip
+                                       # this many leading folds (e.g. 1 to
+                                       # skip a fold already run and recorded
+                                       # separately). See run_pipelines.py's
+                                       # leave_one_seizure_out_prediction
+                                       # start_fold docstring.
     max_interictal_recordings=5,      # label_mode="prediction" only. None =
                                        # every seizure-free recording for the
                                        # subject (~33 files/~1.7GB for chb01).
@@ -210,6 +216,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--step-size", type=float, default=_UNSET)
     parser.add_argument("--epochs", type=int, default=_UNSET)
     parser.add_argument("--max-folds", type=_int_or_none, default=_UNSET)
+    parser.add_argument("--start-fold", type=int, default=_UNSET)
     parser.add_argument("--max-interictal-recordings", type=_int_or_none, default=_UNSET)
     parser.add_argument("--channel-subset-k", type=_int_or_none, default=_UNSET)
     parser.add_argument("--channel-subset-metric", default=_UNSET)
@@ -293,6 +300,7 @@ def main() -> None:
                 X, y, metadata, clf_params, p["epochs"], p["window_length"],
                 disable_disk_cache=p["disable_disk_cache"],
                 max_folds=p["max_folds"],
+                start_fold=p.get("start_fold", 0),
             )
         else:
             results = rp.leave_one_seizure_out_detection(

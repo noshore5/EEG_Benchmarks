@@ -746,6 +746,15 @@ def leave_one_seizure_out_prediction(
     k_of_n_k: int = DEFAULT_TRUONG_K_OF_N_K,
     k_of_n_n: int = DEFAULT_TRUONG_K_OF_N_N,
     max_folds: int | None = None,
+    # 2026-08-25: skip the first N folds (e.g. already run and recorded
+    # separately -- avoid re-paying their training cost). fold_i stays the
+    # ABSOLUTE index (enumerate(..., start=start_fold) below), so
+    # fold_interictal_runs[fold_i] -- sized off the FULL unique_seizures,
+    # see the n_folds/fold_interictal_runs comment above -- still lines up
+    # correctly; this is the same "max_folds only trims which folds run,
+    # never how big each one's own split is" invariant that comment
+    # documents, just trimming from the front instead of the back.
+    start_fold: int = 0,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Leave-one-seizure-out CV for label_mode="prediction".
 
@@ -868,6 +877,8 @@ def leave_one_seizure_out_prediction(
         # fold_i for the folds we keep is unchanged (still 0, 1, ..., not
         # renumbered), only the trailing folds are skipped.
         unique_seizures = unique_seizures[: max(1, int(max_folds))]
+    if start_fold:
+        unique_seizures = unique_seizures[start_fold:]
     if not interictal_only_runs:
         print(
             "  WARNING: no genuinely seizure-free recordings in this dataset -- "
@@ -879,7 +890,7 @@ def leave_one_seizure_out_prediction(
 
     fold_rows = []
     per_seizure_rows = []
-    for fold_i, seizure in enumerate(unique_seizures):
+    for fold_i, seizure in enumerate(unique_seizures, start=start_fold):
         subject, run, seizure_id = seizure["subject"], seizure["run"], seizure["seizure_id"]
         onset, offset = seizure["seizure_onset"], seizure["seizure_offset"]
 
