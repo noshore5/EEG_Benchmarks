@@ -9,13 +9,115 @@ Claude/Grok shells that don't share context with each other, and this is
 the one file meant to catch a new shell up without it re-reading
 everything.
 
-**Last updated:** 2026-08-25, by Claude (`--pipeline dbconformer`/`slimseiz`
-added; see bullet immediately below). Prior entry, still current: Grok
-(`scan="chunk"`, `use_cuda_kernel`, GHCR `eeg_benchmarks-mamba` image live).
+**Last updated:** 2026-08-25, by Claude (wrote the deferred 4-way
+pipeline comparison -- GRU vs Mamba vs DBConformer vs SlimSeiz, chb01
+prediction, all under the same shared protocol; Mamba leads on AP
+(0.499), see
+`Session_notes/2026_08_25/pipeline_comparison_gru_mamba_dbconformer_slimseiz.md`
+for the full table and per-fold breakdown. Also corrected two notes'
+"root cause may be a second simultaneous Claude-shell job" framing for
+the slimseiz crash -- confirmed isolated to stage 1 channel selection,
+not concurrency; see "Known gotchas" below). Prior entry, still current:
+Claude (the queued `--slimseiz-fixed-channels` 6-fold run finished --
+essentially ties the adaptive per-fold selection on chb01 aggregate,
+missing the same seizure on hit rate too; see "Right now" below for the
+full comparison table. One operational hiccup along the way, not a
+crash: the watchdog script's hardcoded ~700s wall-clock kill was sized
+for one fold, not six, and killed the first launch mid-fold-5 -- fixed
+and the remaining 2 folds rerun via `--skip-folds`, see that section).
+Before that: Claude (ran `dbconformer` at real 6-fold scale plus two negative
+hyperparameter diagnostics -- depth 5 is the reported baseline, see
+`Session_notes/2026_08_25/dbconformer_baseline_runs.md`). Before that:
+Claude (added `--slimseiz-fixed-channels` -- bypasses stage 1 entirely and
+feeds stage 2 a literal channel list). Before that: Claude (profiled the slimseiz
+channel-select crash under a memory watchdog, added a `max_samples` cap to
+`select_slimseiz_channels` as a mitigation -- root cause NOT fully
+confirmed, see "Known gotchas" below). Before that: Claude (`--pipeline
+dbconformer`/`slimseiz` added). Before that: Grok (`scan="chunk"`,
+`use_cuda_kernel`, GHCR `eeg_benchmarks-mamba` image live).
 
 ---
 
 ## Right now
+
+**`--slimseiz-fixed-channels` added to `run_pipelines.py` (2026-08-25).**
+The upstream SlimSeiz repo's paper numbers turn out to most likely be
+reported for one fixed 8-channel montage shared across the whole CHB-MIT
+cohort, not a genuinely per-patient adaptive selection -- found by pulling
+`Common_channesl.ipynb` from `github.com/guoruilu/SlimSeiz` (not vendored
+into this repo as a file; not part of the two notebooks this repo already
+ported/cited). That notebook loads each patient's own top-8 channel-select
+output (`chbNN_sel_ch_30iter_with_SMOTE.json`, not published in the repo,
+only their printed cell outputs are) and tallies which channels land in
+most patients' top-8: `P3-O1, P8-O2, C3-P3, C4-P4, FZ-CZ, P4-O2, CZ-PZ,
+F3-C3` (counts 18/18/18/17/17/17/15/14 out of 24 patients) --
+`SLIMSEIZ_PAPER_FIXED_CHANNELS` in `run_pipelines.py`. For chb01
+specifically its own top-8 overlaps this fixed set 7/8 (missing F3-C3
+only). `--slimseiz-fixed-channels` (no args = that default list, or pass
+explicit names) sets `SlimSeizClassifier.channel_select_fixed_indices`,
+which **skips stage 1 entirely** (no PCA/SMOTE/DecisionTree call at all --
+see `slimseiz_classifier.py`'s "FIXED CHANNELS" docstring section) and
+just slices `X` to the given channels before stage 2 -- this is actually a
+*lower*-risk slimseiz configuration than the default adaptive-selection
+path, since it removes the crash-implicated stage from the run entirely.
+Name-to-index resolution is chb01-only right now (`CHB01_CHANNEL_NAMES`,
+read directly off `chb01_01.edf` via `mne.io.read_raw_edf`, confirmed
+`datasets/epilepsy/chb_mit.py` does no picking/reordering so this is the
+real channel order every fold's `X` uses) -- errors if `--subjects` isn't
+`[1]`. Smoke-tested clean (`--smoke --slimseiz-fixed-channels --max-folds
+1`, peak RSS ~1GB, resolved indices `[7,15,6,10,16,11,17,5]` matched a
+hand-check against the EDF header). **A real (non-smoke) 6-fold run with
+this flag is queued** (not yet started as of this writing) -- a background
+watcher (`/private/tmp/.../scratchpad/wait_then_run_slimseiz_fixedch.sh`,
+session-local, won't survive a reboot) is polling for PID 13592 (a
+concurrent `--pipeline dbconformer` job, already running when this was
+queued) to exit before launching, RSS-capped at 12GB via the same
+watchdog wrapper used in the crash investigation below. Log will land at
+`Epilepsy/results/slimseiz/prediction/full6fold_slimseiz_fixedch_
+20260825-204111.log`. If that log doesn't exist yet and the watcher/
+dbconformer processes are gone (check `ps`), the queued run silently
+never fired (e.g. this Mac rebooted) -- just rerun
+`.venv/bin/python Epilepsy/run_pipelines.py --pipeline slimseiz
+--slimseiz-fixed-channels` directly (ideally still watchdog-wrapped, see
+gotcha below).
+
+**Fixed-channel 6-fold run DONE (2026-08-25) -- essentially ties the
+adaptive per-fold selection on chb01.** Not memory-related at all this
+time: the first launch died at fold 5/6 because the watchdog script
+(`probe_with_watchdog.sh`, still in scratch, session-local) had a
+hardcoded ~700s wall-clock kill sized for testing one fold during the
+crash investigation, not a full 6-fold pass -- an operational mistake, not
+a crash (RSS was ~6.6GB the whole time, nowhere near the 12GB cap). Fixed
+by making the timeout a `TIMEOUT_S` env var and rerunning just the 2
+remaining folds via `--skip-folds 0 1 2 3` (fold order is
+`(subject,run,seizure_onset)`-sorted: 1_03_0, 1_04_0, 1_15_0, 1_16_0,
+1_18_0, 1_26_0 -- indices 0-5). Combined result, fixed-channels vs. the
+earlier real adaptive-selection run
+(`prediction_leave_one_seizure_out_20260825-171651.csv`):
+
+| metric | adaptive (per-fold) | fixed (paper's 8) |
+|---|---|---|
+| precision (mean) | 0.286 | 0.297 |
+| recall (mean) | 0.556 | 0.539 |
+| f1 (mean) | 0.340 | 0.351 |
+| FAR/h raw/smoothed (mean) | 8.56 / 6.31 | 8.22 / 6.08 |
+| hit rate raw | 5/6 | 5/6 |
+| hit rate smoothed | 4/6 | 4/6 |
+
+Both configurations miss the exact same seizure on hit rate (`1_18_0` --
+mean preictal score ~0.0004 under both, a genuinely hard fold, not a
+channel artifact) and the same smoothed-miss (`1_15_0`). Per-fold, two
+folds move in opposite directions (`1_03_0` f1 0.324->0.246 under fixed,
+worse; `1_26_0` f1 0.296->0.436 under fixed, better) that roughly cancel
+in the aggregate. **Conclusion: for chb01, the crash-implicated stage-1
+selection isn't buying anything over the paper's own fixed 8-channel
+montage** -- `--slimseiz-fixed-channels` gets the same result, safer (no
+PCA/SMOTE/DecisionTree at all) and faster. Untested whether this
+generalizes past chb01 (`--subjects` is chb01-only in this repo today).
+Results: `prediction_leave_one_seizure_out_20260825-171651.csv` (adaptive,
+6 folds) + fixed-channel folds 0-3 (log only, CSV lost to the timeout
+kill -- see `full6fold_slimseiz_fixedch_20260825-204111.log`) + folds 4-5
+(`prediction_leave_one_seizure_out_20260825-205851.csv`).
 
 **`--pipeline dbconformer` / `--pipeline slimseiz` added to
 `run_pipelines.py` (2026-08-25, this branch).** Two new raw-EEG classifiers
@@ -37,7 +139,25 @@ attention/Mamba code needs it); `timm` was NOT added -- DBConformer's one
 Verified with `--smoke --max-folds 1 --device cpu` for both pipelines x
 both label modes (wiring only, not model quality -- untrained/untuned
 hyperparameters, see each PARAMS dict's own "starting point" comments).
-Not yet run at real (non-smoke) scale or tuned against a real fold.
+
+**`dbconformer` (chb01, prediction mode) now has a real 6-fold baseline,
+plus two negative diagnostic results (2026-08-25).** Reported number:
+`tem_depth=chn_depth=5`, `use_class_weights=True` (this repo's standard
+protocol, matching GRU/Mamba) — AP 0.442, f1 0.366, precision 0.273,
+hit rate 5/6 k-of-n (`prediction_leave_one_seizure_out_20260825-175207.csv`).
+Two follow-up axes tried, both regressed and were reverted: `tem_depth=
+chn_depth=6` (the paper's own MI default) and `=3` both scored worse
+than 5 (5 is a local optimum, not one end of a trend); `use_class_
+weights=False` improved precision (0.273->0.322) but cost AP/f1/hit-rate
+(a real tradeoff, not a bug fix). `_DBCONFORMER_SHARED_PARAMS`/
+`PREDICTION_DBCONFORMER_PARAMS` in `run_pipelines.py` are back at the
+175207 config; both diagnostics are documented inline in that file's
+comment block. **Not** a reproduction of any DBConformer paper-reported
+number -- their seizure-detection results are on CHSZ/NICU, not CHB-MIT,
+and their own LOSO script is leave-one-*subject*-out on MI/ERP data, not
+this repo's leave-one-*seizure*-out protocol. Full per-fold tables and
+reasoning: `Epilepsy/Session_notes/2026_08_25/dbconformer_baseline_runs.md`.
+`slimseiz` still has no equivalent real-scale run as of this entry.
 
 GRU vs Mamba (encoder-free, full 23-channel mesh, val split 0.2, early
 stop, matched protocol) across all 6 chb01 leave-one-seizure-out folds —
@@ -152,6 +272,64 @@ read off a continuous timeline). See "Open threads" below.
 
 ## Known gotchas (keep rediscovering these -- stop rediscovering them)
 
+- **`--pipeline slimseiz` (non-smoke) once blew up memory/crashed this
+  Mac; root cause NOT cleanly pinned down despite real profiling; a
+  hardening fix is in place but is a mitigation, not a proven fix.**
+  Original incident: a full 6-fold LOSO pass coincided with a hard crash
+  on 2026-08-25 ~18:28 (SOCD hardware watchdog reset, not a clean Python
+  OOM-kill -- see
+  `/Library/Logs/DiagnosticReports/panic-base+socd-2026-08-25-182804.panic`
+  / paired `ResetCounter-*.diag`, "Boot faults: wdog,reset_in_1"; its log
+  file was left at 0 bytes).
+
+  **Investigation (2026-08-25 ~19:20-19:55), all under a custom RSS-limit
+  watchdog wrapper (kills the process before it can take the OS down) --
+  see the session note for the wrapper script if it's not still in
+  scratch:**
+  - `_build_windowed_dataset` alone (real args: `window_length=30.0`,
+    `max_interictal_recordings=None`): safe, ~5s, peak ~5.8GB.
+  - `select_slimseiz_channels` alone, on a real fold's actual training
+    array (868, 23, 7680): safe, peak <1GB -- but **slow, ~200s/fold**
+    (30 iter x 23 channels x PCA(60)+SMOTE+DecisionTree on 7680-wide
+    real-scale windows, vs. --smoke's 1024-wide).
+  - Stage 2 (network training) alone, real scale, stage 1 stubbed out:
+    safe, peak ~8GB, recovers after.
+  - **The real combined 1-fold run (both real stages, unstubbed)
+    reproduced the fast blowup ONCE** (~8.8GB RSS + ~4.8GB swap within
+    20s, empty log, killed) but **did NOT reproduce it on two further
+    identical attempts** (one ran 300s+ peaking ~8.2GB before hitting a
+    test timeout, unrelated to memory; one ran to completion in 463s,
+    peak ~10.0GB, wrote results normally). So the failure is NOT reliably
+    reproducible from this code alone under matching conditions. **This is
+    isolated to stage 1 (`select_slimseiz_channels`, PCA/SMOTE/DecisionTree
+    over 23 channels x 30 iterations on real-scale 7680-wide windows) --
+    it is not a general "running two things at once on this Mac" risk.**
+    Running other pipelines (DBConformer, GRU/Mamba, or another slimseiz
+    job that bypasses stage 1 via `--slimseiz-fixed-channels`) alongside
+    each other is not implicated by this investigation. Treat "fixed"
+    claims about this pipeline skeptically until it's been run clean
+    multiple more times, including a full 6-fold pass (not yet attempted
+    post-fix as of this writing).
+
+  **Mitigation applied regardless** (bounds worst-case cost even if the
+  exact trigger stays unknown): `select_slimseiz_channels` gained
+  `max_samples` (default 1000, one stratified subsample drawn up front,
+  reused across all 30 iterations/23 channels) -- see
+  `slimseiz_channel_select.py`'s own docstring. Wired through
+  `SlimSeizClassifier(channel_select_max_samples=...)` and
+  `--slimseiz-channel-select-max-samples` in `run_pipelines.py`. Note this
+  cap does NOT activate on typical folds today (they run ~868-900 samples
+  under the default 5:1 negative:positive subsample, under the 1000
+  cap) -- it protects a fold with more positives / a looser ratio, not
+  the exact fold used during this investigation.
+
+  **Before running `--pipeline slimseiz` without `--smoke` (and without
+  `--slimseiz-fixed-channels`, i.e. stage 1 actually runs) on this Mac
+  again:** consider wrapping it in an RSS-limit watchdog (kill ~11GB)
+  rather than running bare, especially for a multi-fold run -- a single
+  real fold measured ~10GB peak and ~8min; a 6-fold run is untested
+  post-fix and could run ~45-75min at proportionally higher cumulative
+  risk if a larger fold pushes past what's been measured here.
 - **No `mamba-ssm` (CUDA kernel) on Windows/Mac.** PyPI ships sdist-only,
   needs nvcc + Linux. Portable default is still `mambapy` pscan
   (`requirements.txt`). `_DenseEdgeMambaTemporal(use_cuda_kernel=None)`

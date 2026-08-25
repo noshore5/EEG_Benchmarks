@@ -1,0 +1,113 @@
+Building windowed dataset for subjects=[1] label_mode=prediction (window_length=30.0s, step_size=30.0s)...
+  X: (4241, 23, 7680)  preictal windows: 173/4241 (4.1%)
+Running leave-one-seizure-out prediction (pipeline=slimseiz, epochs=20, sph=300.0s, sop=900.0s, validation_split=0.2, early_stopping_patience=5)...
+  Subsampled negative windows: 3348 -> 725 (target ratio 5.0:1, 143 positive kept in full)
+[Train] validation split: 174/868 samples.
+[Train] class weights: [0.32853025 1.6714697 ]
+[Train] start epochs=20 batches/epoch=22 batch_size=32 optimizer_step_batch_size=32 optimizer_step_batch_mode=credit device=mps
+[Train][Epoch 1/20] loss=0.667340 (improve +0.000000) acc=0.6931 (delta +0.0000) roc_auc=0.7150 (delta n/a) optimizer_steps=22 epoch_time=9.15s val_loss=0.634154 val_acc=0.5517 val_roc_auc=0.8604
+[Train][Epoch 2/20] loss=0.484580 (improve +0.182760) acc=0.7406 (delta +0.0476) roc_auc=0.8635 (delta 0.1485) optimizer_steps=22 epoch_time=7.15s val_loss=0.309236 val_acc=0.7299 val_roc_auc=0.9158
+[Train][Epoch 3/20] loss=0.358980 (improve +0.125600) acc=0.8026 (delta +0.0620) roc_auc=0.9149 (delta 0.0514) optimizer_steps=22 epoch_time=7.11s val_loss=0.231168 val_acc=0.9080 val_roc_auc=0.9660
+[Train][Epoch 4/20] loss=0.240334 (improve +0.118646) acc=0.9063 (delta +0.1037) roc_auc=0.9694 (delta 0.0544) optimizer_steps=22 epoch_time=7.24s val_loss=0.133629 val_acc=0.9483 val_roc_auc=0.9712
+[Train][Epoch 5/20] loss=0.151292 (improve +0.089042) acc=0.9467 (delta +0.0403) roc_auc=0.9778 (delta 0.0085) optimizer_steps=22 epoch_time=7.19s val_loss=0.168562 val_acc=0.8621 val_roc_auc=0.9784
+[Train][Epoch 6/20] loss=0.207986 (improve -0.056694) acc=0.8804 (delta -0.0663) roc_auc=0.9686 (delta -0.0092) optimizer_steps=22 epoch_time=7.22s val_loss=0.151766 val_acc=0.9540 val_roc_auc=0.9891
+[Train][Epoch 7/20] loss=0.177312 (improve +0.030674) acc=0.9179 (delta +0.0375) roc_auc=0.9779 (delta 0.0092) optimizer_steps=22 epoch_time=7.25s val_loss=0.149071 val_acc=0.9540 val_roc_auc=0.9905
+[Train][Epoch 8/20] loss=0.104518 (improve +0.072794) acc=0.9640 (delta +0.0461) roc_auc=0.9902 (delta 0.0123) optimizer_steps=22 epoch_time=7.24s val_loss=0.065420 val_acc=0.9713 val_roc_auc=0.9936
+[Train][Epoch 9/20] loss=0.144001 (improve -0.039483) acc=0.9352 (delta -0.0288) roc_auc=0.9823 (delta -0.0079) optimizer_steps=22 epoch_time=7.26s val_loss=0.073229 val_acc=0.9598 val_roc_auc=0.9924
+[Train][Epoch 10/20] loss=0.076747 (improve +0.067254) acc=0.9741 (delta +0.0389) roc_auc=0.9937 (delta 0.0114) optimizer_steps=22 epoch_time=7.23s val_loss=0.102973 val_acc=0.9713 val_roc_auc=0.9974
+[Train][Epoch 11/20] loss=0.056654 (improve +0.020093) acc=0.9769 (delta +0.0029) roc_auc=0.9948 (delta 0.0011) optimizer_steps=22 epoch_time=7.23s val_loss=0.115022 val_acc=0.9770 val_roc_auc=0.9986
+[Train][Epoch 12/20] loss=0.059703 (improve -0.003048) acc=0.9755 (delta -0.0014) roc_auc=0.9942 (delta -0.0006) optimizer_steps=22 epoch_time=7.28s val_loss=0.120843 val_acc=0.9655 val_roc_auc=0.9983
+[Train][Epoch 13/20] loss=0.087470 (improve -0.027767) acc=0.9669 (delta -0.0086) roc_auc=0.9935 (delta -0.0007) optimizer_steps=22 epoch_time=7.17s val_loss=0.040590 val_acc=0.9713 val_roc_auc=0.9990
+[Train][Epoch 14/20] loss=0.049387 (improve +0.038083) acc=0.9798 (delta +0.0130) roc_auc=0.9980 (delta 0.0045) optimizer_steps=22 epoch_time=7.23s val_loss=0.022533 val_acc=0.9885 val_roc_auc=0.9998
+[Train][Epoch 15/20] loss=0.068723 (improve -0.019336) acc=0.9741 (delta -0.0058) roc_auc=0.9957 (delta -0.0024) optimizer_steps=22 epoch_time=7.17s val_loss=0.053941 val_acc=0.9713 val_roc_auc=0.9998
+[Train][Epoch 16/20] loss=0.080595 (improve -0.011872) acc=0.9669 (delta -0.0072) roc_auc=0.9951 (delta -0.0005) optimizer_steps=22 epoch_time=7.21s val_loss=0.073819 val_acc=0.9770 val_roc_auc=0.9979
+[Train][Epoch 17/20] loss=0.043134 (improve +0.037460) acc=0.9827 (delta +0.0159) roc_auc=0.9971 (delta 0.0020) optimizer_steps=22 epoch_time=7.32s val_loss=0.076674 val_acc=0.9885 val_roc_auc=0.9995
+[Train][Epoch 18/20] loss=0.030260 (improve +0.012874) acc=0.9885 (delta +0.0058) roc_auc=0.9990 (delta 0.0019) optimizer_steps=22 epoch_time=7.15s val_loss=0.012015 val_acc=0.9885 val_roc_auc=1.0000
+[Train][Epoch 19/20] loss=0.074342 (improve -0.044082) acc=0.9741 (delta -0.0144) roc_auc=0.9950 (delta -0.0040) optimizer_steps=22 epoch_time=7.22s val_loss=0.096918 val_acc=0.9713 val_roc_auc=0.9983
+[Train][Epoch 20/20] loss=0.040217 (improve +0.034124) acc=0.9813 (delta +0.0072) roc_auc=0.9981 (delta 0.0031) optimizer_steps=22 epoch_time=7.19s val_loss=0.012093 val_acc=0.9943 val_roc_auc=1.0000
+[Train] restored best model from epoch 18 (val_loss=0.012015)
+  seizure 1_03_0: n_test=750 preictal=30  hit=True (smoothed=True)  FAR/h=20.000 (smoothed=18.833)  precision=0.149 recall=0.700 f1=0.246
+  Subsampled negative windows: 3448 -> 718 (target ratio 5.0:1, 143 positive kept in full)
+[Train] validation split: 173/861 samples.
+[Train] class weights: [0.33139536 1.6686046 ]
+[Train] start epochs=20 batches/epoch=22 batch_size=32 optimizer_step_batch_size=32 optimizer_step_batch_mode=credit device=mps
+[Train][Epoch 1/20] loss=0.681211 (improve +0.000000) acc=0.7427 (delta +0.0000) roc_auc=0.6456 (delta n/a) optimizer_steps=22 epoch_time=8.07s val_loss=0.624114 val_acc=0.9249 val_roc_auc=0.9112
+[Train][Epoch 2/20] loss=0.517756 (improve +0.163455) acc=0.7020 (delta -0.0407) roc_auc=0.8271 (delta 0.1815) optimizer_steps=22 epoch_time=7.10s val_loss=0.271190 val_acc=0.9306 val_roc_auc=0.9339
+[Train][Epoch 3/20] loss=0.262610 (improve +0.255146) acc=0.8852 (delta +0.1831) roc_auc=0.9574 (delta 0.1303) optimizer_steps=22 epoch_time=7.15s val_loss=0.112202 val_acc=0.9480 val_roc_auc=0.9725
+[Train][Epoch 4/20] loss=0.129877 (improve +0.132733) acc=0.9535 (delta +0.0683) roc_auc=0.9783 (delta 0.0209) optimizer_steps=22 epoch_time=7.26s val_loss=0.313235 val_acc=0.9191 val_roc_auc=0.9883
+[Train][Epoch 5/20] loss=0.127094 (improve +0.002783) acc=0.9535 (delta +0.0000) roc_auc=0.9838 (delta 0.0054) optimizer_steps=22 epoch_time=7.14s val_loss=0.205602 val_acc=0.9538 val_roc_auc=0.9796
+[Train][Epoch 6/20] loss=0.101774 (improve +0.025319) acc=0.9564 (delta +0.0029) roc_auc=0.9869 (delta 0.0031) optimizer_steps=22 epoch_time=7.00s val_loss=0.086757 val_acc=0.9769 val_roc_auc=0.9885
+[Train][Epoch 7/20] loss=0.082715 (improve +0.019059) acc=0.9637 (delta +0.0073) roc_auc=0.9926 (delta 0.0058) optimizer_steps=22 epoch_time=7.05s val_loss=0.124338 val_acc=0.9711 val_roc_auc=0.9904
+[Train][Epoch 8/20] loss=0.130832 (improve -0.048116) acc=0.9419 (delta -0.0218) roc_auc=0.9882 (delta -0.0044) optimizer_steps=22 epoch_time=7.07s val_loss=0.170276 val_acc=0.9538 val_roc_auc=0.9849
+[Train][Epoch 9/20] loss=0.115909 (improve +0.014922) acc=0.9593 (delta +0.0174) roc_auc=0.9825 (delta -0.0057) optimizer_steps=22 epoch_time=7.06s val_loss=0.079594 val_acc=0.9480 val_roc_auc=0.9844
+[Train][Epoch 10/20] loss=0.083036 (improve +0.032874) acc=0.9651 (delta +0.0058) roc_auc=0.9894 (delta 0.0069) optimizer_steps=22 epoch_time=7.00s val_loss=0.116396 val_acc=0.9538 val_roc_auc=0.9852
+[Train][Epoch 11/20] loss=0.061416 (improve +0.021620) acc=0.9695 (delta +0.0044) roc_auc=0.9954 (delta 0.0059) optimizer_steps=22 epoch_time=7.21s val_loss=0.076222 val_acc=0.9769 val_roc_auc=0.9911
+[Train][Epoch 12/20] loss=0.044126 (improve +0.017290) acc=0.9811 (delta +0.0116) roc_auc=0.9972 (delta 0.0019) optimizer_steps=22 epoch_time=7.13s val_loss=0.089829 val_acc=0.9711 val_roc_auc=0.9923
+[Train][Epoch 13/20] loss=0.085395 (improve -0.041268) acc=0.9666 (delta -0.0145) roc_auc=0.9931 (delta -0.0041) optimizer_steps=22 epoch_time=7.07s val_loss=0.116796 val_acc=0.9769 val_roc_auc=0.9904
+[Train][Epoch 14/20] loss=0.118681 (improve -0.033287) acc=0.9564 (delta -0.0102) roc_auc=0.9892 (delta -0.0039) optimizer_steps=22 epoch_time=6.99s val_loss=0.080583 val_acc=0.9480 val_roc_auc=0.9887
+[Train][Epoch 15/20] loss=0.089616 (improve +0.029065) acc=0.9593 (delta +0.0029) roc_auc=0.9909 (delta 0.0017) optimizer_steps=22 epoch_time=6.98s val_loss=0.072959 val_acc=0.9480 val_roc_auc=0.9904
+[Train][Epoch 16/20] loss=0.051108 (improve +0.038508) acc=0.9738 (delta +0.0145) roc_auc=0.9969 (delta 0.0060) optimizer_steps=22 epoch_time=6.89s val_loss=0.098331 val_acc=0.9769 val_roc_auc=0.9916
+[Train][Epoch 17/20] loss=0.032740 (improve +0.018368) acc=0.9840 (delta +0.0102) roc_auc=0.9983 (delta 0.0013) optimizer_steps=22 epoch_time=6.82s val_loss=0.138845 val_acc=0.9653 val_roc_auc=0.9926
+[Train][Epoch 18/20] loss=0.042109 (improve -0.009368) acc=0.9855 (delta +0.0015) roc_auc=0.9976 (delta -0.0007) optimizer_steps=22 epoch_time=6.92s val_loss=0.115510 val_acc=0.9769 val_roc_auc=0.9919
+[Train][Epoch 19/20] loss=0.088337 (improve -0.046228) acc=0.9709 (delta -0.0145) roc_auc=0.9947 (delta -0.0029) optimizer_steps=22 epoch_time=6.94s val_loss=0.160536 val_acc=0.9711 val_roc_auc=0.9928
+[Train][Epoch 20/20] loss=0.062448 (improve +0.025889) acc=0.9724 (delta +0.0015) roc_auc=0.9955 (delta 0.0009) optimizer_steps=22 epoch_time=7.03s val_loss=0.063200 val_acc=0.9595 val_roc_auc=0.9926
+[Train] restored best model from epoch 20 (val_loss=0.063200)
+  seizure 1_04_0: n_test=650 preictal=30  hit=True (smoothed=True)  FAR/h=18.581 (smoothed=11.806)  precision=0.213 recall=0.867 f1=0.342
+  Subsampled negative windows: 3380 -> 704 (target ratio 5.0:1, 143 positive kept in full)
+[Train] validation split: 170/847 samples.
+[Train] class weights: [0.33677992 1.66322   ]
+[Train] start epochs=20 batches/epoch=22 batch_size=32 optimizer_step_batch_size=32 optimizer_step_batch_mode=credit device=mps
+[Train][Epoch 1/20] loss=0.673767 (improve +0.000000) acc=0.7223 (delta +0.0000) roc_auc=0.6092 (delta n/a) optimizer_steps=22 epoch_time=7.64s val_loss=0.575698 val_acc=0.8294 val_roc_auc=0.7831
+[Train][Epoch 2/20] loss=0.528198 (improve +0.145569) acc=0.7253 (delta +0.0030) roc_auc=0.7869 (delta 0.1777) optimizer_steps=22 epoch_time=7.04s val_loss=0.317255 val_acc=0.7000 val_roc_auc=0.8733
+[Train][Epoch 3/20] loss=0.301401 (improve +0.226797) acc=0.8095 (delta +0.0842) roc_auc=0.9305 (delta 0.1436) optimizer_steps=22 epoch_time=6.82s val_loss=0.299915 val_acc=0.9000 val_roc_auc=0.9802
+[Train][Epoch 4/20] loss=0.314984 (improve -0.013583) acc=0.8434 (delta +0.0340) roc_auc=0.9393 (delta 0.0088) optimizer_steps=22 epoch_time=6.85s val_loss=0.162362 val_acc=0.8882 val_roc_auc=0.9782
+[Train][Epoch 5/20] loss=0.180264 (improve +0.134720) acc=0.9276 (delta +0.0842) roc_auc=0.9751 (delta 0.0358) optimizer_steps=22 epoch_time=6.94s val_loss=0.075126 val_acc=0.9412 val_roc_auc=0.9846
+[Train][Epoch 6/20] loss=0.181414 (improve -0.001150) acc=0.9409 (delta +0.0133) roc_auc=0.9821 (delta 0.0070) optimizer_steps=22 epoch_time=6.97s val_loss=0.069934 val_acc=0.9765 val_roc_auc=0.9885
+[Train][Epoch 7/20] loss=0.140036 (improve +0.041378) acc=0.9365 (delta -0.0044) roc_auc=0.9865 (delta 0.0044) optimizer_steps=22 epoch_time=6.84s val_loss=0.067574 val_acc=0.9706 val_roc_auc=0.9888
+[Train][Epoch 8/20] loss=0.083178 (improve +0.056858) acc=0.9764 (delta +0.0399) roc_auc=0.9907 (delta 0.0042) optimizer_steps=22 epoch_time=6.83s val_loss=0.082803 val_acc=0.9529 val_roc_auc=0.9917
+[Train][Epoch 9/20] loss=0.146704 (improve -0.063526) acc=0.9527 (delta -0.0236) roc_auc=0.9819 (delta -0.0088) optimizer_steps=22 epoch_time=6.84s val_loss=0.069273 val_acc=0.9471 val_roc_auc=0.9902
+[Train][Epoch 10/20] loss=0.080018 (improve +0.066686) acc=0.9749 (delta +0.0222) roc_auc=0.9904 (delta 0.0085) optimizer_steps=22 epoch_time=6.86s val_loss=0.058407 val_acc=0.9588 val_roc_auc=0.9917
+[Train][Epoch 11/20] loss=0.082935 (improve -0.002917) acc=0.9705 (delta -0.0044) roc_auc=0.9913 (delta 0.0009) optimizer_steps=22 epoch_time=6.82s val_loss=0.048537 val_acc=0.9706 val_roc_auc=0.9934
+[Train][Epoch 12/20] loss=0.086993 (improve -0.004058) acc=0.9749 (delta +0.0044) roc_auc=0.9885 (delta -0.0028) optimizer_steps=22 epoch_time=6.81s val_loss=0.054169 val_acc=0.9706 val_roc_auc=0.9932
+[Train][Epoch 13/20] loss=0.057218 (improve +0.029775) acc=0.9867 (delta +0.0118) roc_auc=0.9922 (delta 0.0037) optimizer_steps=22 epoch_time=6.75s val_loss=0.042380 val_acc=0.9765 val_roc_auc=0.9954
+[Train][Epoch 14/20] loss=0.047664 (improve +0.009554) acc=0.9867 (delta +0.0000) roc_auc=0.9930 (delta 0.0008) optimizer_steps=22 epoch_time=6.80s val_loss=0.042696 val_acc=0.9706 val_roc_auc=0.9963
+[Train][Epoch 15/20] loss=0.048016 (improve -0.000352) acc=0.9882 (delta +0.0015) roc_auc=0.9940 (delta 0.0009) optimizer_steps=22 epoch_time=6.80s val_loss=0.049730 val_acc=0.9706 val_roc_auc=0.9971
+[Train][Epoch 16/20] loss=0.036610 (improve +0.011406) acc=0.9867 (delta -0.0015) roc_auc=0.9952 (delta 0.0012) optimizer_steps=22 epoch_time=6.82s val_loss=0.039063 val_acc=0.9765 val_roc_auc=0.9978
+[Train][Epoch 17/20] loss=0.089251 (improve -0.052641) acc=0.9660 (delta -0.0207) roc_auc=0.9926 (delta -0.0026) optimizer_steps=22 epoch_time=6.82s val_loss=0.111252 val_acc=0.9765 val_roc_auc=0.9973
+[Train][Epoch 18/20] loss=0.087645 (improve +0.001606) acc=0.9690 (delta +0.0030) roc_auc=0.9918 (delta -0.0008) optimizer_steps=22 epoch_time=6.77s val_loss=0.069771 val_acc=0.9353 val_roc_auc=0.9956
+[Train][Epoch 19/20] loss=0.051717 (improve +0.035928) acc=0.9808 (delta +0.0118) roc_auc=0.9953 (delta 0.0035) optimizer_steps=22 epoch_time=6.80s val_loss=0.055441 val_acc=0.9706 val_roc_auc=0.9963
+[Train][Epoch 20/20] loss=0.188855 (improve -0.137138) acc=0.9232 (delta -0.0576) roc_auc=0.9719 (delta -0.0234) optimizer_steps=22 epoch_time=6.75s val_loss=0.107664 val_acc=0.9118 val_roc_auc=0.9956
+[Train] restored best model from epoch 16 (val_loss=0.039063)
+  seizure 1_15_0: n_test=718 preictal=30  hit=True (smoothed=False)  FAR/h=4.360 (smoothed=1.047)  precision=0.107 recall=0.100 f1=0.103
+  Subsampled negative windows: 3348 -> 753 (target ratio 5.0:1, 150 positive kept in full)
+[Train] validation split: 181/903 samples.
+[Train] class weights: [0.33240998 1.66759   ]
+[Train] start epochs=20 batches/epoch=23 batch_size=32 optimizer_step_batch_size=32 optimizer_step_batch_mode=credit device=mps
+[Train][Epoch 1/20] loss=0.680894 (improve +0.000000) acc=0.7881 (delta +0.0000) roc_auc=0.6274 (delta n/a) optimizer_steps=23 epoch_time=7.52s val_loss=0.588936 val_acc=0.8343 val_roc_auc=0.8300
+[Train][Epoch 2/20] loss=0.506957 (improve +0.173937) acc=0.7327 (delta -0.0554) roc_auc=0.8290 (delta 0.2015) optimizer_steps=23 epoch_time=7.49s val_loss=0.267030 val_acc=0.8287 val_roc_auc=0.9265
+[Train][Epoch 3/20] loss=0.308623 (improve +0.198334) acc=0.8407 (delta +0.1080) roc_auc=0.9350 (delta 0.1061) optimizer_steps=23 epoch_time=7.31s val_loss=0.148676 val_acc=0.8950 val_roc_auc=0.9717
+[Train][Epoch 4/20] loss=0.168281 (improve +0.140342) acc=0.9363 (delta +0.0956) roc_auc=0.9691 (delta 0.0341) optimizer_steps=23 epoch_time=7.16s val_loss=0.107323 val_acc=0.9282 val_roc_auc=0.9757
+[Train][Epoch 5/20] loss=0.149181 (improve +0.019101) acc=0.9404 (delta +0.0042) roc_auc=0.9771 (delta 0.0080) optimizer_steps=23 epoch_time=7.13s val_loss=0.128623 val_acc=0.8785 val_roc_auc=0.9812
+[Train][Epoch 6/20] loss=0.131256 (improve +0.017924) acc=0.9432 (delta +0.0028) roc_auc=0.9807 (delta 0.0036) optimizer_steps=23 epoch_time=7.14s val_loss=0.131725 val_acc=0.9061 val_roc_auc=0.9790
+[Train][Epoch 7/20] loss=0.129853 (improve +0.001403) acc=0.9488 (delta +0.0055) roc_auc=0.9799 (delta -0.0008) optimizer_steps=23 epoch_time=7.09s val_loss=0.093763 val_acc=0.9282 val_roc_auc=0.9808
+[Train][Epoch 8/20] loss=0.110323 (improve +0.019531) acc=0.9529 (delta +0.0042) roc_auc=0.9826 (delta 0.0026) optimizer_steps=23 epoch_time=7.22s val_loss=0.088252 val_acc=0.9337 val_roc_auc=0.9826
+[Train][Epoch 9/20] loss=0.098541 (improve +0.011782) acc=0.9557 (delta +0.0028) roc_auc=0.9862 (delta 0.0036) optimizer_steps=23 epoch_time=7.26s val_loss=0.070398 val_acc=0.9558 val_roc_auc=0.9845
+[Train][Epoch 10/20] loss=0.102474 (improve -0.003933) acc=0.9571 (delta +0.0014) roc_auc=0.9861 (delta -0.0001) optimizer_steps=23 epoch_time=7.21s val_loss=0.067745 val_acc=0.9558 val_roc_auc=0.9843
+[Train][Epoch 11/20] loss=0.112506 (improve -0.010032) acc=0.9529 (delta -0.0042) roc_auc=0.9844 (delta -0.0017) optimizer_steps=23 epoch_time=7.25s val_loss=0.080136 val_acc=0.9448 val_roc_auc=0.9839
+[Train][Epoch 12/20] loss=0.109036 (improve +0.003470) acc=0.9501 (delta -0.0028) roc_auc=0.9859 (delta 0.0015) optimizer_steps=23 epoch_time=7.19s val_loss=0.199644 val_acc=0.9558 val_roc_auc=0.9872
+[Train][Epoch 13/20] loss=0.168143 (improve -0.059106) acc=0.9294 (delta -0.0208) roc_auc=0.9728 (delta -0.0131) optimizer_steps=23 epoch_time=7.22s val_loss=0.071539 val_acc=0.9558 val_roc_auc=0.9804
+[Train][Epoch 14/20] loss=0.101860 (improve +0.066283) acc=0.9598 (delta +0.0305) roc_auc=0.9843 (delta 0.0115) optimizer_steps=23 epoch_time=7.15s val_loss=0.071964 val_acc=0.9503 val_roc_auc=0.9837
+[Train][Epoch 15/20] loss=0.115383 (improve -0.013524) acc=0.9446 (delta -0.0152) roc_auc=0.9844 (delta 0.0001) optimizer_steps=23 epoch_time=7.17s val_loss=0.084812 val_acc=0.9613 val_roc_auc=0.9874
+[Train] early stopping at epoch 15; best epoch=10 best_val_loss=0.067745
+[Train] restored best model from epoch 10 (val_loss=0.067745)
+  seizure 1_16_0: n_test=743 preictal=23  hit=True (smoothed=True)  FAR/h=0.167 (smoothed=0.000)  precision=0.958 recall=1.000 f1=0.979
+  Subsampled negative windows: 3348 -> 725 (target ratio 5.0:1, 143 positive kept in full)
+[Train] validation split: 174/868 samples.
+[Train] class weights: [0.32853025 1.6714697 ]
+[Train] start epochs=20 batches/epoch=22 batch_size=32 optimizer_step_batch_size=32 optimizer_step_batch_mode=credit device=mps
+[Train][Epoch 1/20] loss=0.660623 (improve +0.000000) acc=0.4712 (delta +0.0000) roc_auc=0.6975 (delta n/a) optimizer_steps=22 epoch_time=10.21s val_loss=0.579850 val_acc=0.7356 val_roc_auc=0.9270
+[Train][Epoch 2/20] loss=0.446893 (improve +0.213731) acc=0.7594 (delta +0.2882) roc_auc=0.8945 (delta 0.1970) optimizer_steps=22 epoch_time=7.18s val_loss=0.264547 val_acc=0.8218 val_roc_auc=0.9436
+[Train][Epoch 3/20] loss=0.274814 (improve +0.172079) acc=0.8732 (delta +0.1138) roc_auc=0.9505 (delta 0.0560) optimizer_steps=22 epoch_time=7.16s val_loss=0.169478 val_acc=0.9368 val_roc_auc=0.9688
+[Train][Epoch 4/20] loss=0.184999 (improve +0.089814) acc=0.9251 (delta +0.0519) roc_auc=0.9724 (delta 0.0219) optimizer_steps=22 epoch_time=7.08s val_loss=0.127780 val_acc=0.9080 val_roc_auc=0.9924
+[Train][Epoch 5/20] loss=0.199043 (improve -0.014043) acc=0.9294 (delta +0.0043) roc_auc=0.9674 (delta -0.0050) optimizer_steps=22 epoch_time=7.02s val_loss=0.076466 val_acc=0.9598 val_roc_auc=0.9926
+[Train][Epoch 6/20] loss=0.126430 (improve +0.072613) acc=0.9568 (delta +0.0274) roc_auc=0.9833 (delta 0.0159) optimizer_steps=22 epoch_time=6.97s val_loss=0.063911 val_acc=0.9598 val_roc_auc=0.9926

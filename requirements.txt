@@ -48,6 +48,11 @@ h11==0.16.0
 h5py==3.14.0
 httptools==0.7.1
 idna==3.11
+# 2026-08-25: SlimSeiz stage 1 (Epilepsy/pipelines/slimseiz_channel_select.py)
+# -- SMOTE, for the same PCA+SMOTE+DecisionTree per-channel scoring the
+# upstream repo's channel-selection notebook uses. Only depends on
+# scikit-learn/numpy/scipy, all already pinned above.
+imbalanced-learn==0.14.2
 importlib_resources==6.5.2
 iniconfig==2.3.0
 Jinja2==3.1.6
@@ -106,6 +111,8 @@ scikit-learn==1.9.0
 scipy==1.13.1
 seaborn==0.12.2
 six==1.17.0
+# sklearn-compat: transitive dep of imbalanced-learn (see above).
+sklearn-compat==0.1.6
 starlette==0.49.3
 sympy==1.14.0
 threadpoolctl==3.6.0

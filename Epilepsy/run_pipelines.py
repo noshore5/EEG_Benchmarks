@@ -157,6 +157,33 @@ def resolve_disable_disk_cache(device, explicit: bool | None) -> bool:
 
 DEFAULT_SUBJECTS = [1]
 
+# chb01's 23-channel double-banana bipolar montage, in the order
+# mne.io.read_raw_edf returns it for every chb01_*.edf file this repo's
+# CHBMIT dataset class loads (confirmed 2026-08-25 by reading
+# chb01_01.edf's raw.ch_names directly -- datasets/epilepsy/chb_mit.py does
+# no picking/reordering, so this is exactly what every fold's X channel
+# axis is ordered by). Index 14 ("T8-P8-0") and 22 ("T8-P8-1") are the
+# file's own duplicate-gain pair for the same physical derivation -- kept
+# here as-is since --slimseiz-fixed-channels resolves against this exact
+# list, not a deduplicated one. Only used to turn channel *names* (e.g. the
+# SlimSeiz paper's own fixed montage, see slimseiz_classifier.py's "FIXED
+# CHANNELS" docstring section) into indices for
+# channel_select_fixed_indices; nothing else in this file depends on it.
+CHB01_CHANNEL_NAMES = [
+    "FP1-F7", "F7-T7", "T7-P7", "P7-O1", "FP1-F3", "F3-C3", "C3-P3", "P3-O1",
+    "FP2-F4", "F4-C4", "C4-P4", "P4-O2", "FP2-F8", "F8-T8", "T8-P8-0", "P8-O2",
+    "FZ-CZ", "CZ-PZ", "P7-T7", "T7-FT9", "FT9-FT10", "FT10-T8", "T8-P8-1",
+]
+
+# The SlimSeiz paper's own fixed 8-channel montage, per the upstream repo's
+# Common_channesl.ipynb (github.com/guoruilu/SlimSeiz, not vendored here --
+# see slimseiz_classifier.py's "FIXED CHANNELS" docstring section for how
+# this was derived and the 2026-08-25 session notes for the full notebook
+# dump). Default value for --slimseiz-fixed-channels.
+SLIMSEIZ_PAPER_FIXED_CHANNELS = [
+    "P3-O1", "P8-O2", "C3-P3", "C4-P4", "FZ-CZ", "P4-O2", "CZ-PZ", "F3-C3",
+]
+
 # label_mode="prediction" defaults (task: add SPH/SOP as configurable
 # parameters). Starting points, not tuned -- see
 # paradigms.continuous_labeling.ContinuousLabelingParadigm's docstring for
@@ -527,8 +554,46 @@ TRUONG_STFT_CNN_PARAMS: dict[str, object] = dict(
 # learning_rate are split into separate detection/prediction dicts below
 # (not read off the shared dict) for the same "tuning one label_mode's
 # training dynamics must not silently move the other's" reasoning
-# DENSE_EDGE_GRU_PARAMS/PREDICTION_GRU_PARAMS already follow. All starting
-# points, not tuned.
+# DENSE_EDGE_GRU_PARAMS/PREDICTION_GRU_PARAMS already follow.
+#
+# 2026-08-25: this is meant as an off-the-shelf-architecture baseline, not a
+# tuned config -- see this repo's own CHB-MIT leave-one-seizure-out protocol
+# (no paper-reported number covers it: DBConformer's own seizure-detection
+# results are on their CHSZ/NICU datasets, not CHB-MIT, and their LOSO script
+# is leave-one-*subject*-out on MI/ERP data, not this). epochs (20,
+# DEFAULT_PREDICTION_EPOCHS via DBConformerClassifier's own default),
+# use_class_weights, and normalize_input (global z-score, not the authors'
+# Euclidean Alignment) are deliberately left matching every OTHER pipeline in
+# this file instead of the paper -- the point of this baseline is "same
+# protocol as our own models, does the architecture hold up", not a literal
+# paper reproduction (and the paper's max_epoch=100 is denominated in
+# cross-subject-transfer source-loader iterations, not comparable to a
+# single-subject/early-stopped training run anyway).
+#
+# tem_depth/chn_depth: tried 6 (the authors' own DBConformer_LOSO.py MI
+# default for every dataset except two BNCI ones that get 2) on this
+# repo's 6-fold chb01 LOSO -- it REGRESSED every metric vs. depth=5
+# (prediction_leave_one_seizure_out_20260825-200637.csv: precision
+# 0.273->0.159, AP 0.442->0.290, hit rate 6/6->4/6), consistent with more
+# transformer capacity overfitting a ~3.5k-window-per-fold single-subject
+# dataset the paper's own default was never calibrated for. Also tried 3
+# (prediction_leave_one_seizure_out_20260825-203614.csv) -- also worse
+# than 5 (AP 0.442->0.355, f1 0.366->0.325, hit rate 5/6->4/6 smoothed),
+# so 5 isn't just "less capacity is better" either -- it's a local optimum
+# among {3, 5, 6}, not one end of a monotonic trend. Kept at 5 -- not the
+# paper's number, but the empirically best of the three tried on this
+# task, and the one this baseline is reported at. See
+# Session_notes/2026_08_25/dbconformer_baseline_runs.md for the full
+# writeup.
+#
+# use_class_weights: also tried False at depth=5 as a diagnostic
+# (prediction_leave_one_seizure_out_20260825-202350.csv, vs. 175207's
+# True) -- precision did improve (0.273->0.322) as the low-precision/
+# high-recall pattern predicted, but AP fell (0.442->0.379), f1 fell
+# (0.366->0.293), and the k-of-n smoothed hit rate dropped from 5/6 to
+# 3/6. Net worse on the metrics that matter most for this task, not a
+# fix -- kept True, both because it matches GRU/Mamba's protocol and
+# because it's the better-performing setting here regardless.
 _DBCONFORMER_SHARED_PARAMS: dict[str, object] = dict(
     seed=42,
     device="mps",
@@ -618,11 +683,15 @@ def _raw_classifier_family_result_dir(
     return root / "shuffled_control" if shuffle_labels else root
 
 
-def _apply_raw_classifier_cli_overrides(clf_params: dict, args: argparse.Namespace) -> None:
+def _apply_raw_classifier_cli_overrides(
+    clf_params: dict, args: argparse.Namespace, pipeline: str | None = None
+) -> None:
     """Overlay run_pipelines CLI flags onto a dbconformer/slimseiz param
     dict in place -- the subset of `_apply_dense_family_cli_overrides` that
     actually applies to this family (no channel_subset_k/cwt_encoder/mamba/
-    precompute/amp flags -- these classifiers have none of those params)."""
+    precompute/amp flags -- these classifiers have none of those params).
+    `pipeline` gates the slimseiz-only stage-1 channel-selection flags
+    below -- dbconformer's classifier has no such params."""
     clf_params["seed"] = args.seed
     clf_params["device"] = args.device
     if args.verbose is not None:
@@ -631,6 +700,32 @@ def _apply_raw_classifier_cli_overrides(clf_params: dict, args: argparse.Namespa
         clf_params["validation_split"] = args.validation_split
     if args.early_stopping_patience is not None:
         clf_params["early_stopping_patience"] = args.early_stopping_patience
+    if pipeline == "slimseiz":
+        if args.slimseiz_select_channels is not None:
+            clf_params["select_channels"] = args.slimseiz_select_channels
+        if args.slimseiz_n_channels is not None:
+            clf_params["n_select_channels"] = args.slimseiz_n_channels
+        if args.slimseiz_channel_select_max_samples is not None:
+            clf_params["channel_select_max_samples"] = args.slimseiz_channel_select_max_samples
+        if args.slimseiz_fixed_channels is not None:
+            names = args.slimseiz_fixed_channels or SLIMSEIZ_PAPER_FIXED_CHANNELS
+            if args.subjects != [1]:
+                raise ValueError(
+                    "--slimseiz-fixed-channels resolves names against "
+                    "CHB01_CHANNEL_NAMES (chb01 only) -- got --subjects "
+                    f"{args.subjects}. Extend CHB01_CHANNEL_NAMES to a "
+                    "per-subject lookup before using this flag on other "
+                    "subjects."
+                )
+            missing = [n for n in names if n not in CHB01_CHANNEL_NAMES]
+            if missing:
+                raise ValueError(
+                    f"--slimseiz-fixed-channels names not found in "
+                    f"CHB01_CHANNEL_NAMES: {missing}."
+                )
+            clf_params["channel_select_fixed_indices"] = [
+                CHB01_CHANNEL_NAMES.index(n) for n in names
+            ]
 
 
 def _build_windowed_dataset(
@@ -1694,8 +1789,12 @@ def _build_argument_parser() -> argparse.ArgumentParser:
             "state-space) block over raw windows, also no CWT/STFT preprocessing (see "
             "Epilepsy/pipelines/slimseiz_classifier.py's module docstring; its Mamba block "
             "is a self-contained sequential-scan implementation, not this repo's own "
-            "mambapy-based dense_edge_mamba). Respects --label-mode; results go under "
-            "results/slimseiz/."
+            "mambapy-based dense_edge_mamba). Also runs the paper's stage-1 adaptive "
+            "channel selection by default inside every LOSO fold (see "
+            "--slimseiz-select-channels / --slimseiz-n-channels and "
+            "slimseiz_channel_select.py) -- the condition the paper's SOTA numbers are "
+            "reported under; earlier runs before 2026-08-25 fed the full montage instead. "
+            "Respects --label-mode; results go under results/slimseiz/."
         ),
     )
     parser.add_argument(
@@ -1933,6 +2032,77 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         default="abs_cosine",
         choices=["abs_cosine"],
         help="Cheap affinity used to rank channels when --channel-subset-k is set.",
+    )
+    parser.add_argument(
+        "--slimseiz-select-channels",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "--pipeline=slimseiz only: run the paper's stage-1 channel "
+            "selection (PCA+SMOTE+DecisionTree per-channel scoring, see "
+            "slimseiz_channel_select.py) inside every LOSO fold's fit(), "
+            "using only that fold's training windows, then feed "
+            "SlimSeiz's stage-2 network just the selected channels -- the "
+            "condition the paper's 94.8%%/95.5%%/94.0%% numbers are reported "
+            "under. On by default (SlimSeizClassifier's own default). "
+            "--no-slimseiz-select-channels falls back to the full montage "
+            "(this repo's pre-2026-08-25 behavior for this pipeline)."
+        ),
+    )
+    parser.add_argument(
+        "--slimseiz-n-channels",
+        type=int,
+        default=None,
+        help=(
+            "--pipeline=slimseiz only: how many channels stage-1 selects "
+            "(no-op if --no-slimseiz-select-channels). Unset: "
+            "SlimSeizClassifier's own default (8, matching the paper's "
+            "headline-number condition)."
+        ),
+    )
+    parser.add_argument(
+        "--slimseiz-channel-select-max-samples",
+        type=int,
+        default=None,
+        help=(
+            "--pipeline=slimseiz only: cap on how many of the fold's "
+            "training windows stage-1 channel selection looks at (one "
+            "stratified subsample drawn up front, reused across every "
+            "iteration/channel; no-op if --no-slimseiz-select-channels). "
+            "Unset: SlimSeizClassifier's own default (1000). This stage "
+            "running uncapped on a full non-smoke LOSO fold (thousands of "
+            "windows) was implicated in a real crash of the machine "
+            "running it -- see CONTEXT.md's 'Known gotchas'. Raising this "
+            "well above 1000 (or passing select_channels_max_samples=None "
+            "in code) restores that uncapped, crash-implicated behavior --"
+            " don't, on a memory-constrained machine, without re-verifying "
+            "safety first."
+        ),
+    )
+    parser.add_argument(
+        "--slimseiz-fixed-channels",
+        nargs="*",
+        default=None,
+        metavar="CHANNEL_NAME",
+        help=(
+            "--pipeline=slimseiz only: skip stage 1 (no PCA/SMOTE/"
+            "DecisionTree call at all) and feed stage 2 exactly these "
+            "channels, by name, resolved against CHB01_CHANNEL_NAMES "
+            "(chb01-only right now -- errors if --subjects isn't [1]). "
+            "Overrides --slimseiz-select-channels/--slimseiz-n-channels "
+            "entirely when given. Pass with no names to use "
+            "SLIMSEIZ_PAPER_FIXED_CHANNELS, the upstream repo's own fixed "
+            "8-channel montage (P3-O1, P8-O2, C3-P3, C4-P4, FZ-CZ, P4-O2, "
+            "CZ-PZ, F3-C3 -- read from Common_channesl.ipynb, see "
+            "slimseiz_classifier.py's 'FIXED CHANNELS' docstring section "
+            "for how this was derived and the 2026-08-25 session notes for "
+            "the full notebook dump) -- the closest reproduction available "
+            "of the condition the paper's headline numbers are reported "
+            "under, and directly comparable to this repo's own selected-"
+            "channel runs since it bypasses the same stage. Unset "
+            "(default): stage 1 runs normally per --slimseiz-select-"
+            "channels."
+        ),
     )
     parser.add_argument(
         "--dense-edge-amp-bf16",
@@ -2199,7 +2369,7 @@ def main(args: argparse.Namespace) -> None:
 
         if label_mode == "prediction":
             clf_params = dict(_raw_classifier_family_params(pipeline, "prediction"))
-            _apply_raw_classifier_cli_overrides(clf_params, args)
+            _apply_raw_classifier_cli_overrides(clf_params, args, pipeline=pipeline)
 
             print(
                 f"Running leave-one-seizure-out prediction (pipeline={pipeline}, epochs={epochs}, "
@@ -2244,7 +2414,7 @@ def main(args: argparse.Namespace) -> None:
             print(f"event-level hit rate (k-of-n): {n_hits_smoothed}/{n_seizures} ({100 * n_hits_smoothed / n_seizures:.1f}%)")
         else:
             clf_params = dict(_raw_classifier_family_params(pipeline, "detection"))
-            _apply_raw_classifier_cli_overrides(clf_params, args)
+            _apply_raw_classifier_cli_overrides(clf_params, args, pipeline=pipeline)
 
             print(
                 f"Running leave-one-seizure-out detection (pipeline={pipeline}, epochs={epochs}, "

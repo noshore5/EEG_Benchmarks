@@ -42,12 +42,49 @@ ADAPTATIONS made when vendoring into this file:
 Everything else (the conv1/conv2_1+conv2_2/conv4_1+conv4_2 stem, the single
 MambaBlock temporal mixer, RMSNorm, the adaptive-pool + linear head) is the
 authors' original architecture, unmodified.
+
+STAGE 1 -- CHANNEL SELECTION (added 2026-08-25): the paper's headline
+numbers (94.8% accuracy / 95.5% sensitivity / 94.0% specificity on
+CHB-MIT) are for this network fed an *adaptively selected* 8-of-22 channel
+subset, not the full montage -- that selection is a separate stage in the
+upstream repo (``Loop_select_ch_PCA_SMOTE_DT.ipynb``), not part of this
+vendored model file. Every SlimSeiz run in this repo before this date fed
+the network the full 23-channel chb01 montage, which is a different (and
+weaker-performing, per the 2026-08-25 session comparison) condition than
+what "SlimSeiz" refers to in the paper. `SlimSeizClassifier` now runs that
+selection itself -- see `slimseiz_channel_select.py` for the ported
+algorithm and its documented deviations from the notebook -- inside each
+call to `fit()`, using only the windows passed to that call (so under this
+repo's LOSO evaluation, only the fold's training seizures ever inform
+which channels get selected for that fold; the held-out seizure never
+does). Toggle with `select_channels=False` to fall back to the full
+montage (the old behavior).
+
+FIXED CHANNELS (added 2026-08-25): the upstream repo's own
+``Common_channesl.ipynb`` (fetched from github.com/guoruilu/SlimSeiz, not
+vendored as a file here) runs the per-patient stage-1 selection across all
+24 CHB-MIT patients, then tallies which channels land in each patient's
+own top-8 most often cohort-wide. The 8 that come out on top --
+``P3-O1, P8-O2, C3-P3, C4-P4, FZ-CZ, P4-O2, CZ-PZ, F3-C3`` (counts 18, 18,
+18, 17, 17, 17, 15, 14 out of 24 patients) -- read like a single fixed
+montage used for the paper's headline numbers, not a genuinely per-patient
+adaptive one; for chb01 specifically the notebook's own per-patient top-8
+overlaps this set in 7 of 8 channels (missing only F3-C3). Pass
+`channel_select_fixed_indices` to reproduce that fixed set exactly instead
+of re-deriving channels from this repo's own PCA+SMOTE+DecisionTree port
+each fold -- it bypasses stage 1 entirely (no PCA/SMOTE/DecisionTree call
+at all, so none of that stage's memory profile applies), just slices `X`
+to the given channel indices before stage 2. `select_channels` is ignored
+when this is set. Resolving the 8 fixed *names* above to CHB-MIT channel
+*indices* is the caller's job (channel order isn't visible from inside
+this classifier) -- see run_pipelines.py's `--slimseiz-fixed-channels`.
 """
 
 from __future__ import annotations
 
 import math
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -210,9 +247,21 @@ class SlimSeiz(nn.Module):
 
 
 try:
-    from Epilepsy.pipelines.common import TorchEEGClassifier, apply_global_zscore, fit_global_zscore_stats
+    from Epilepsy.pipelines.common import (
+        TorchEEGClassifier,
+        apply_global_zscore,
+        fit_global_zscore_stats,
+        validate_eeg_X,
+    )
+    from Epilepsy.pipelines.slimseiz_channel_select import select_slimseiz_channels
 except ModuleNotFoundError:
-    from pipelines.common import TorchEEGClassifier, apply_global_zscore, fit_global_zscore_stats
+    from pipelines.common import (
+        TorchEEGClassifier,
+        apply_global_zscore,
+        fit_global_zscore_stats,
+        validate_eeg_X,
+    )
+    from pipelines.slimseiz_channel_select import select_slimseiz_channels
 
 
 class SlimSeizClassifier(TorchEEGClassifier):
@@ -241,11 +290,34 @@ class SlimSeizClassifier(TorchEEGClassifier):
         seed: int = 42,
         use_class_weights: bool = True,
         verbose: int = 0,
+        select_channels: bool = True,
+        n_select_channels: int = 8,
+        channel_select_iterations: int = 30,
+        channel_select_pca_components: int = 60,
+        channel_select_test_size: float = 0.3,
+        channel_select_max_samples: int | None = 1000,
+        channel_select_fixed_indices: list[int] | None = None,
     ) -> None:
         self.normalize_input = normalize_input
 
         self.X_mean_: float | None = None
         self.X_std_: float | None = None
+
+        # Stage 1 (see this module's docstring and slimseiz_channel_select.py):
+        # select_channels=True (default) reproduces the paper's adaptive
+        # channel-selection condition its SOTA numbers are reported under,
+        # re-run inside every fit() call on that call's own training
+        # windows only. select_channels=False keeps the pre-2026-08-25
+        # behavior (full montage, no selection) for anyone who wants that
+        # comparison point.
+        self.select_channels = select_channels
+        self.n_select_channels = n_select_channels
+        self.channel_select_iterations = channel_select_iterations
+        self.channel_select_pca_components = channel_select_pca_components
+        self.channel_select_test_size = channel_select_test_size
+        self.channel_select_max_samples = channel_select_max_samples
+        self.channel_select_fixed_indices = channel_select_fixed_indices
+        self.selected_channel_idx_: np.ndarray | None = None
 
         self._init_torch_classifier(
             epochs=epochs,
@@ -262,7 +334,49 @@ class SlimSeizClassifier(TorchEEGClassifier):
             verbose=verbose,
         )
 
+    def fit(self, X, y, validation_groups=None, metadata=None):
+        """Stage 1 (channel selection) runs here, before TorchEEGClassifier's
+        shared fit() logic -- see this module's docstring. `X`/`y` at this
+        point are exactly what the caller passed in (this repo's LOSO loop
+        calls fit() once per fold with that fold's training seizures only,
+        the held-out seizure never included), so selection never sees the
+        held-out seizure's windows."""
+        X = validate_eeg_X(X)
+        if self.channel_select_fixed_indices is not None:
+            # Bypasses stage 1 (select_slimseiz_channels) entirely -- see
+            # this module's "FIXED CHANNELS" docstring section. No PCA/
+            # SMOTE/DecisionTree call happens on this path at all.
+            n_channels = X.shape[1]
+            out_of_range = [
+                i for i in self.channel_select_fixed_indices if i < 0 or i >= n_channels
+            ]
+            if out_of_range:
+                raise ValueError(
+                    f"channel_select_fixed_indices out of range for "
+                    f"{n_channels} channels: {out_of_range}."
+                )
+            self.selected_channel_idx_ = np.asarray(
+                self.channel_select_fixed_indices, dtype=int
+            )
+        elif self.select_channels:
+            self.selected_channel_idx_ = select_slimseiz_channels(
+                X,
+                y,
+                n_select=self.n_select_channels,
+                n_iterations=self.channel_select_iterations,
+                pca_components=self.channel_select_pca_components,
+                test_size=self.channel_select_test_size,
+                seed=self.seed,
+                verbose=self.verbose,
+                max_samples=self.channel_select_max_samples,
+            )
+        else:
+            self.selected_channel_idx_ = None
+        return super().fit(X, y, validation_groups=validation_groups, metadata=metadata)
+
     def _prepare_features(self, X, *, fit: bool, train_idx=None):
+        if self.selected_channel_idx_ is not None:
+            X = X[:, self.selected_channel_idx_, :]
         if not self.normalize_input:
             return X
         if fit:
