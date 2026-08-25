@@ -130,6 +130,28 @@ class ContinuousLabelingParadigm:
         Optional bandpass filter applied to each Raw before windowing.
     resample : float | None
         Optional resample rate (Hz) applied to each Raw before windowing.
+    return_continuous_raw : bool (default False)
+        2026-08-25: opt-in plumbing for the continuous-CWT plan (see
+        Epilepsy/Session_notes/2026_08_25/continuous_cwt_plan_and_mamba_state_design.md
+        and Epilepsy/pipelines/continuous_cwt.py). When True, `get_data`
+        returns a 4th value: a dict of every processed recording's FULL
+        per-channel signal, keyed ``(subject, session, run)`` -- the exact
+        same ``raw_data`` array each recording's windows are sliced from
+        below, which this class would otherwise discard once windowing
+        that recording is done. `False` (default) reproduces this class's
+        exact prior behavior and return arity -- no existing caller is
+        affected by this param existing.
+
+        MEMORY: unlike the default path (one recording's raw_data alive at
+        a time, freed once its windows are extracted), this holds EVERY
+        processed recording's full signal at once -- e.g. chb01, 23
+        channels, ~3600s float64 => ~170MB/recording; label_mode=
+        "prediction" with all ~33 interictal recordings loaded => ~6GB+
+        just for this dict. Fine for the parity/validation work this exists
+        for right now (a handful of recordings); NOT yet paired with any
+        memory-bounded eviction strategy -- a real multi-subject training
+        run would need one (see the design doc's "what's NOT done" list)
+        before turning this on by default anywhere.
     """
 
     def __init__(
@@ -146,6 +168,7 @@ class ContinuousLabelingParadigm:
         fmin: Optional[float] = None,
         fmax: Optional[float] = None,
         resample: Optional[float] = None,
+        return_continuous_raw: bool = False,
     ):
         if window_length <= 0:
             raise ValueError("window_length must be > 0")
@@ -175,6 +198,7 @@ class ContinuousLabelingParadigm:
         self.fmin = fmin
         self.fmax = fmax
         self.resample = resample
+        self.return_continuous_raw = return_continuous_raw
 
     def _window_starts(self, duration: float) -> np.ndarray:
         """Start times (seconds) of every full window that fits in ``duration``."""
@@ -284,7 +308,7 @@ class ContinuousLabelingParadigm:
 
     def get_data(
         self, dataset: BaseDataset, subjects: Optional[List[int]] = None
-    ) -> Tuple[np.ndarray, np.ndarray, List[dict]]:
+    ):
         """Window every raw recording in ``dataset`` and label it per ``label_mode``.
 
         Parameters
@@ -316,12 +340,25 @@ class ContinuousLabelingParadigm:
             ``seizure_id`` (``None`` for negative windows), ``seizure_onset``,
             and ``seizure_offset`` (seconds, relative to that recording's
             start; ``None`` for negative windows).
+        continuous_raw : dict[(subject, session, run), (np.ndarray, float)], only if
+            ``return_continuous_raw=True`` (4th return value; omitted
+            entirely otherwise -- a 3-tuple, exactly as before this param
+            existed). Each value is ``(raw_data, sfreq)``: ``raw_data`` is
+            that recording's FULL ``[n_channels, n_time_full]`` signal
+            (same array, same ``dataset.unit_factor`` scaling, every window
+            below is sliced from), ``sfreq`` its sampling rate. A window
+            with metadata ``(subject, session, run, window_start)`` is
+            exactly ``raw_data[:, round(window_start*sfreq) : round(window_start*sfreq)+n_samples]``
+            -- see ``Epilepsy/pipelines/continuous_cwt.py`` for what this
+            unlocks (compute one CWT over ``raw_data``, slice per window,
+            instead of one independent CWT per window).
         """
         data = dataset.get_data(subjects=subjects)
 
         X_parts: List[np.ndarray] = []
         y_parts: List[int] = []
         metadata: List[dict] = []
+        continuous_raw: dict = {} if self.return_continuous_raw else None
 
         for subject, sessions in data.items():
             for session, runs in sessions.items():
@@ -355,6 +392,8 @@ class ContinuousLabelingParadigm:
                     # 1e6, volts -> microvolts); match that convention so
                     # output here is on the same scale as other paradigms.
                     raw_data = raw.get_data() * dataset.unit_factor
+                    if self.return_continuous_raw:
+                        continuous_raw[(subject, session, run)] = (raw_data, float(sfreq))
                     for i, (start, label) in enumerate(zip(starts, labels)):
                         if label < 0:
                             continue  # excluded (prediction mode only): drop, don't count either class
@@ -390,4 +429,6 @@ class ContinuousLabelingParadigm:
         else:
             X = np.empty((0, 0, 0))
         y = np.array(y_parts, dtype=int)
+        if self.return_continuous_raw:
+            return X, y, metadata, continuous_raw
         return X, y, metadata
