@@ -508,6 +508,7 @@ def leave_one_seizure_out_detection(
     epochs: int,
     disable_disk_cache: bool = False,
     max_folds: int | None = None,
+    skip_folds: set[int] | None = None,
 ) -> pd.DataFrame:
     """Leave-one-seizure-out CV for label_mode="detection": hold out one
     recording's windows at a time.
@@ -548,7 +549,15 @@ def leave_one_seizure_out_detection(
     shared_dense_edge_cache_dir = None if disable_disk_cache else default_dense_edge_cache_root()
 
     rows = []
-    for group in unique_groups:
+    for fold_i, group in enumerate(unique_groups):
+        if skip_folds and fold_i in skip_folds:
+            # Diagnostic only (same convention as --max-folds): fold_i here
+            # is this group's position in unique_groups (0-based, stable
+            # across --max-folds truncation since that only trims the
+            # tail) -- lets a crashed/partial run resume by skipping the
+            # folds it already completed instead of redoing them.
+            print(f"  fold {fold_i} subject={group[0]} run={group[1]}: SKIPPED (--skip-folds)")
+            continue
         # Plain tuple `==` (not a numpy array of tuples -- np.array() on a
         # list of same-length tuples builds a 2D array, silently turning
         # this into an elementwise-per-column mask instead of one bool per
@@ -630,6 +639,7 @@ def leave_one_seizure_out_prediction(
     k_of_n_k: int = DEFAULT_TRUONG_K_OF_N_K,
     k_of_n_n: int = DEFAULT_TRUONG_K_OF_N_N,
     max_folds: int | None = None,
+    skip_folds: set[int] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Leave-one-seizure-out CV for label_mode="prediction".
 
@@ -766,6 +776,16 @@ def leave_one_seizure_out_prediction(
     for fold_i, seizure in enumerate(unique_seizures):
         subject, run, seizure_id = seizure["subject"], seizure["run"], seizure["seizure_id"]
         onset, offset = seizure["seizure_onset"], seizure["seizure_offset"]
+
+        if skip_folds and fold_i in skip_folds:
+            # Diagnostic only (same convention as --max-folds): fold_i here
+            # is this seizure's position in unique_seizures, indexed against
+            # the FULL (pre-max_folds) fold count -- see the max_folds
+            # comment above on why that numbering is stable. Lets a
+            # crashed/partial multi-fold run resume by skipping folds
+            # already completed instead of redoing them.
+            print(f"  fold {fold_i} seizure {seizure_id} (subject={subject} run={run}): SKIPPED (--skip-folds)")
+            continue
 
         test_run_pairs = {(subject, run), *fold_interictal_runs[fold_i]}
         test_mask = np.array(
@@ -950,6 +970,7 @@ def leave_one_seizure_out_truong(
     subsample_seed: int = 42,
     k_of_n_k: int = DEFAULT_TRUONG_K_OF_N_K,
     k_of_n_n: int = DEFAULT_TRUONG_K_OF_N_N,
+    skip_folds: set[int] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Leave-one-seizure-out CV for TruongSTFTCNNClassifier.
 
@@ -1008,6 +1029,12 @@ def leave_one_seizure_out_truong(
     for fold_i, seizure in enumerate(unique_seizures):
         subject, run, seizure_id = seizure["subject"], seizure["run"], seizure["seizure_id"]
         onset, offset = seizure["seizure_onset"], seizure["seizure_offset"]
+
+        if skip_folds and fold_i in skip_folds:
+            # See leave_one_seizure_out_prediction's identical check --
+            # same fold_i numbering, same "resume a partial run" purpose.
+            print(f"  fold {fold_i} seizure {seizure_id} (subject={subject} run={run}): SKIPPED (--skip-folds)")
+            continue
 
         test_run_pairs = {(subject, run), *fold_interictal_runs[fold_i]}
         test_mask = np.array([(s, r) in test_run_pairs for s, r in zip(subject_arr.tolist(), run_arr.tolist())])
@@ -1186,6 +1213,19 @@ def _build_argument_parser() -> argparse.ArgumentParser:
             "cache-vs-no-cache or timing A/B without paying for the whole dataset. "
             "Does not change any fold's own train/test split. Unset (default): "
             "every fold runs, current behavior."
+        ),
+    )
+    parser.add_argument(
+        "--skip-folds", type=int, nargs="+", default=None, metavar="FOLD_I",
+        help=(
+            "Skip these fold indices (0-based, in the same order printed as "
+            "'fold N ...' -- (subject,run) order for label_mode=detection, "
+            "unique_seizures order for prediction/truong) instead of running "
+            "every fold. Combines with --max-folds (skip_folds is checked "
+            "against the same fold_i numbering, unaffected by max_folds' own "
+            "truncation). Useful to resume a partial multi-fold run without "
+            "redoing folds that already finished, e.g. --skip-folds 0 1 2. "
+            "Unset (default): no folds skipped."
         ),
     )
     parser.add_argument(
@@ -1544,6 +1584,7 @@ def main(args: argparse.Namespace) -> None:
             X, y, metadata, clf_params, epochs, window_length,
             negative_to_positive_ratio=negative_to_positive_ratio,
             k_of_n_k=args.k_of_n_k, k_of_n_n=args.k_of_n_n,
+            skip_folds=set(args.skip_folds) if args.skip_folds else None,
         )
 
         # Own subdirectory -- same "never pooled with a different label rule/
@@ -1598,6 +1639,7 @@ def main(args: argparse.Namespace) -> None:
             disable_disk_cache=args.disable_disk_cache,
             k_of_n_k=args.k_of_n_k, k_of_n_n=args.k_of_n_n,
             max_folds=args.max_folds,
+            skip_folds=set(args.skip_folds) if args.skip_folds else None,
         )
 
         # Separate output path (task 6, bullet 1): never pooled with
@@ -1661,6 +1703,7 @@ def main(args: argparse.Namespace) -> None:
             X, y, metadata, clf_params, epochs,
             disable_disk_cache=args.disable_disk_cache,
             max_folds=args.max_folds,
+            skip_folds=set(args.skip_folds) if args.skip_folds else None,
         )
 
         # --shuffle-labels: same separate-subdirectory reasoning as the
