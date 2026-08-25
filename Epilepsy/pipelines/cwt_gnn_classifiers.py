@@ -42,6 +42,8 @@ from typing import Callable, Literal, Sequence
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 from torch.utils.data import DataLoader, Dataset, Sampler
 from tqdm.auto import tqdm
 
@@ -1753,6 +1755,209 @@ class _DenseEdgeGRUTemporal(nn.Module):
         return out.permute(0, 2, 1).unsqueeze(-1)  # [B, out_channels, E, 1]
 
 
+class _DenseEdgeMambaTemporal(nn.Module):
+    """dense_edge_temporal_mode="mamba" counterpart to _DenseEdgeGRUTemporal /
+    _build_dense_feature_conv -- 2026-08-24, event_mode="dense" only. A third,
+    interchangeable dense_edge_conv backend: same per-edge, weight-shared
+    processing convention as the other two ("edges convolved/processed
+    independently with SHARED weights", see _build_dense_feature_conv's own
+    docstring), same [B, C_in, E, T] -> [B, out_channels, E, 1] shape
+    contract, so SparseEvidenceGNNCore._dense_edge_features' squeeze/permute
+    call downstream is unchanged regardless of which of the three builds
+    self.dense_edge_conv. Purely additive -- does not touch _DenseEdgeGRUTemporal
+    or _build_dense_feature_conv, and dense_edge_temporal_mode="conv"/"rnn"
+    remain bit-identical to before this class existed.
+
+    Motivation (see run_pipelines.py's DENSE_EDGE_MAMBA_PARAMS and the
+    2026-08-24 session note this landed with): _DenseEdgeGRUTemporal already
+    established that a mechanism able to see the FULL T' sequence with
+    memory (vs. Conv2d's small fixed local window) is worth testing here.
+    Mamba (Gu & Dao 2023, a selective state-space sequence model) is a
+    second, architecturally distinct way to do that -- linear-time in T'
+    (vs. quadratic self-attention), and unlike a plain RNN/GRU its
+    per-timestep gating (the "selective" part) is explicitly input-
+    dependent, so this is a genuine ablation of *which* sequence model
+    extracts the temporal structure, not just a capacity/parameter-count
+    change on top of the existing GRU.
+
+    mamba-ssm (the official/upstream package) was evaluated first and
+    rejected for THIS repo's environment, not for architectural reasons --
+    see the 2026-08-24 session note for the full investigation. Summary:
+    mamba-ssm ships no Windows wheel (PyPI: sdist only) and its selective-
+    scan/causal-conv1d kernels are custom CUDA extensions that require
+    nvcc + a matching Linux toolchain to build from source; this repo runs
+    on Windows (see setup.sh / requirements.txt's cu128 extra-index-url
+    comment) and must keep working on the MPS path too (macOS dev machine --
+    see the module docstring's device history), which mamba-ssm's CUDA-only
+    kernels cannot support at all. `mambapy` (PyPI, github.com/alxndrTL/
+    mamba.py) is used instead: a pure-PyTorch reimplementation of the same
+    selective-SSM recurrence (parallel-scan by default, `use_cuda=False`
+    forced below so this NEVER reaches for mamba-ssm's kernels even if that
+    package happens to be installed too), so it runs identically on
+    CUDA/MPS/CPU with no custom kernel compilation step -- the least
+    invasive option that still uses a real, maintained Mamba implementation
+    rather than a from-scratch reimplementation of the selective-scan math.
+
+    `d_model` (mamba_d_model) is independent of in_channels (4*nfreqs) and
+    out_channels (dense_conv_out_channels) -- an input nn.Linear projects
+    C_in -> d_model when they differ (nn.Identity when they already match,
+    e.g. a future config where in_channels == d_model), and an output
+    nn.Linear projects d_model -> out_channels unconditionally, exactly
+    mirroring how _build_dense_feature_conv's first/last Conv2d layers
+    change channel width at the boundaries while the GRU path instead ties
+    hidden_size directly to out_channels. Kept as its own knob (not simply
+    reusing out_channels as d_model) because Mamba's internal
+    expand_factor/d_state already multiply d_model's effective width
+    internally (see MambaConfig) -- collapsing d_model to out_channels=8
+    would leave very little room for the SSM to do anything before the
+    final projection pools it back down.
+
+    Pools time the same way _DenseEdgeGRUTemporal does: takes the LAST
+    timestep of Mamba's output sequence as the "T summarized to one vector"
+    step, analogous to the GRU's own final hidden state h_T. This is a
+    correct analogy specifically because Mamba's recurrence (like the
+    GRU's) is causal -- timestep T's output already depends on every
+    timestep <= T through the running SSM state, so it is a genuine
+    whole-sequence summary, not a local window average the way Conv2d's
+    AdaptiveAvgPool2d((None, 1)) is.
+
+    mamba_dropout: MambaConfig (mambapy) has no native dropout field --
+    applied here as an explicit nn.Dropout on the pooled [B*E, d_model]
+    summary, before the output projection, the same place GRU's h_T would
+    be tapped if it had one. Default 0.0 is a no-op, bit-identical to
+    "no dropout at all".
+
+    mamba_chunk_size: 2026-08-24 smoke-test finding -- mambapy's ssm()
+    (both the `pscan=True` parallel-scan path and the `pscan=False`
+    sequential-loop path; the allocation happens in the shared deltaA/
+    deltaB/BX setup BEFORE either scan strategy even runs, so choosing
+    pscan does not avoid this) materializes three dense [rows, T, d_model*
+    expand, d_state] float tensors, where `rows` is THIS class's whole
+    B*E leading dim -- not a small number: E is the full canonical edge
+    count (253 for the 23-channel mesh, unaffected by channel_subset_k --
+    see _dense_edge_features' docstring, every edge always "fires" in
+    event_mode="dense"), so at this file's own default batch_size=32 that
+    is 32*253=8096 rows. At the shared defaults (dense_edge_time_downsample
+    =16 on a 30s/256Hz window -> T'=480, mamba_expand=2, mamba_d_state=16)
+    processing all 8096 rows through mambapy in one call needs ~8GB PER
+    intermediate tensor (confirmed: CUDA OOM on an 8GB RTX 3070 Ti, "Tried
+    to allocate 7.40 GiB" -- see the 2026-08-24 session note) -- unlike
+    Conv2d (bounded local receptive field) or nn.GRU (cuDNN's fused kernel
+    never materializes a dense [rows, T, ...] tensor at all), a pure-
+    PyTorch selective scan's memory scales with rows*T*d_state directly.
+    Purely a memory tactic, NOT a numerical change (same "chunking must
+    equal one full-batch call" contract CWTTimeFrequencyNodeEncoder's own
+    chunk_size already establishes and tests -- every row of `seq` is
+    processed independently, so splitting the leading dim changes nothing
+    about any single row's output): splits `seq`'s B*E rows into groups of
+    at most mamba_chunk_size, runs self.mamba on each group, concatenates.
+    Also gradient-checkpoints each chunk during training (same
+    torch.utils.checkpoint import CWTTimeFrequencyNodeEncoder already
+    uses) so the SAVED activations for backward scale with chunk_size too,
+    not the full B*E. Default 128 keeps each of those three tensors under
+    ~500MB at the defaults above -- comfortably modest for an 8GB card
+    alongside the rest of the pipeline's own CUDA memory use; raise it on
+    a larger GPU, lower it if this still OOMs.
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        d_model: int = 16,
+        d_state: int = 16,
+        d_conv: int = 4,
+        expand: int = 2,
+        n_layers: int = 1,
+        dropout: float = 0.0,
+        chunk_size: int = 128,
+    ) -> None:
+        super().__init__()
+        try:
+            from mambapy.mamba import Mamba, MambaConfig
+        except ImportError as exc:  # pragma: no cover -- environment-dependent
+            raise ImportError(
+                "dense_edge_temporal_mode='mamba' requires the 'mambapy' package "
+                "(pure-PyTorch Mamba SSM -- see _DenseEdgeMambaTemporal's "
+                "docstring for why the upstream 'mamba-ssm' CUDA package was not "
+                "used). Install with `pip install mambapy`."
+            ) from exc
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.d_model = d_model
+        self.in_proj = (
+            nn.Identity() if in_channels == d_model else nn.Linear(in_channels, d_model)
+        )
+        self.mamba = Mamba(
+            MambaConfig(
+                d_model=d_model,
+                n_layers=n_layers,
+                d_state=d_state,
+                expand_factor=expand,
+                d_conv=d_conv,
+                # Force the pure-PyTorch parallel-scan path on every device --
+                # see class docstring. Never reaches for mamba-ssm's CUDA
+                # kernels even if that package happens to also be installed.
+                use_cuda=False,
+            )
+        )
+        self.dropout = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
+        self.out_proj = nn.Linear(d_model, out_channels)
+        self.chunk_size = max(1, int(chunk_size))
+
+    def _mamba_pooled(self, seq_chunk: torch.Tensor) -> torch.Tensor:
+        """seq_chunk: [rows, T, d_model] -> [rows, d_model], one Mamba call
+        (the actual, possibly-large-memory step -- see mamba_chunk_size's
+        docstring) plus the same last-timestep pooling forward() documents.
+        Split out so it can be handed to torch.utils.checkpoint per chunk.
+        """
+        out_seq = self.mamba(seq_chunk)  # [rows, T, d_model] -- causal
+        return out_seq[:, -1, :]  # [rows, d_model] -- last timestep == h_T analogue
+
+    def forward(self, conv_in: torch.Tensor) -> torch.Tensor:
+        """`conv_in`: [B, C_in, E, T] -- identical input _build_dense_feature_
+        conv's Sequential and _DenseEdgeGRUTemporal's GRU both receive
+        (C_in = 4 * nfreqs, frequency already folded in by the caller; see
+        _DenseEdgeGRUTemporal's class docstring). Reshapes to [B*E, T, C_in]
+        (same "edges folded into the batch dim, one instance processes every
+        edge with shared weights" convention the GRU path uses), projects to
+        d_model, runs the Mamba block(s) in chunks of mamba_chunk_size rows
+        at a time (see that param's docstring -- a memory tactic only, same
+        output as one full-batch call), pools each chunk's last timestep,
+        and projects back out to the [B, out_channels, E, 1] shape
+        _dense_edge_features' downstream squeeze/permute expects.
+        """
+        batch_size, c_in, num_edges, n_time = conv_in.shape
+        assert c_in == self.in_channels, (
+            f"_DenseEdgeMambaTemporal built with in_channels={self.in_channels} "
+            f"but received conv_in with C_in={c_in} -- see this class's "
+            "forward() docstring for the expected [B, C_in, E, T] contract."
+        )
+        seq = conv_in.permute(0, 2, 3, 1).reshape(batch_size * num_edges, n_time, c_in)
+        # seq: [B*E, T, C_in] -- batch_size, sequence_length, feature_dim,
+        # logged once so the temporal contract this backend receives is
+        # visible in the same place GRU/conv's own shape comments already
+        # document it (see class docstring's "Consumes/produces" note).
+        seq = self.in_proj(seq)  # [B*E, T, d_model]
+        n_rows = seq.shape[0]
+        if n_rows <= self.chunk_size:
+            pooled = self._mamba_pooled(seq)
+        else:
+            use_ckpt = bool(self.training and torch.is_grad_enabled())
+            pieces: list[torch.Tensor] = []
+            for start in range(0, n_rows, self.chunk_size):
+                chunk = seq[start : start + self.chunk_size]
+                if use_ckpt:
+                    pieces.append(checkpoint(self._mamba_pooled, chunk, use_reentrant=False))
+                else:
+                    pieces.append(self._mamba_pooled(chunk))
+            pooled = torch.cat(pieces, dim=0)  # [B*E, d_model]
+        pooled = self.dropout(pooled)
+        out = self.out_proj(pooled)  # [B*E, out_channels]
+        out = out.reshape(batch_size, num_edges, -1)  # [B, E, out_channels]
+        return out.permute(0, 2, 1).unsqueeze(-1)  # [B, out_channels, E, 1]
+
+
 class ChannelSignalEncoder(nn.Module):
     """Lightweight learned per-channel signature: gives each graph node an
     actual representation of its raw signal shape, not just the
@@ -1810,6 +2015,101 @@ class ChannelSignalEncoder(nn.Module):
         x = raw_x.reshape(batch_size * n_channels, 1, n_time)
         emb = self.net(x).squeeze(-1)
         return emb.reshape(batch_size, n_channels, -1)
+
+
+class CWTTimeFrequencyNodeEncoder(nn.Module):
+    """Shared Conv2d encoder: each EEG channel's CWT (real, imag) -> one
+    window-level node embedding.
+
+    Applied independently to every channel with SHARED weights -- channels
+    are folded into the batch dim, so this is one network, not one network
+    per electrode. Consumes the pipeline's already-computed CWT real/imag
+    tensors (do NOT recompute CWT here; do NOT wrap them as a complex
+    tensor -- recent CUDA/BF16 work hit dtype issues on complex ops, and
+    ordinary Conv2d is autocast-compatible). Adaptive pooling happens only
+    AFTER the two conv layers, so the network sees local time-frequency
+    structure rather than a pre-averaged spectrogram.
+
+    Input:  w_real, w_imag each [B, C, T, F]
+    Output: [B, C, embed_dim]
+
+    Intentionally small (Conv2d 2->16->32, Linear 32->embed_dim): this
+    exists to test whether learned per-channel time-frequency information
+    adds anything to the existing WCT/coherence graph, not to grow capacity.
+
+    Native 30s CWT maps are [T=7680, F=8]. Conv2d(k=5) on that T, over a
+    full (B=32, C=23) batch, is an im2col of ~9GB and also a 1.4s/step
+    sequential-chunk loop -- the WCT graph itself is not the bottleneck
+    (dense-edge cache hits are a few ms/trial). Before the convs we
+    average-pool TIME only by `time_downsample` (default 16, same grain
+    as dense_edge_time_downsample). Frequency is not pooled. The CNN
+    still sees a [T/16, F] spectrogram, not a scalar; it is NOT a global
+    average of the CWT. After that, one batched Conv2d is cheap and the
+    chunk/checkpoint fallback is only for downsample=1 on long windows.
+    """
+
+    def __init__(
+        self,
+        embed_dim: int,
+        time_downsample: int = 16,
+        chunk_size: int = 32,
+    ) -> None:
+        super().__init__()
+        self.embed_dim = int(embed_dim)
+        self.time_downsample = max(1, int(time_downsample))
+        self.chunk_size = max(1, int(chunk_size))
+        self.net = nn.Sequential(
+            nn.Conv2d(2, 16, kernel_size=5, padding=2),
+            nn.GELU(),
+            nn.Conv2d(16, 32, kernel_size=5, padding=2),
+            nn.GELU(),
+            nn.AdaptiveAvgPool2d(1),
+        )
+        self.proj = nn.Linear(32, self.embed_dim)
+
+    def _encode_flat(self, x: torch.Tensor) -> torch.Tensor:
+        return self.proj(self.net(x).flatten(1))
+
+    def forward(self, w_real: torch.Tensor, w_imag: torch.Tensor) -> torch.Tensor:
+        if w_real.shape != w_imag.shape:
+            raise ValueError(
+                f"w_real/w_imag shape mismatch: {tuple(w_real.shape)} vs "
+                f"{tuple(w_imag.shape)}."
+            )
+        if w_real.ndim != 4:
+            raise ValueError(
+                f"CWT node encoder expects [B, C, T, F] real/imag, got "
+                f"{tuple(w_real.shape)}."
+            )
+        batch_size, n_channels, n_time, nfreqs = w_real.shape
+        # [B, C, T, F] x2 -> [B*C, 2, T, F] so Conv2d sees real/imag as
+        # ordinary input channels and the same weights run on every electrode.
+        x = torch.stack((w_real, w_imag), dim=2).reshape(
+            batch_size * n_channels, 2, n_time, nfreqs
+        )
+        ds = self.time_downsample
+        if ds > 1 and x.shape[2] >= ds:
+            # Time only -- frequency axis stays length F. Remainder samples
+            # dropped, same convention as dense_edge_time_downsample.
+            x = F.avg_pool2d(x, kernel_size=(ds, 1), stride=(ds, 1))
+        n = x.shape[0]
+        # After time-pooling, one batched conv is the fast path. Chunking
+        # is only a memory guard for native-T convs (downsample=1).
+        if n <= self.chunk_size or x.shape[2] * x.shape[3] <= 480 * 16:
+            h = self._encode_flat(x)
+        else:
+            use_ckpt = bool(self.training and torch.is_grad_enabled())
+            pieces: list[torch.Tensor] = []
+            for start in range(0, n, self.chunk_size):
+                sl = x[start : start + self.chunk_size]
+                if use_ckpt:
+                    pieces.append(
+                        checkpoint(self._encode_flat, sl, use_reentrant=False)
+                    )
+                else:
+                    pieces.append(self._encode_flat(sl))
+            h = torch.cat(pieces, dim=0)
+        return h.view(batch_size, n_channels, self.embed_dim)
 
 
 class SparseEvidenceGNNCore(nn.Module):
@@ -2150,11 +2450,33 @@ class SparseEvidenceGNNCore(nn.Module):
         # integrates the FULL T' sequence with memory instead of Conv2d's
         # small fixed local window (dense_conv_kernel_size) -- see that
         # class's docstring for the full rationale and exactly what shape
-        # contract it preserves. Purely additive: dense_edge_conv is built
-        # from whichever path this selects, and everything else
-        # (_dense_edge_features' squeeze/permute, sparse_message_mlp,
-        # aggregation, hops, sparse_classifier) is unchanged either way.
-        dense_edge_temporal_mode: Literal["conv", "rnn"] = "conv",
+        # contract it preserves. 2026-08-24: "mamba" is a third option
+        # (_DenseEdgeMambaTemporal) -- a second, architecturally distinct
+        # full-sequence-with-memory backend (selective state-space model
+        # instead of a gated RNN), same [B, C_in, E, T] -> [B, out_channels,
+        # E, 1] contract -- see that class's docstring for the full
+        # rationale and the mamba-ssm-vs-mambapy dependency decision.
+        # Purely additive: dense_edge_conv is built from whichever path this
+        # selects, and everything else (_dense_edge_features' squeeze/
+        # permute, sparse_message_mlp, aggregation, hops, sparse_classifier)
+        # is unchanged either way.
+        dense_edge_temporal_mode: Literal["conv", "rnn", "mamba"] = "conv",
+        # dense_edge_temporal_mode="mamba" only -- see _DenseEdgeMambaTemporal's
+        # docstring for what each of these controls and why the defaults
+        # were picked (deliberately modest -- this is a first ablation, not
+        # a capacity-maximizing pass). Simply unread (no validation, same
+        # "no way to tell an explicit default from an unset one" precedent
+        # dense_edge_temporal_mode="rnn"'s own docstring already applies to
+        # the Conv2d-only params) when dense_edge_temporal_mode != "mamba".
+        mamba_d_model: int = 16,
+        mamba_d_state: int = 16,
+        mamba_d_conv: int = 4,
+        mamba_expand: int = 2,
+        mamba_n_layers: int = 1,
+        mamba_dropout: float = 0.0,
+        # Memory tactic only -- see _DenseEdgeMambaTemporal's mamba_chunk_size
+        # docstring (2026-08-24 CUDA-OOM finding). Does not change any output.
+        mamba_chunk_size: int = 128,
         # 2026-08-11, dense_edge_temporal_mode="rnn" only -- the negative
         # control for that mode: same architecture, same parameter count,
         # scrambled time order. When True, _dense_edge_features
@@ -2189,6 +2511,34 @@ class SparseEvidenceGNNCore(nn.Module):
         # two modes' sparse_message_mlp/sparse_classifier stay comparably
         # sized, not because it's been tuned.
         temporal_graph_edge_dim: int = 8,
+        # Learned per-channel CWT time-frequency node encoder -- additive to
+        # the existing WCT/coherence EDGE pathway, not a replacement. False
+        # (default) is bit-identical to before this param existed:
+        # ChannelSignalEncoder stays unused (feature_ablation locked to
+        # zero_channel_embed), sparse_message_mlp still sees edge features
+        # only, and CWT is discarded after WCT construction. True builds
+        # CWTTimeFrequencyNodeEncoder (shared Conv2d over each channel's
+        # CWT real/imag), produces one window-level embedding per node, and
+        # concatenates (h_src, h_dst, e_ij) into sparse_message_mlp so the
+        # learned message is f(node_i, node_j, edge_ij). event_mode="dense"
+        # only -- rejected otherwise. See time_frequency_node_ablation for
+        # the in-architecture disable / node-only switches; the WCT-only
+        # baseline is this flag False, not a zeroed approximation of the
+        # new model.
+        cwt_encoder: bool = False,
+        # Width of the CWT node embedding. None (default) uses hidden_dim
+        # so the node vector is the same width as the existing per-edge
+        # hidden state. Only read when cwt_encoder=True.
+        node_embedding_dim: int | None = None,
+        # In-architecture ablation of the CWT node pathway. "none" (default)
+        # uses both node embeddings and WCT edge features. "zero_node_embed"
+        # keeps the same message MLP (src/dst slots exist) but zeros the
+        # node embeddings -- the exact same code path with nodes removed.
+        # "node_only" zeros the WCT edge features after dense_edge_conv so
+        # messages see (h_i, h_j, 0). Requires cwt_encoder
+        # =True (rejected otherwise) -- the WCT-only baseline is that flag
+        # False, not zero_node_embed.
+        time_frequency_node_ablation: Literal["none", "zero_node_embed", "node_only"] = "none",
         **kwargs,
     ) -> None:
         super().__init__()
@@ -2325,28 +2675,48 @@ class SparseEvidenceGNNCore(nn.Module):
                 f"{dense_conv_kernel_size!r}, dense_conv_pool_size="
                 f"{dense_conv_pool_size!r}."
             )
-        if dense_edge_temporal_mode not in ("conv", "rnn"):
+        if dense_edge_temporal_mode not in ("conv", "rnn", "mamba"):
             raise ValueError(
-                "dense_edge_temporal_mode must be 'conv' or 'rnn', got "
+                "dense_edge_temporal_mode must be 'conv', 'rnn', or 'mamba', got "
                 f"{dense_edge_temporal_mode!r}."
             )
-        if dense_edge_temporal_mode == "rnn" and event_mode != "dense":
+        if dense_edge_temporal_mode in ("rnn", "mamba") and event_mode != "dense":
             # Same "explicit no-op rejection" precedent as
             # dense_edge_time_downsample/time_averaged_graph above --
             # dense_edge_temporal_mode only affects how dense_edge_conv
             # itself is built, which only exists when event_mode="dense".
             raise ValueError(
-                "dense_edge_temporal_mode='rnn' has no meaning when "
-                "event_mode='sparse' -- dense_edge_conv (the only consumer "
-                "of this param) is never built in event_mode='sparse' (see "
-                "dense_edge_temporal_mode's docstring above)."
+                f"dense_edge_temporal_mode={dense_edge_temporal_mode!r} has no "
+                "meaning when event_mode='sparse' -- dense_edge_conv (the only "
+                "consumer of this param) is never built in event_mode='sparse' "
+                "(see dense_edge_temporal_mode's docstring above)."
             )
         if shuffle_time_order and dense_edge_temporal_mode != "rnn":
             raise ValueError(
                 "shuffle_time_order=True has no meaning when "
-                "dense_edge_temporal_mode='conv' -- it only affects "
-                "_dense_edge_features' input to the 'rnn' path (see "
-                "shuffle_time_order's docstring above)."
+                f"dense_edge_temporal_mode={dense_edge_temporal_mode!r} -- it only "
+                "affects _dense_edge_features' input to the 'rnn' path (see "
+                "shuffle_time_order's docstring above). Not implemented for "
+                "'mamba' as a separate negative control yet -- see "
+                "_DenseEdgeMambaTemporal's docstring."
+            )
+        if time_frequency_node_ablation not in ("none", "zero_node_embed", "node_only"):
+            raise ValueError(
+                "time_frequency_node_ablation must be 'none', 'zero_node_embed', "
+                f"or 'node_only', got {time_frequency_node_ablation!r}."
+            )
+        if cwt_encoder and event_mode != "dense":
+            raise ValueError(
+                "cwt_encoder=True has no meaning when "
+                f"event_mode={event_mode!r} -- the CWT node encoder is wired "
+                "into the dense-edge message path only (see "
+                "cwt_encoder's docstring above)."
+            )
+        if time_frequency_node_ablation != "none" and not cwt_encoder:
+            raise ValueError(
+                "time_frequency_node_ablation != 'none' requires "
+                "cwt_encoder=True -- the WCT-only baseline is "
+                "that flag False, not a zeroed approximation of the new model."
             )
 
         self.n_channels = n_channels
@@ -2457,6 +2827,16 @@ class SparseEvidenceGNNCore(nn.Module):
         self.dense_edge_time_downsample = int(dense_edge_time_downsample)
         self.time_averaged_graph = bool(time_averaged_graph)
         self.temporal_graph_edge_dim = temporal_graph_edge_dim
+        self.cwt_encoder = bool(cwt_encoder)
+        self.node_embedding_dim = int(
+            hidden_dim if node_embedding_dim is None else node_embedding_dim
+        )
+        self.time_frequency_node_ablation = time_frequency_node_ablation
+        # Constructed LAST (after dense_edge_conv / temporal_graph modules)
+        # when enabled, so existing submodule init is unchanged at the
+        # default (this flag False). None here is just a slot -- no RNG.
+        self.cwt_node_encoder = None
+        self._tf_forward_logged = False
         # event_mode="sparse": 5 event scalars. "dense": dense_edge_conv
         # out_channels. "temporal_graph": temporal_edge_proj width.
         # No src/dst channel-embed slots -- those were always zeroed.
@@ -2467,6 +2847,13 @@ class SparseEvidenceGNNCore(nn.Module):
         else:  # "temporal_graph"
             event_feature_dim = temporal_graph_edge_dim
         message_in = event_feature_dim
+        if self.cwt_encoder:
+            # m_ij = f(h_i, h_j, e_ij): src embedding, dst embedding, edge
+            # features. Only widens sparse_message_mlp when the new encoder
+            # is on -- baseline message_in (and therefore its init) is
+            # unchanged.
+            message_in = event_feature_dim + 2 * self.node_embedding_dim
+        self.event_feature_dim = event_feature_dim
         self.sparse_message_mlp = nn.Sequential(
             nn.Linear(message_in, hidden_dim), nn.GELU(), nn.Linear(hidden_dim, hidden_dim)
         )
@@ -2616,6 +3003,13 @@ class SparseEvidenceGNNCore(nn.Module):
         self.dense_conv_intermediate_channels_reduced = dense_conv_intermediate_channels_reduced
         self.dense_edge_temporal_mode = dense_edge_temporal_mode
         self.shuffle_time_order = bool(shuffle_time_order)
+        self.mamba_d_model = mamba_d_model
+        self.mamba_d_state = mamba_d_state
+        self.mamba_d_conv = mamba_d_conv
+        self.mamba_expand = mamba_expand
+        self.mamba_n_layers = mamba_n_layers
+        self.mamba_dropout = mamba_dropout
+        self.mamba_chunk_size = mamba_chunk_size
         if event_mode == "dense" and dense_edge_temporal_mode == "rnn":
             # See _DenseEdgeGRUTemporal's own docstring -- same in_channels
             # (frequency folded in) / out_channels contract as the Conv2d
@@ -2624,6 +3018,21 @@ class SparseEvidenceGNNCore(nn.Module):
             self.dense_edge_conv = _DenseEdgeGRUTemporal(
                 in_channels=4 * nfreqs,
                 out_channels=dense_conv_out_channels,
+            )
+        elif event_mode == "dense" and dense_edge_temporal_mode == "mamba":
+            # See _DenseEdgeMambaTemporal's own docstring -- same
+            # in_channels/out_channels contract as the other two dense_edge_
+            # conv backends, built LAST for the same init-order reason.
+            self.dense_edge_conv = _DenseEdgeMambaTemporal(
+                in_channels=4 * nfreqs,
+                out_channels=dense_conv_out_channels,
+                d_model=mamba_d_model,
+                d_state=mamba_d_state,
+                d_conv=mamba_d_conv,
+                expand=mamba_expand,
+                n_layers=mamba_n_layers,
+                dropout=mamba_dropout,
+                chunk_size=mamba_chunk_size,
             )
         elif event_mode == "dense":
             # Frequency is folded into in_channels here (see
@@ -2679,6 +3088,25 @@ class SparseEvidenceGNNCore(nn.Module):
             self.temporal_edge_proj = None
             self.temporal_node_gru = None
 
+        # CWT node encoder LAST -- same init-order precedent as
+        # dense_edge_conv / temporal_edge_proj above. Unused (stays None)
+        # when cwt_encoder=False, so every pre-existing
+        # submodule's random init is bit-identical to before this feature
+        # existed.
+        if self.cwt_encoder:
+            # Match the WCT edge path's temporal grain when it downsamples;
+            # otherwise still pool by 16 so a 30s native CWT (T=7680) cannot
+            # turn the node CNN into the epoch bottleneck.
+            enc_ds = (
+                int(self.dense_edge_time_downsample)
+                if int(self.dense_edge_time_downsample) > 1
+                else 16
+            )
+            self.cwt_node_encoder = CWTTimeFrequencyNodeEncoder(
+                embed_dim=self.node_embedding_dim,
+                time_downsample=enc_ds,
+            )
+
     def configure_summary_context(
         self,
         *,
@@ -2718,9 +3146,25 @@ class SparseEvidenceGNNCore(nn.Module):
             f"dense_conv_out_channels={self.dense_conv_out_channels} "
             f"time_averaged_graph={self.time_averaged_graph} "
             f"dense_edge_temporal_mode={self.dense_edge_temporal_mode} "
-            f"shuffle_time_order={self.shuffle_time_order} "
+            + (
+                f"mamba_d_model={self.mamba_d_model} mamba_d_state={self.mamba_d_state} "
+                f"mamba_d_conv={self.mamba_d_conv} mamba_expand={self.mamba_expand} "
+                f"mamba_n_layers={self.mamba_n_layers} mamba_dropout={self.mamba_dropout} "
+                f"mamba_chunk_size={self.mamba_chunk_size} "
+                if self.dense_edge_temporal_mode == "mamba"
+                else ""
+            )
+            + f"shuffle_time_order={self.shuffle_time_order} "
             f"temporal_graph_edge_dim={self.temporal_graph_edge_dim} "
-            f"dense_edge_time_downsample={self.dense_edge_time_downsample}"
+            f"dense_edge_time_downsample={self.dense_edge_time_downsample} "
+            f"cwt_encoder={self.cwt_encoder} "
+            f"node_embedding_dim={self.node_embedding_dim} "
+            f"time_frequency_node_ablation={self.time_frequency_node_ablation}"
+            + (
+                f" tf_node_time_downsample={self.cwt_node_encoder.time_downsample}"
+                if self.cwt_node_encoder is not None
+                else ""
+            )
         )
         context = self._summary_context
         if context is None:
@@ -4178,6 +4622,116 @@ class SparseEvidenceGNNCore(nn.Module):
         evidence = h_n.squeeze(0).reshape(batch_size_actual, self.n_channels, self.hidden_dim)
         return evidence
 
+    def _cwt_node_embeddings(
+        self, w_real: torch.Tensor, w_imag: torch.Tensor
+    ) -> torch.Tensor:
+        """Trainable CWT node encoder: [B, C, T, F] real/imag -> [B, C, D].
+
+        CWT is computed once per window upstream and encoded once per
+        forward here -- never recomputed inside a GNN layer. Ablation
+        `zero_node_embed` skips the encoder and returns zeros of the
+        same shape so the message MLP still sees src/dst slots.
+        """
+        if self.cwt_node_encoder is None:
+            raise RuntimeError(
+                "_cwt_node_embeddings called without cwt_node_encoder -- "
+                "cwt_encoder must be True."
+            )
+        if self.time_frequency_node_ablation == "zero_node_embed":
+            batch_size, n_channels = w_real.shape[0], w_real.shape[1]
+            return w_real.new_zeros(
+                batch_size, n_channels, self.node_embedding_dim
+            )
+        return self.cwt_node_encoder(w_real, w_imag)
+
+    def _compose_message_features(
+        self,
+        events_padded: torch.Tensor,
+        src_padded: torch.Tensor,
+        dst_padded: torch.Tensor,
+        node_embed: torch.Tensor,
+    ) -> torch.Tensor:
+        """Per-edge message input: concat(h_src, h_dst, e_ij).
+
+        `node_embed` is [B, C, D], `events_padded` is [B, E, edge_dim],
+        `src_padded`/`dst_padded` are the canonical (i<j) indices already
+        used by the dense-edge path. Source and destination stay distinct
+        even though the coherence graph is undirected.
+        """
+        # Advanced indexing: node_embed[b, src[b, e]] -> [B, E, D]
+        h_src = node_embed[torch.arange(node_embed.shape[0], device=node_embed.device).unsqueeze(1), src_padded]
+        h_dst = node_embed[torch.arange(node_embed.shape[0], device=node_embed.device).unsqueeze(1), dst_padded]
+        return torch.cat([h_src, h_dst, events_padded], dim=-1)
+
+    def _dense_topology_placeholders(self, raw_x: torch.Tensor):
+        """Canonical dense-graph index tensors with zero edge features.
+
+        Used by time_frequency_node_ablation='node_only' so the CWT encoder
+        can train on (h_i, h_j, 0) without running dense_edge_conv/GRU.
+        """
+        batch_size = raw_x.shape[0]
+        num_edges = int(self.src_idx.numel())
+        device = raw_x.device
+        events_padded = raw_x.new_zeros(batch_size, num_edges, self.event_feature_dim)
+        src_padded = self.src_idx.to(device=device).unsqueeze(0).expand(batch_size, -1)
+        dst_padded = self.dst_idx.to(device=device).unsqueeze(0).expand(batch_size, -1)
+        freq_idx_padded = torch.zeros_like(src_padded)
+        valid_mask = torch.ones(batch_size, num_edges, dtype=torch.bool, device=device)
+        batch_idx = torch.arange(batch_size, device=device).unsqueeze(1).expand(
+            -1, num_edges
+        )
+        return events_padded, src_padded, dst_padded, freq_idx_padded, valid_mask, batch_idx
+
+    def _maybe_log_tf_forward(
+        self,
+        *,
+        w_real: torch.Tensor | None,
+        w_imag: torch.Tensor | None,
+        node_embed: torch.Tensor | None,
+        events_padded: torch.Tensor,
+        full_features: torch.Tensor,
+        timings: dict[str, float] | None,
+    ) -> None:
+        """One-shot shape (+ optional timing) dump; subsequent forwards stay quiet."""
+        if self._tf_forward_logged or not self.cwt_encoder:
+            return
+        self._tf_forward_logged = True
+        n_params = sum(int(p.numel()) for p in self.parameters())
+        n_trainable = sum(int(p.numel()) for p in self.parameters() if p.requires_grad)
+        n_enc = (
+            0
+            if self.cwt_node_encoder is None
+            else sum(int(p.numel()) for p in self.cwt_node_encoder.parameters())
+        )
+        parts = [
+            "[TF-node] first forward "
+            f"node_embed={None if node_embed is None else tuple(node_embed.shape)} "
+            f"edge_embed={tuple(events_padded.shape)} "
+            f"message_in={tuple(full_features.shape)} "
+            f"trainable_params={n_trainable} (node_encoder={n_enc}, total={n_params})"
+        ]
+        if w_real is not None and w_imag is not None:
+            parts.append(
+                f"[TF-node] CWT input w_real={tuple(w_real.shape)} "
+                f"w_imag={tuple(w_imag.shape)} dtype={w_real.dtype} "
+                f"device={w_real.device}"
+            )
+        if timings:
+            parts.append(
+                "[TF-node] timings "
+                + " ".join(f"{k}={v*1000:.2f}ms" for k, v in timings.items())
+            )
+        device = events_padded.device
+        if device.type == "cuda":
+            allocated = torch.cuda.memory_allocated(device) / (1024 ** 2)
+            peak = torch.cuda.max_memory_allocated(device) / (1024 ** 2)
+            parts.append(
+                f"[TF-node] CUDA memory allocated={allocated:.1f}MiB "
+                f"peak={peak:.1f}MiB"
+            )
+        for line in parts:
+            emit_initial_detail(line)
+
     def forward(self, raw_x, *event_inputs):
         """Trainable forward pass. `event_inputs` depends on self.event_mode:
 
@@ -4198,6 +4752,13 @@ class SparseEvidenceGNNCore(nn.Module):
         batch_idx shape the "sparse" branch produces, so the rest of this
         method is identical between the two modes.
 
+        "dense" + cwt_encoder=True: (dense_edge_raw,
+        w_real, w_imag) -- same WCT stack PLUS the window's CWT real/imag
+        ([B, C, T, F] each). The trainable CWTTimeFrequencyNodeEncoder
+        runs here (autograd), not during precompute. Messages become
+        f(h_src, h_dst, e_ij). The default (flag False) still unpacks
+        (dense_edge_raw,) only -- bit-identical to before this existed.
+
         "temporal_graph": (dense_edge_raw,) -- the SAME precomputed stack
         "dense" consumes (reused unchanged, see event_mode's own docstring),
         but processed step-by-step through time by
@@ -4211,6 +4772,11 @@ class SparseEvidenceGNNCore(nn.Module):
         inside the sequence the GRU walked through).
         """
         batch_size = raw_x.shape[0]
+        w_real_in = None
+        w_imag_in = None
+        node_embed = None
+        profile = bool(self.cwt_encoder) and not self._tf_forward_logged
+        timings: dict[str, float] = {}
 
         if self.event_mode == "sparse":
             events_padded, src_padded, dst_padded, freq_idx_padded, valid_mask = event_inputs
@@ -4223,10 +4789,28 @@ class SparseEvidenceGNNCore(nn.Module):
                 -1, max_count
             )
         elif self.event_mode == "dense":
-            (dense_edge_raw,) = event_inputs
-            events_padded, src_padded, dst_padded, freq_idx_padded, valid_mask, batch_idx = (
-                self._dense_edge_features(dense_edge_raw.to(raw_x.dtype))
-            )
+            if self.cwt_encoder:
+                dense_edge_raw = event_inputs[0]
+                w_real_in = event_inputs[1]
+                w_imag_in = event_inputs[2]
+            else:
+                (dense_edge_raw,) = event_inputs
+            if self.time_frequency_node_ablation == "node_only":
+                # Topology only: messages see (h_i, h_j, 0). Skip the WCT
+                # GRU/conv so this ablation does not still train on edges.
+                events_padded, src_padded, dst_padded, freq_idx_padded, valid_mask, batch_idx = (
+                    self._dense_topology_placeholders(raw_x)
+                )
+            else:
+                if profile:
+                    _sync_device(dense_edge_raw.device)
+                    t_edge0 = time.perf_counter()
+                events_padded, src_padded, dst_padded, freq_idx_padded, valid_mask, batch_idx = (
+                    self._dense_edge_features(dense_edge_raw.to(raw_x.dtype))
+                )
+                if profile:
+                    _sync_device(events_padded.device)
+                    timings["edge_encoding"] = time.perf_counter() - t_edge0
         else:  # "temporal_graph"
             (dense_edge_raw,) = event_inputs
 
@@ -4243,12 +4827,38 @@ class SparseEvidenceGNNCore(nn.Module):
         else:
             if self.feature_ablation == "zero_event_features":
                 events_padded = torch.zeros_like(events_padded)
-            full_features = events_padded
+            if (
+                self.cwt_encoder
+                and self.event_mode == "dense"
+                and w_real_in is not None
+                and w_imag_in is not None
+            ):
+                if profile:
+                    _sync_device(w_real_in.device)
+                    t_node0 = time.perf_counter()
+                node_embed = self._cwt_node_embeddings(w_real_in, w_imag_in)
+                if profile:
+                    _sync_device(node_embed.device)
+                    timings["cwt_node_encoding"] = time.perf_counter() - t_node0
+                edge_for_msg = events_padded
+                if self.time_frequency_node_ablation == "node_only":
+                    edge_for_msg = torch.zeros_like(events_padded)
+                if profile:
+                    t_msg0 = time.perf_counter()
+                full_features = self._compose_message_features(
+                    edge_for_msg, src_padded, dst_padded, node_embed
+                )
+            else:
+                full_features = events_padded
+                t_msg0 = time.perf_counter() if profile else None
             msg = self.sparse_message_mlp(full_features)
 
             evidence = self._aggregate_events(
                 msg, full_features, dst_padded, valid_mask, batch_idx, raw_x.dtype
             )
+            if profile:
+                _sync_device(evidence.device)
+                timings["graph_message_passing"] = time.perf_counter() - t_msg0
             valid_edge_count = float(valid_mask.sum().item())
 
         if self.n_hops > 1:
@@ -4284,7 +4894,23 @@ class SparseEvidenceGNNCore(nn.Module):
             )
         else:
             readout = evidence.reshape(batch_size, self.n_channels * self.hidden_dim)
+        if profile:
+            t_clf0 = time.perf_counter()
         logits = self.sparse_classifier(readout)
+        if profile:
+            _sync_device(logits.device)
+            timings["classifier"] = time.perf_counter() - t_clf0
+            if "edge_encoding" in timings and self.dense_edge_temporal_mode == "rnn":
+                timings["gru"] = timings["edge_encoding"]
+        if self.cwt_encoder and self.event_mode != "temporal_graph":
+            self._maybe_log_tf_forward(
+                w_real=w_real_in,
+                w_imag=w_imag_in,
+                node_embed=node_embed,
+                events_padded=events_padded,
+                full_features=full_features,
+                timings=timings if profile else None,
+            )
         # matches the old event_density = n_runs / max(B*E*F, 1) exactly:
         # valid_mask.sum() over a batch IS that batch's n_runs. In "dense"
         # and "temporal_graph" modes every edge always "fires" (see
@@ -4493,10 +5119,21 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         # (default) is dense_edge_conv's original Conv2d temporal stack,
         # bit-identical to before this param existed. "rnn" swaps it for a
         # GRU that integrates the full T' sequence with memory instead of
-        # Conv2d's small fixed local window. event_mode="dense" only --
-        # raises otherwise (duplicated validation, same precedent as
+        # Conv2d's small fixed local window. 2026-08-24: "mamba" is a third
+        # option (_DenseEdgeMambaTemporal, forwarded via mamba_* below) --
+        # see that class's docstring. event_mode="dense" only -- raises
+        # otherwise (duplicated validation, same precedent as
         # time_averaged_graph's own checks above).
-        dense_edge_temporal_mode: Literal["conv", "rnn"] = "conv",
+        dense_edge_temporal_mode: Literal["conv", "rnn", "mamba"] = "conv",
+        # dense_edge_temporal_mode="mamba" only, forwarded to
+        # SparseEvidenceGNNCore -- see _DenseEdgeMambaTemporal's docstring.
+        mamba_d_model: int = 16,
+        mamba_d_state: int = 16,
+        mamba_d_conv: int = 4,
+        mamba_expand: int = 2,
+        mamba_n_layers: int = 1,
+        mamba_dropout: float = 0.0,
+        mamba_chunk_size: int = 128,
         # 2026-08-11, forwarded to SparseEvidenceGNNCore -- see that class's
         # docstring / shuffle_time_order. The negative control for
         # dense_edge_temporal_mode="rnn": independently scrambles each
@@ -4511,6 +5148,13 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         # Default (8) matches dense_conv_out_channels's own default purely
         # for comparable sizing, not because it's been tuned.
         temporal_graph_edge_dim: int = 8,
+        # Forwarded to SparseEvidenceGNNCore -- False (default) leaves the
+        # existing dense-edge GRU path unchanged. True adds a shared CWT
+        # time-frequency node encoder whose embeddings join WCT edge
+        # features in the message MLP. See Core's matching docstring.
+        cwt_encoder: bool = False,
+        node_embedding_dim: int | None = None,
+        time_frequency_node_ablation: Literal["none", "zero_node_embed", "node_only"] = "none",
         channel_subset: list[int] | list[str] | None = None,
         # Epilepsy fork only -- see _BaseCWTGNNClassifier._init_cwt_gnn_classifier's
         # docstring (xwt_phase_gnn_classifier.py) for why this defaults to
@@ -4866,22 +5510,22 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
                 f"{dense_conv_kernel_size!r}, dense_conv_pool_size="
                 f"{dense_conv_pool_size!r}."
             )
-        if dense_edge_temporal_mode not in ("conv", "rnn"):
+        if dense_edge_temporal_mode not in ("conv", "rnn", "mamba"):
             raise ValueError(
-                "dense_edge_temporal_mode must be 'conv' or 'rnn', got "
+                "dense_edge_temporal_mode must be 'conv', 'rnn', or 'mamba', got "
                 f"{dense_edge_temporal_mode!r}."
             )
-        if dense_edge_temporal_mode == "rnn" and event_mode != "dense":
+        if dense_edge_temporal_mode in ("rnn", "mamba") and event_mode != "dense":
             raise ValueError(
-                "dense_edge_temporal_mode='rnn' has no meaning when "
-                "event_mode='sparse' -- see SparseEvidenceGNNCore's "
+                f"dense_edge_temporal_mode={dense_edge_temporal_mode!r} has no "
+                "meaning when event_mode='sparse' -- see SparseEvidenceGNNCore's "
                 "dense_edge_temporal_mode docstring."
             )
         if shuffle_time_order and dense_edge_temporal_mode != "rnn":
             raise ValueError(
                 "shuffle_time_order=True has no meaning when "
-                "dense_edge_temporal_mode='conv' -- see SparseEvidenceGNNCore's "
-                "shuffle_time_order docstring."
+                f"dense_edge_temporal_mode={dense_edge_temporal_mode!r} -- see "
+                "SparseEvidenceGNNCore's shuffle_time_order docstring."
             )
         self.event_mode = event_mode
         # 2026-08-16: SparseEvidenceGNNCore.forward's aux return (bursts_per_
@@ -4904,7 +5548,34 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         self.time_averaged_graph = bool(time_averaged_graph)
         self.dense_edge_temporal_mode = dense_edge_temporal_mode
         self.shuffle_time_order = bool(shuffle_time_order)
+        self.mamba_d_model = mamba_d_model
+        self.mamba_d_state = mamba_d_state
+        self.mamba_d_conv = mamba_d_conv
+        self.mamba_expand = mamba_expand
+        self.mamba_n_layers = mamba_n_layers
+        self.mamba_dropout = mamba_dropout
+        self.mamba_chunk_size = mamba_chunk_size
         self.temporal_graph_edge_dim = temporal_graph_edge_dim
+        if time_frequency_node_ablation not in ("none", "zero_node_embed", "node_only"):
+            raise ValueError(
+                "time_frequency_node_ablation must be 'none', 'zero_node_embed', "
+                f"or 'node_only', got {time_frequency_node_ablation!r}."
+            )
+        if cwt_encoder and event_mode != "dense":
+            raise ValueError(
+                "cwt_encoder=True has no meaning when "
+                f"event_mode={event_mode!r} -- see SparseEvidenceGNNCore's "
+                "cwt_encoder docstring."
+            )
+        if time_frequency_node_ablation != "none" and not cwt_encoder:
+            raise ValueError(
+                "time_frequency_node_ablation != 'none' requires "
+                "cwt_encoder=True -- the WCT-only baseline is "
+                "that flag False, not a zeroed approximation of the new model."
+            )
+        self.cwt_encoder = bool(cwt_encoder)
+        self.node_embedding_dim = node_embedding_dim
+        self.time_frequency_node_ablation = time_frequency_node_ablation
         if coherence_threshold_mode not in ("fixed", "surrogate", "surrogate_cluster"):
             raise ValueError(
                 "coherence_threshold_mode must be 'fixed', 'surrogate', or "
@@ -5109,19 +5780,29 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         # below reassigns its own local copy without mutating this one.
         raw_x_native = self._apply_channel_subset(np.asarray(X, dtype=np.float32))
         # Streaming batches call this with fit=False. On a complete dense-edge
-        # cache hit, CWT is unused (w_real/w_imag are only an input to
-        # compute_dense_edge_input) -- skip it. keep_on_device already bypasses
-        # the CWT disk cache, so without this skip every epoch re-ran CWT for
-        # 32*C 30s windows even at 100% dense-edge hits.
+        # cache hit, CWT is unused for the WCT path (w_real/w_imag are only
+        # an input to compute_dense_edge_input) -- skip it UNLESS the CWT
+        # node encoder is on, in which case the trainable encoder still
+        # needs those tensors. keep_on_device already bypasses the CWT disk
+        # cache, so without this skip every epoch re-ran CWT for 32*C 30s
+        # windows even at 100% dense-edge hits (the original WCT-only
+        # default). The encoder path uses the same GPU-resident CWT call
+        # as super()._prepare_features; it does not round-trip through
+        # CPU/NumPy just to feed the node encoder.
+        node_only = (
+            bool(self.cwt_encoder) and self.time_frequency_node_ablation == "node_only"
+        )
+        cached_dense = None
         if (
             (not fit)
+            and (not node_only)
             and self.event_mode in ("dense", "temporal_graph")
             and not self._uses_noise_augmentation()
         ):
             cached_dense = self._try_load_complete_dense_edge_batch(
                 raw_x_native, dense_edge_keys,
             )
-            if cached_dense is not None:
+            if cached_dense is not None and not self.cwt_encoder:
                 raw_x = self._raw_x_tensor_from_windows(raw_x_native)
                 if self.raw_x_resample_n_time is not None and int(
                     self.raw_x_resample_n_time
@@ -5169,16 +5850,49 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
             # the GNN always sees full C / full E; live-edge WCT + scatter
             # into a zero full-E tensor happens inside
             # _precompute_dense_edge_inputs.
-            dense_edge_raw = self._precompute_dense_edge_inputs(
-                raw_x, w_real, w_imag, freqs,
-                raw_x_native=raw_x_native,
-                cache_keys=dense_edge_keys,
-            )
+            # node_only: WCT is unused (messages see (h_i, h_j, 0)), so skip
+            # the dense-edge helper entirely -- a zero placeholder keeps the
+            # (raw_x, dense_edge_raw, w_real, w_imag) tuple shape.
+            if node_only:
+                dense_edge_raw = self._zero_dense_edge_placeholder(raw_x, w_real)
+            elif cached_dense is not None:
+                dense_edge_raw = cached_dense
+            else:
+                dense_edge_raw = self._precompute_dense_edge_inputs(
+                    raw_x, w_real, w_imag, freqs,
+                    raw_x_native=raw_x_native,
+                    cache_keys=dense_edge_keys,
+                )
+            if self.cwt_encoder:
+                # CWT tensors stay on whatever device super()._prepare_features
+                # produced (GPU-resident for the streaming classifier). They
+                # are model INPUTS, not precomputed embeddings -- the
+                # trainable node encoder runs in forward().
+                return raw_x, dense_edge_raw, w_real, w_imag
             return raw_x, dense_edge_raw
         events_padded, src_padded, dst_padded, freq_idx_padded, valid_mask = self._precompute_sparse_events(
             raw_x, w_real, w_imag, freqs, raw_x_native=raw_x_native
         )
         return raw_x, events_padded, src_padded, dst_padded, freq_idx_padded, valid_mask
+
+    def _zero_dense_edge_placeholder(self, raw_x, w_real):
+        """Full-E zeros in the dense-edge layout, used when WCT is unused.
+
+        Shape matches `_build_dense_edge_input`: [B, 4, E, T_out, F].
+        """
+        n_samples = int(raw_x.shape[0])
+        n_channels = int(raw_x.shape[1])
+        n_edges = n_channels * (n_channels - 1) // 2
+        t_in = int(w_real.shape[2])
+        if self.time_averaged_graph:
+            t_out = 1
+        elif int(self.dense_edge_time_downsample) > 1:
+            t_out = t_in // int(self.dense_edge_time_downsample)
+        else:
+            t_out = t_in
+        return w_real.new_zeros(
+            n_samples, 4, n_edges, t_out, int(self.nfreqs)
+        )
 
     def _resolved_surrogate_cache_dir(self):
         return (
@@ -6301,8 +7015,18 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
             dense_edge_time_downsample=self.dense_edge_time_downsample,
             time_averaged_graph=self.time_averaged_graph,
             dense_edge_temporal_mode=self.dense_edge_temporal_mode,
+            mamba_d_model=self.mamba_d_model,
+            mamba_d_state=self.mamba_d_state,
+            mamba_d_conv=self.mamba_d_conv,
+            mamba_expand=self.mamba_expand,
+            mamba_n_layers=self.mamba_n_layers,
+            mamba_dropout=self.mamba_dropout,
+            mamba_chunk_size=self.mamba_chunk_size,
             shuffle_time_order=self.shuffle_time_order,
             temporal_graph_edge_dim=self.temporal_graph_edge_dim,
+            cwt_encoder=self.cwt_encoder,
+            node_embedding_dim=self.node_embedding_dim,
+            time_frequency_node_ablation=self.time_frequency_node_ablation,
             **kwargs,
         )
 
@@ -6489,11 +7213,16 @@ class _LazyFeatureBatchDataset(Dataset):
         # the whole training set in fit() below -- must NOT refit per
         # batch, which would normalize each batch by its own, different,
         # wrong mean/std instead of a single consistent training-set one.
-        raw_x, dense_edge_raw = self.classifier._prepare_features(
+        # With cwt_encoder=True this is
+        # (raw_x, dense_edge_raw, w_real, w_imag); otherwise
+        # (raw_x, dense_edge_raw). _train_loop unpacks *features, y.
+        features = self.classifier._prepare_features(
             X_batch, fit=False, window_keys=batch_keys, dense_edge_keys=dense_keys
         )
         y_batch = torch.from_numpy(self.y_idx[idx]).long()
-        return raw_x, dense_edge_raw, y_batch
+        if isinstance(features, tuple):
+            return (*features, y_batch)
+        return features, y_batch
 
     def __len__(self) -> int:
         return int(self.X_raw.shape[0])
@@ -6667,9 +7396,9 @@ class StreamingSparseEvidenceGNNClassifier(SparseEvidenceGNNClassifier):
         with torch.no_grad():
             for start in range(0, n, batch_size):
                 indices = list(range(start, min(start + batch_size, n)))
-                raw_x, dense_edge_raw, _ = dataset[indices]
+                *batch_features, _ = dataset[indices]
                 batch_inputs = tuple(
-                    t.to(self.device_) for t in (raw_x, dense_edge_raw)
+                    t.to(self.device_) for t in batch_features
                 )
                 logits, _ = self._model_forward(batch_inputs)
                 logits_list.append(logits.cpu().numpy())

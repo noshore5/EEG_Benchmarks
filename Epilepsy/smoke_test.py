@@ -1,5 +1,6 @@
 """
-Editable-params smoke test for the dense_edge_gru / dense_edge pipelines.
+Editable-params smoke test for the dense_edge_gru / dense_edge /
+dense_edge_mamba pipelines.
 
 PARAMS below is the primary way to configure a run -- edit it directly and:
 
@@ -62,8 +63,13 @@ import Epilepsy.run_pipelines as rp
 # EDIT THESE
 # ---------------------------------------------------------------------------
 PARAMS = dict(
-    pipeline="dense_edge_gru",        # "dense_edge_gru" | "dense_edge"
+    pipeline="dense_edge_gru",        # "dense_edge_gru" | "dense_edge" | "dense_edge_mamba"
     label_mode="prediction",          # "prediction" or "detection"
+    cwt_encoder=False,  # True: learned CWT node embeddings
+                                       # alongside WCT edges. Works for
+                                       # either dense_edge pipeline.
+    cwt_encoder_ablation="none",     # "none" | "node_only" | "zero_node_embed"
+                                       # node_only = CWT encoder, no WCT.
     subjects=[1],
     window_length=30.0,               # seconds/window. Real default: 30.0
                                        # (prediction) / 4.0 (detection).
@@ -187,9 +193,21 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--pipeline", choices=["dense_edge_gru", "dense_edge"], default=_UNSET,
+        "--pipeline",
+        choices=["dense_edge_gru", "dense_edge", "dense_edge_mamba"],
+        default=_UNSET,
     )
     parser.add_argument("--label-mode", choices=["prediction", "detection"], default=_UNSET)
+    parser.add_argument(
+        "--cwt-encoder",
+        action=argparse.BooleanOptionalAction,
+        default=_UNSET,
+    )
+    parser.add_argument(
+        "--cwt-encoder-ablation",
+        choices=["none", "zero_node_embed", "node_only"],
+        default=_UNSET,
+    )
     parser.add_argument("--subjects", type=int, nargs="+", default=_UNSET)
     parser.add_argument("--window-length", type=float, default=_UNSET)
     parser.add_argument("--step-size", type=float, default=_UNSET)
@@ -256,9 +274,17 @@ def main() -> None:
     clf_params["verbose"] = p["verbose"]
     clf_params["validation_split"] = p["validation_split"]
     clf_params["early_stopping_patience"] = p["early_stopping_patience"]
+    clf_params["cwt_encoder"] = p["cwt_encoder"]
+    clf_params["time_frequency_node_ablation"] = p["cwt_encoder_ablation"]
+    if p["cwt_encoder_ablation"] != "none":
+        clf_params["cwt_encoder"] = True
     print(
         f"[smoke_test] dense_edge_temporal_mode="
-        f"{clf_params['dense_edge_temporal_mode']!r}\n"
+        f"{clf_params['dense_edge_temporal_mode']!r} "
+        f"cwt_encoder="
+        f"{clf_params.get('cwt_encoder', False)!r} "
+        f"time_frequency_node_ablation="
+        f"{clf_params.get('time_frequency_node_ablation', 'none')!r}\n"
     )
 
     real_stdout = sys.stdout

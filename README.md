@@ -1,6 +1,19 @@
 # EEG_Benchmarks
 Benchmarking on MOABB BCI benchmarks along with additional paradigms
 
+## CHB-MIT subject 1
+
+Default epilepsy pipelines use CHB-MIT subject `chb01`. The recordings are
+not in git; they live on the
+[`chbmit-chb01-1.0.0`](https://github.com/noshore5/EEG_Benchmarks/releases/tag/chbmit-chb01-1.0.0)
+GitHub Release as `chb01.tar.gz` (~991MB, 42 EDFs + summary, PhysioNet
+1.0.0, ODC-By 1.0 -- see `THIRD_PARTY_NOTICES.md`).
+
+`datasets/epilepsy/chb_mit.py` downloads that archive on first use and
+extracts it into the MNE cache (`~/mne_data/MNE-chbmit-data/chbmit/1.0.0/chb01/`).
+Other subjects still come from PhysioNet's S3 mirror. Override the archive
+with `CHBMIT_CHB01_ARCHIVE_URL` / `CHBMIT_CHB01_SHA256` if needed.
+
 ## RunPod pod image
 
 `Dockerfile` (repo root) bakes in this repo's Python dependencies (`pip
@@ -11,14 +24,15 @@ install -r requirements.txt`, no apt build toolchain needed anymore -- see
 deliberately does **not** bake in the repo's pipeline code -- code is synced
 to the pod at launch (rsync/git clone) since it changes on nearly every
 commit. As of 2026-08-21 the image **does** bake in CHB-MIT subject `chb01`
-(~1.6GB, downloaded from the same public S3 mirror
-`datasets/epilepsy/chb_mit.py` uses), landing at
+(~1.6GB uncompressed, ~991MB as `chb01.tar.gz`), landing at
 `/root/mne_data/MNE-chbmit-data/chbmit/1.0.0/chb01/` -- the only subject
 `Epilepsy/run_pipelines.py`'s `DEFAULT_SUBJECTS` exercises by default, so a
-fresh pod never needs a first-run download for the common case. Other
-subjects still download on demand the same way they always have. CHB-MIT is
-distributed under ODC-By 1.0 (attribution-required) -- see
-`THIRD_PARTY_NOTICES.md`, baked into the image alongside the data.
+fresh pod never needs a first-run download for the common case. The image
+and `datasets/epilepsy/chb_mit.py` both pull that archive from the
+[`chbmit-chb01-1.0.0`](https://github.com/noshore5/EEG_Benchmarks/releases/tag/chbmit-chb01-1.0.0)
+GitHub Release (PhysioNet 1.0.0 files, ODC-By 1.0). Other subjects still
+download on demand from PhysioNet's S3 mirror. See
+`THIRD_PARTY_NOTICES.md`.
 
 **Building it:** RunPod pods can't run a Docker daemon themselves (they're
 unprivileged containers, no `cap_sys_admin`), so the image is built by GitHub

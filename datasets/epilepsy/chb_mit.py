@@ -23,12 +23,19 @@ fixed-length, event-locked trials, which doesn't fit seizure data.
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import os
 import re
+import shutil
+import tarfile
+import urllib.request
 from pathlib import Path
 from typing import Dict, List, Optional, Union
+from urllib.parse import unquote, urlparse
 
 import mne
+from mne.utils import _url_to_local_path
 from moabb.datasets.base import BaseDataset
 from moabb.datasets.download import data_dl, get_dataset_path
 try:
@@ -52,8 +59,29 @@ log = logging.getLogger(__name__)
 # download option on https://physionet.org/content/chbmit/1.0.0/); verified
 # byte-identical (sha256) against a file already downloaded from the
 # physionet.org URL before switching. ~20x faster in practice.
+#
+# 2026-08-24: that S3 mirror is still the per-file fallback (and the only
+# source for subjects other than chb01), but a full chb01 fetch (~42 EDFs,
+# ~1.6GB) is the default pipeline's first-run bottleneck. Subject 1 is
+# redistributed as a single GitHub Release archive (ODC-By 1.0; see
+# THIRD_PARTY_NOTICES.md) and extracted into the same MNE cache layout
+# data_dl would have used for the S3 URLs, so an existing S3 cache is
+# reused and GitHub-populated files still satisfy later data_dl lookups.
 BASE_URL = "https://physionet-open.s3.amazonaws.com/chbmit/1.0.0/"
 SIGN = "CHBMIT"
+
+CHB01_GITHUB_TAG = "chbmit-chb01-1.0.0"
+CHB01_GITHUB_ARCHIVE_URL = (
+    "https://github.com/noshore5/EEG_Benchmarks/releases/download/"
+    f"{CHB01_GITHUB_TAG}/chb01.tar.gz"
+)
+# SHA-256 of the GitHub Release asset chb01.tar.gz. Override with
+# CHBMIT_CHB01_SHA256 in tests or if the archive is rebuilt.
+CHB01_GITHUB_SHA256 = "bf91e579c8b61a6813442d9351fa6e111dd6078d43ab2b04fd66d4660324b6f9"
+CHB01_GITHUB_SUBJECT = 1
+
+# One failed GitHub prefetch per process: don't retry on every missing EDF.
+_CHB01_PREFETCH_FAILED = False
 
 _FILE_RE = re.compile(r"File Name:\s*(\S+)")
 # Single-seizure files write "Seizure Start Time: N seconds"; files with
@@ -104,6 +132,180 @@ def parse_summary(text: str) -> List[dict]:
     return records
 
 
+def _chb01_archive_url() -> str:
+    return os.environ.get("CHBMIT_CHB01_ARCHIVE_URL", CHB01_GITHUB_ARCHIVE_URL)
+
+
+def _chb01_archive_sha256() -> str:
+    return os.environ.get("CHBMIT_CHB01_SHA256", CHB01_GITHUB_SHA256)
+
+
+def cache_destination(url: str, path: Optional[Union[str, Path]] = None) -> Path:
+    """Local path ``data_dl`` would use for ``url`` without downloading."""
+    root = Path(get_dataset_path(SIGN, path)) / f"MNE-{SIGN.lower()}-data"
+    return Path(_url_to_local_path(url, str(root)))
+
+
+def chb01_cache_dir(path: Optional[Union[str, Path]] = None) -> Path:
+    return cache_destination(f"{BASE_URL}chb01/chb01-summary.txt", path).parent
+
+
+def chb01_cache_complete(dest_dir: Path) -> bool:
+    """True if dest_dir has the summary and every EDF it lists."""
+    summary = dest_dir / "chb01-summary.txt"
+    if not summary.is_file():
+        return False
+    try:
+        records = parse_summary(summary.read_text())
+    except OSError:
+        return False
+    if not records:
+        return False
+    return all((dest_dir / rec["filename"]).is_file() for rec in records)
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _valid_sha256(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    value = value.lower()
+    if len(value) == 64 and all(c in "0123456789abcdef" for c in value):
+        return value
+    return None
+
+
+def download_url(url: str, dest: Path, sha256: Optional[str] = None) -> Path:
+    """Fetch ``url`` to ``dest``. Optional sha256 is hex, checked after write."""
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    sha256 = _valid_sha256(sha256)
+    if dest.is_file() and (sha256 is None or _sha256_file(dest) == sha256):
+        return dest
+
+    tmp = dest.with_name(dest.name + ".part")
+    if tmp.exists():
+        tmp.unlink()
+
+    log.info("Downloading %s -> %s", url, dest)
+    parsed = urlparse(url)
+    if parsed.scheme == "file":
+        shutil.copy2(unquote(parsed.path), tmp)
+    else:
+        try:
+            from pooch import retrieve
+
+            known_hash = f"sha256:{sha256}" if sha256 else None
+            got = retrieve(
+                url,
+                known_hash=known_hash,
+                fname=tmp.name,
+                path=str(tmp.parent),
+                progressbar=True,
+            )
+            if Path(got) != tmp:
+                Path(got).replace(tmp)
+        except ImportError:
+            request = urllib.request.Request(
+                url, headers={"User-Agent": "EEG_Benchmarks/chbmit"}
+            )
+            with urllib.request.urlopen(request, timeout=3600) as resp, tmp.open(
+                "wb"
+            ) as out:
+                shutil.copyfileobj(resp, out, length=1 << 20)
+    if sha256 is not None and _sha256_file(tmp) != sha256:
+        tmp.unlink()
+        raise ValueError(f"sha256 mismatch for {url}")
+    tmp.replace(dest)
+    return dest
+
+
+def _safe_tar_members(tar: tarfile.TarFile):
+    for member in tar.getmembers():
+        parts = Path(member.name).parts
+        if member.name.startswith("/") or ".." in parts:
+            raise ValueError(f"Refusing tar member with unsafe path: {member.name}")
+        yield member
+
+
+def extract_chb01_archive(archive: Path, extract_root: Path) -> Path:
+    """Extract ``chb01/...`` members of ``archive`` into ``extract_root``.
+
+    ``extract_root`` is the PhysioNet version directory (``.../1.0.0``), so
+    members named ``chb01/chb01_01.edf`` land at the S3 cache path.
+    """
+    extract_root = Path(extract_root)
+    extract_root.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(archive, "r:*") as tar:
+        members = list(_safe_tar_members(tar))
+        try:
+            tar.extractall(extract_root, members=members, filter="data")
+        except TypeError:
+            tar.extractall(extract_root, members=members)
+    dest_dir = extract_root / "chb01"
+    if not chb01_cache_complete(dest_dir):
+        raise RuntimeError(
+            f"Extracted {archive} into {extract_root} but chb01 cache is incomplete"
+        )
+    return dest_dir
+
+
+def prefetch_chb01_from_github(
+    path: Optional[Union[str, Path]] = None,
+    force: bool = False,
+) -> bool:
+    """Populate the subject-1 MNE cache from the GitHub Release archive.
+
+    Returns True if the cache is complete afterwards. Returns False if the
+    archive could not be fetched (caller should fall back to PhysioNet S3).
+    Summary-only lookups should not call this -- it pulls ~1GB.
+    """
+    global _CHB01_PREFETCH_FAILED
+    dest_dir = chb01_cache_dir(path)
+    if not force and chb01_cache_complete(dest_dir):
+        return True
+    if _CHB01_PREFETCH_FAILED and not force:
+        return False
+
+    if force:
+        _CHB01_PREFETCH_FAILED = False
+
+    url = _chb01_archive_url()
+    sha256 = _chb01_archive_sha256()
+    extract_root = dest_dir.parent
+    archive_name = Path(urlparse(url).path).name or "chb01.tar.gz"
+    archive = (
+        Path(get_dataset_path(SIGN, path))
+        / f"MNE-{SIGN.lower()}-data"
+        / "github-releases"
+        / archive_name
+    )
+    try:
+        download_url(url, archive, sha256=sha256)
+        extract_chb01_archive(archive, extract_root)
+    except Exception as exc:
+        _CHB01_PREFETCH_FAILED = True
+        log.warning(
+            "GitHub chb01 archive failed (%s); falling back to PhysioNet S3",
+            exc,
+        )
+        return False
+    finally:
+        if archive.is_file():
+            try:
+                archive.unlink()
+            except OSError:
+                pass
+    _CHB01_PREFETCH_FAILED = False
+    return chb01_cache_complete(dest_dir)
+
+
 class CHBMIT(BaseDataset):
     """CHB-MIT Scalp EEG Database.
 
@@ -113,9 +315,9 @@ class CHBMIT(BaseDataset):
         Optional filter restricting which recordings are used per subject,
         e.g. ``{1: ["chb01_03.edf", "chb01_04.edf"]}``. If a subject has no
         entry (or ``records`` is None), all recordings listed in that
-        subject's summary file are used. Mainly useful to avoid downloading
-        an entire subject (~40 one-hour files) when only a few recordings
-        are needed, e.g. for testing against :meth:`list_seizure_records`.
+        subject's summary file are used. For subjects other than 1 this
+        still skips unused S3 downloads. Subject 1 is filled from one
+        GitHub archive, so a filter no longer saves the first-run fetch.
     """
 
     def __init__(self, records: Optional[Dict[int, List[str]]] = None):
@@ -153,6 +355,30 @@ class CHBMIT(BaseDataset):
 
     def _record_url(self, subject: int, filename: str) -> str:
         return f"{BASE_URL}{self._subject_dir(subject)}/{filename}"
+
+    def _local_file(
+        self,
+        subject: int,
+        filename: str,
+        path: Optional[Union[str, Path]] = None,
+        force_update: bool = False,
+    ) -> Path:
+        """Return the cached path for one CHB-MIT file, downloading if needed.
+
+        Subject 1 EDFs (not the tiny summary) are filled from the GitHub
+        Release archive when the S3-shaped cache is incomplete. Other
+        subjects, and any GitHub failure, use PhysioNet S3 via ``data_dl``.
+        """
+        url = self._record_url(subject, filename)
+        dest = cache_destination(url, path)
+        if dest.is_file() and not force_update:
+            return dest
+        is_edf = filename.lower().endswith(".edf")
+        if subject == CHB01_GITHUB_SUBJECT and is_edf:
+            prefetch_chb01_from_github(path=path, force=force_update)
+            if dest.is_file():
+                return dest
+        return Path(data_dl(url, SIGN, path, force_update))
 
     def _summary_path(
         self,
@@ -226,13 +452,8 @@ class CHBMIT(BaseDataset):
         paths = [self._summary_path(subject, path, force_update)]
         for record in records:
             paths.append(
-                Path(
-                    data_dl(
-                        self._record_url(subject, record["filename"]),
-                        SIGN,
-                        path,
-                        force_update,
-                    )
+                self._local_file(
+                    subject, record["filename"], path=path, force_update=force_update
                 )
             )
         return paths
@@ -244,7 +465,7 @@ class CHBMIT(BaseDataset):
 
         runs = {}
         for idx, record in enumerate(records, start=1):
-            edf_path = data_dl(self._record_url(subject, record["filename"]), SIGN)
+            edf_path = self._local_file(subject, record["filename"])
             raw = mne.io.read_raw_edf(edf_path, preload=False, verbose="ERROR")
 
             onsets = [onset for onset, _ in record["seizures"]]
