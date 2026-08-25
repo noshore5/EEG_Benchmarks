@@ -189,13 +189,12 @@ read off a continuous timeline). See "Open threads" below.
 - Mamba's `1_18_0` recall collapse (0.100 vs GRU's 0.767, same seizure) --
   not investigated, biggest single per-seizure divergence in the
   comparison.
-- `Epilepsy/runpod_mamba_fast_image_brief.md` -- Task A (`Dockerfile.mamba`)
-  and Task B (`use_cuda_kernel` plumbing) are in the tree. Image is built
-  by `.github/workflows/build-mamba-pod-image.yml` (not locally -- this
-  Mac has no Docker, RunPod pods have no daemon). **Not yet pushed /
-  built on GHCR.** After the image exists: kernel-vs-pscan parity
+- `Epilepsy/runpod_mamba_fast_image_brief.md` -- Task A/B in tree.
+  Image **built and pushed** 2026-08-25 (GHA run 32843334915, ~31 min):
+  `ghcr.io/noshore5/eeg_benchmarks-mamba:20260825-4760de0` and `:latest`.
+  **Not yet run on a pod.** Next: kernel-vs-pscan parity
   (`scripts/dense_edge_mamba_cuda_kernel_parity.py`) then
-  `--max-folds 1 --epochs 1` on a pod, and record epoch_time vs the
+  `--max-folds 1 --epochs 1` on a CUDA pod, record epoch_time vs the
   ~65s/epoch mambapy baseline. Fused kernel is windowed Temporal only;
   continuous `scan="chunk"` cannot use `selective_scan_fn` (no
   initial-state argument).
