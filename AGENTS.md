@@ -13,3 +13,15 @@ to match -- not just a session note. Session notes
 (`Epilepsy/Session_notes/<date>/`) are the detailed historical record and
 should still be written; `CONTEXT.md` is the short pointer-heavy summary
 of what's still true *right now*, kept current on top of them.
+
+Facts that flipped in 2026-08-25 and are easy to reverse by reading old
+comments -- confirm in `CONTEXT.md` rather than the file-level docstring
+that introduced them:
+
+- Current branch is `continuous-cwt-mamba`.
+- `_DenseEdgeMambaTemporal.use_cuda_kernel` is auto-detect, not forced
+  `False`. Fused-kernel image:
+  `ghcr.io/noshore5/eeg_benchmarks-mamba:20260825-4760de0`.
+- Continuous Mamba default scan is `"chunk"` (carried-state pscan), not
+  the Python `step()` loop. Real CHB-MIT / LOSO pipeline for that
+  paradigm is not started.

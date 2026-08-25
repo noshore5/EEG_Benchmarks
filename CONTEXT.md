@@ -9,7 +9,8 @@ Claude/Grok shells that don't share context with each other, and this is
 the one file meant to catch a new shell up without it re-reading
 everything.
 
-**Last updated:** 2026-08-25, by Grok (`scan="chunk"` + `Dockerfile.mamba` / `use_cuda_kernel` plumbing).
+**Last updated:** 2026-08-25, by Grok (`scan="chunk"`, `use_cuda_kernel`,
+GHCR `eeg_benchmarks-mamba` image live).
 
 ---
 
@@ -112,12 +113,12 @@ read off a continuous timeline). See "Open threads" below.
 - `mamba-temporal-edge-model` (remote, `origin/`) -- where
   `dense_edge_temporal_mode="mamba"` (`_DenseEdgeMambaTemporal`) was
   developed. Merged into `main` at `6d38573`.
-- `continuous-cwt-mamba` -- **current branch**. Has `main` +
-  `mamba-temporal-edge-model` both merged in (so `dense_edge_mamba` IS
-  available here, HEAD has 11 references to `_DenseEdgeMambaTemporal`),
-  plus a `--skip-folds` CLI flag for resuming partial multi-fold runs, plus
-  committed continuous/streaming Mamba (`aa3c565`) and uncommitted
-  `scan="chunk"` throughput work described above.
+- `continuous-cwt-mamba` -- **current branch**, tracking
+  `origin/continuous-cwt-mamba`. Has `main` + `mamba-temporal-edge-model`
+  both merged in (so `dense_edge_mamba` IS available here), plus
+  `--skip-folds`, plus committed continuous Mamba (`aa3c565` plumbing,
+  `4760de0` `scan="chunk"` + `use_cuda_kernel` + `Dockerfile.mamba`).
+  Working tree was clean at last update.
 - `tf-node-encoding`, `dynmaic_subset` -- exist locally, not investigated
   this session; don't assume they have dense-edge-mamba unless you check.
 - If you're starting a session and need `dense_edge_mamba`: check you're
@@ -128,19 +129,21 @@ read off a continuous timeline). See "Open threads" below.
 
 ## Known gotchas (keep rediscovering these -- stop rediscovering them)
 
-- **No `mamba-ssm` (CUDA kernel) on Windows.** PyPI ships sdist-only, needs
-  nvcc + Linux toolchain to build. This repo uses `mambapy` (pure PyTorch,
-  `requirements.txt`) instead, which runs everywhere but is much slower
-  per epoch. On a Linux/CUDA box (e.g. RunPod), `mambapy`'s own
-  `MambaConfig.use_cuda=True` will delegate to real `mamba-ssm` if it's
-  importable -- currently forced `False` in this repo's code
-  (`_DenseEdgeMambaTemporal.__init__`). See
-  `Epilepsy/runpod_mamba_fast_image_brief.md` for the build+code-change
-  plan to actually flip this on.
-- **That `use_cuda=True` path is NOT compatible with (b)float16** per
-  `mambapy`'s own docs -- this repo's matched comparison runs default to
-  `--dense-edge-amp-bf16 --train-amp-bf16`. Don't mix them without
-  checking; see the brief above.
+- **No `mamba-ssm` (CUDA kernel) on Windows/Mac.** PyPI ships sdist-only,
+  needs nvcc + Linux. Portable default is still `mambapy` pscan
+  (`requirements.txt`). `_DenseEdgeMambaTemporal(use_cuda_kernel=None)`
+  now **auto-detects**: True iff CUDA + `mamba-ssm` importable, else
+  False. Explicit `--mamba-use-cuda-kernel` errors if the kernel isn't
+  there (no silent fallback). The RunPod image
+  `ghcr.io/noshore5/eeg_benchmarks-mamba:20260825-4760de0` (also `:latest`)
+  has the kernel compiled in -- that is the box to use it on. Do not
+  re-force `use_cuda=False` in `__init__`; that was the old state.
+- **Fused kernel is NOT compatible with (b)float16** (mambapy's own
+  docs). When `use_cuda_kernel` is on, `_mamba_pooled` disables autocast
+  and runs that block in fp32, so `--train-amp-bf16` on the rest of the
+  model is OK. Don't feed bf16 into the kernel yourself. Continuous
+  `_DenseEdgeMambaContinuous` does **not** use this kernel
+  (`selective_scan_fn` has no initial-state argument).
 - **`smoke_test.py`'s epoch_time is not a full-run predictor**, especially
   for the mamba backend. It defaults to capped data
   (`max_interictal_recordings=5`) and `mamba_chunk_size` overhead scales
