@@ -38,6 +38,24 @@ pipeline_debug.py), but this script instead tees stdout and greps out each
 printed "[Train][Epoch N/M] ... epoch_time=X.XXs" line (see
 _EpochTimeCapture below) so it works across every fold without touching
 either loop function's signature.
+
+CAVEAT (2026-08-25): the printed epoch_time is NOT a reliable predictor of
+a full run_pipelines.py invocation's epoch_time unless every PARAMS key
+that affects batch volume/composition is overridden to match the real run
+-- most importantly max_interictal_recordings (defaults to 5 here, capped,
+vs. real runs' typical uncapped/None) and channel_subset_k. Fewer/smaller
+batches just make epochs shorter, independent of anything architectural.
+This bit doubly for dense_edge_mamba: mamba_chunk_size chunking overhead
+(a memory tactic, not FLOPs) scales nonlinearly with batch composition, so
+a smoke-scale Mamba epoch_time can overstate the real run's Mamba/GRU
+slowdown ratio by several x (measured 2026-08-25: ~14x at smoke scale vs.
+~4.6x at real full-mesh/uncapped scale, same code, same hardware). To
+actually estimate a full run's per-epoch time, run run_pipelines.py itself
+with --max-folds 1 --epochs 1 (or 2) and the real params -- not this
+script with its capped defaults. Use this script for what its PARAMS
+block is actually good at: fast correctness/crash checks and small
+architecture A/B timing comparisons at consistent smoke scale, not
+full-run duration estimates.
 """
 
 from __future__ import annotations
@@ -84,6 +102,11 @@ PARAMS = dict(
     max_interictal_recordings=5,      # label_mode="prediction" only. None =
                                        # every seizure-free recording for the
                                        # subject (~33 files/~1.7GB for chb01).
+                                       # NOTE: capped here vs. real runs'
+                                       # typical None -- this alone makes
+                                       # epoch_time below non-representative
+                                       # of a full run's epoch_time (see
+                                       # module docstring caveat).
     channel_subset_k=4,               # None = full mesh. k channels ->
                                        # clique of k*(k-1)/2 live edges
                                        # scattered into full-E zeros.
@@ -332,6 +355,17 @@ def main() -> None:
             f"min={min(all_times):.2f}s  max={max(all_times):.2f}s  "
             f"n={len(all_times)}"
         )
+        if p["max_interictal_recordings"] is not None:
+            print(
+                "  NOTE: max_interictal_recordings="
+                f"{p['max_interictal_recordings']!r} (capped) -- this "
+                "epoch_time does NOT predict a full/uncapped run's "
+                "epoch_time. For pipeline='dense_edge_mamba' the gap is "
+                "worse than proportional (mamba_chunk_size overhead scales "
+                "nonlinearly with batch composition). To estimate a real "
+                "run's epoch_time, run run_pipelines.py directly with "
+                "--max-folds 1 --epochs 1 and the real (uncapped) params."
+            )
 
 
 if __name__ == "__main__":
