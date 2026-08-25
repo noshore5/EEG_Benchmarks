@@ -9,10 +9,19 @@ Claude/Grok shells that don't share context with each other, and this is
 the one file meant to catch a new shell up without it re-reading
 everything.
 
-**Last updated:** 2026-08-25, by Claude (wrote the deferred 4-way
-pipeline comparison -- GRU vs Mamba vs DBConformer vs SlimSeiz, chb01
-prediction, all under the same shared protocol; Mamba leads on AP
-(0.499), see
+**Last updated:** 2026-08-25, by Claude (committed all outstanding
+work on `continuous-cwt-mamba` -- SlimSeiz channel-select stage, the
+`--slimseiz-fixed-channels` flag, the DBConformer depth/weight sweep, the
+4-way pipeline comparison note, and this file's own recent edits --
+pushed, fast-forward-merged into `main`, then deleted `continuous-cwt-mamba`
+both locally and on `origin`. **`continuous-cwt-mamba` no longer exists --
+any shell still referencing it as "the current branch" (including
+`CLAUDE.md`'s "Facts that flipped" section, not yet updated) should treat
+`main` as current instead.** No code changes in this update, just
+branch/repo state.). Prior entry, still current: Claude (wrote the
+deferred 4-way pipeline comparison -- GRU vs Mamba vs DBConformer vs
+SlimSeiz, chb01 prediction, all under the same shared protocol; Mamba
+leads on AP (0.499), see
 `Session_notes/2026_08_25/pipeline_comparison_gru_mamba_dbconformer_slimseiz.md`
 for the full table and per-fold breakdown. Also corrected two notes'
 "root cause may be a second simultaneous Claude-shell job" framing for

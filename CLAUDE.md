@@ -18,7 +18,12 @@ Facts that flipped in 2026-08-25 and are easy to reverse by reading old
 comments -- confirm in `CONTEXT.md` rather than the file-level docstring
 that introduced them:
 
-- Current branch is `continuous-cwt-mamba`.
+- Current branch is `main` -- `continuous-cwt-mamba` was merged into
+  `main` (fast-forward) and deleted (both locally and on `origin`) on
+  2026-08-25. Its work (SlimSeiz channel-select stage,
+  `--slimseiz-fixed-channels`, the DBConformer sweep, the 4-way pipeline
+  comparison) now lives on `main`; confirm in `CONTEXT.md` before
+  assuming any of the below still needs its own branch.
 - `_DenseEdgeMambaTemporal.use_cuda_kernel` is auto-detect, not forced
   `False`. Fused-kernel image:
   `ghcr.io/noshore5/eeg_benchmarks-mamba:20260825-4760de0`.
