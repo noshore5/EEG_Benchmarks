@@ -9,12 +9,35 @@ Claude/Grok shells that don't share context with each other, and this is
 the one file meant to catch a new shell up without it re-reading
 everything.
 
-**Last updated:** 2026-08-25, by Grok (`scan="chunk"`, `use_cuda_kernel`,
-GHCR `eeg_benchmarks-mamba` image live).
+**Last updated:** 2026-08-25, by Claude (`--pipeline dbconformer`/`slimseiz`
+added; see bullet immediately below). Prior entry, still current: Grok
+(`scan="chunk"`, `use_cuda_kernel`, GHCR `eeg_benchmarks-mamba` image live).
 
 ---
 
 ## Right now
+
+**`--pipeline dbconformer` / `--pipeline slimseiz` added to
+`run_pipelines.py` (2026-08-25, this branch).** Two new raw-EEG classifiers
+vendored from the same upstream repo as each other (`../DBConformer/models/`
+in this checkout) into `Epilepsy/pipelines/dbconformer_classifier.py` /
+`slimseiz_classifier.py` -- DBConformer (dual temporal/spatial-Transformer)
+and SlimSeiz (1-D conv stem + a self-contained sequential-scan Mamba block,
+independent of this repo's own `mambapy`-based dense-edge-mamba). Neither
+does CWT/STFT preprocessing -- they classify raw `(n_channels,
+n_timepoints)` windows directly, so no disk cache either. Both respect
+`--label-mode` (detection AND prediction, unlike `truong_stft_cnn` which
+forces prediction-only) via their own shared leave-one-seizure-out loops
+(`leave_one_seizure_out_raw_classifier[_prediction]` in `run_pipelines.py`).
+Own hyperparameter blocks, own `results/dbconformer/` / `results/slimseiz/`
+output dirs. `einops==0.8.2` added to `requirements.txt` (both models'
+attention/Mamba code needs it); `timm` was NOT added -- DBConformer's one
+`trunc_normal_` use was swapped for `torch.nn.init.trunc_normal_` instead
+(see that module's docstring for this and every other vendoring adaptation).
+Verified with `--smoke --max-folds 1 --device cpu` for both pipelines x
+both label modes (wiring only, not model quality -- untrained/untuned
+hyperparameters, see each PARAMS dict's own "starting point" comments).
+Not yet run at real (non-smoke) scale or tuned against a real fold.
 
 GRU vs Mamba (encoder-free, full 23-channel mesh, val split 0.2, early
 stop, matched protocol) across all 6 chb01 leave-one-seizure-out folds —

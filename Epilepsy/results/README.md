@@ -15,3 +15,5 @@ Prediction results also carry event-level metrics (`hit`, `false_alarms_per_hour
 
 - `cwt_encoder/` (GRU) and `dense_edge/cwt_encoder/`: `--cwt-encoder` on the corresponding dense-family pipeline -- learned CWT node embeddings on top of WCT edges. Do not pool these with the WCT-only CSVs in `prediction/` / `dense_edge/prediction/`.
 - `cwt_encoder/node_only/`: `--cwt-encoder-ablation node_only` -- CWT encoder with WCT edge features (and WCT compute) off. Not comparable to joint CWT+WCT runs under `cwt_encoder/`.
+
+- `dbconformer/` and `slimseiz/`: `--pipeline dbconformer` / `--pipeline slimseiz` -- raw-EEG classifiers (no CWT/STFT preprocessing; see Epilepsy/pipelines/dbconformer_classifier.py / slimseiz_classifier.py). Each respects --label-mode like the dense family (`<pipeline>/leave_one_seizure_out_*.csv` for detection, `<pipeline>/prediction/` for prediction) -- not comparable to dense_edge*/truong_stft_cnn's numbers (different architecture) or to each other's across label modes.

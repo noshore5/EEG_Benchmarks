@@ -1,5 +1,5 @@
 """Entry point for the Epilepsy dense-edge pipelines (and, via --pipeline,
-the Truong et al. 2018 STFT+CNN replica).
+the Truong et al. 2018 STFT+CNN replica, DBConformer, and SlimSeiz).
 
     python Epilepsy/run_pipelines.py --subjects 1
     python Epilepsy/run_pipelines.py --smoke
@@ -8,9 +8,12 @@ the Truong et al. 2018 STFT+CNN replica).
     python Epilepsy/run_pipelines.py --pipeline dense_edge_gru --cwt-encoder --smoke
     python Epilepsy/run_pipelines.py --pipeline dense_edge_mamba --smoke
     python Epilepsy/run_pipelines.py --pipeline truong_stft_cnn --smoke
+    python Epilepsy/run_pipelines.py --pipeline dbconformer --smoke
+    python Epilepsy/run_pipelines.py --pipeline slimseiz --smoke
 
---pipeline {dense_edge_gru, dense_edge, dense_edge_mamba, truong_stft_cnn}:
-which CLASSIFIER runs, on top of --label-mode's which TASK it's trained for.
+--pipeline {dense_edge_gru, dense_edge, dense_edge_mamba, truong_stft_cnn,
+dbconformer, slimseiz}: which CLASSIFIER runs, on top of --label-mode's
+which TASK it's trained for.
 "dense_edge_gru" (default) is this file's own SparseEvidenceGNNClassifier with
 dense_edge_temporal_mode="rnn" (per-edge GRU) and respects --label-mode
 normally. "dense_edge" is the same classifier with
@@ -45,6 +48,22 @@ length, vs. dense_edge_gru's 4s/8s), and its own results/truong_stft_cnn/
 output directory. Dataset loading (_build_windowed_dataset,
 _subsample_negative_windows below) IS shared across --pipeline values --
 that part is generic to any label_mode="prediction" run, not GNN-specific.
+
+"dbconformer" and "slimseiz" (2026-08-25) are DBConformerClassifier /
+SlimSeizClassifier (Epilepsy/pipelines/dbconformer_classifier.py,
+slimseiz_classifier.py -- vendored from the same upstream repo as each
+other; see those modules' docstrings for exactly what's vendored vs.
+adapted). Unlike truong_stft_cnn, NEITHER forces --label-mode -- both are
+plain classifiers over raw (n_channels, n_timepoints) windows (no CWT/STFT
+preprocessing, no disk cache) that respect --label-mode the same way the
+dense family does, via their own leave-one-seizure-out loops
+(leave_one_seizure_out_raw_classifier[_prediction], below -- shared between
+the two since they have the same fit/predict_proba/classes_ contract and
+only the model architecture differs, unlike dense-family vs. truong_stft_cnn
+which genuinely differ in preprocessing). Own hyperparameter blocks
+(DBCONFORMER_PARAMS/PREDICTION_DBCONFORMER_PARAMS,
+SLIMSEIZ_PARAMS/PREDICTION_SLIMSEIZ_PARAMS) and own results/dbconformer/,
+results/slimseiz/ output directories.
 
 This is the epilepsy counterpart to BCI/run_pipelines.py's "dense_edge" /
 "dense_edge_gru" pipelines (SparseEvidenceGNNClassifier, event_mode="dense",
@@ -114,6 +133,8 @@ from Epilepsy.pipelines.cwt_gnn_classifiers import (
 from Epilepsy.pipelines.cwt_window_cache import DISABLE_CWT_CACHE, DiskCWTCache, default_cwt_cache_root
 from Epilepsy.pipelines.dense_edge_cache import default_dense_edge_cache_root
 from Epilepsy.pipelines.truong_stft_cnn_classifier import TruongSTFTCNNClassifier, k_of_n_alarm
+from Epilepsy.pipelines.dbconformer_classifier import DBConformerClassifier
+from Epilepsy.pipelines.slimseiz_classifier import SlimSeizClassifier
 
 
 def resolve_disable_disk_cache(device, explicit: bool | None) -> bool:
@@ -490,6 +511,126 @@ TRUONG_STFT_CNN_PARAMS: dict[str, object] = dict(
     learning_rate=1e-3,
     verbose=1,
 )
+
+# --pipeline="dbconformer" / "slimseiz" -- raw-EEG classifiers (DBConformer:
+# dual temporal/spatial-Transformer; SlimSeiz: conv + Mamba -- see
+# Epilepsy/pipelines/dbconformer_classifier.py / slimseiz_classifier.py's
+# module docstrings for what's vendored vs. adapted). Unlike truong_stft_cnn,
+# neither forces a --label-mode -- both plug into the generic leave-one-
+# seizure-out loops the same way the dense family does (see
+# leave_one_seizure_out_raw_classifier[_prediction] below), just without any
+# CWT/dense-edge preprocessing or disk cache (these models classify raw
+# (n_samples, n_channels, n_timepoints) windows directly -- no per-window
+# feature tensor large enough to make caching worthwhile).
+# _DBCONFORMER_SHARED_PARAMS / _SLIMSEIZ_SHARED_PARAMS hold each model's own
+# architecture knobs (irrelevant to the other model); batch_size/
+# learning_rate are split into separate detection/prediction dicts below
+# (not read off the shared dict) for the same "tuning one label_mode's
+# training dynamics must not silently move the other's" reasoning
+# DENSE_EDGE_GRU_PARAMS/PREDICTION_GRU_PARAMS already follow. All starting
+# points, not tuned.
+_DBCONFORMER_SHARED_PARAMS: dict[str, object] = dict(
+    seed=42,
+    device="mps",
+    emb_size=40,
+    tem_depth=5,
+    chn_depth=5,
+    patch_size=128,  # see DBConformerClassifier's docstring -- divides both the 4s and 30s default windows
+    spa_dim=16,
+    gate_flag=False,
+    posemb_flag=True,
+    branch="all",
+    chn_atten_flag=True,
+    normalize_input=True,
+    weight_decay=1e-4,
+    grad_clip_norm=None,
+    early_stopping_patience=5,
+    use_class_weights=True,
+    verbose=1,
+)
+
+DBCONFORMER_PARAMS: dict[str, object] = dict(
+    _DBCONFORMER_SHARED_PARAMS,
+    batch_size=32,
+    learning_rate=1e-3,
+    validation_split=0.2,
+)
+
+PREDICTION_DBCONFORMER_PARAMS: dict[str, object] = dict(
+    _DBCONFORMER_SHARED_PARAMS,
+    batch_size=32,
+    learning_rate=1e-3,
+    validation_split=0.2,
+)
+
+_SLIMSEIZ_SHARED_PARAMS: dict[str, object] = dict(
+    seed=42,
+    device="mps",
+    normalize_input=True,
+    weight_decay=1e-4,
+    grad_clip_norm=None,
+    early_stopping_patience=5,
+    use_class_weights=True,
+    verbose=1,
+)
+
+SLIMSEIZ_PARAMS: dict[str, object] = dict(
+    _SLIMSEIZ_SHARED_PARAMS,
+    batch_size=32,
+    learning_rate=1e-3,
+    validation_split=0.2,
+)
+
+PREDICTION_SLIMSEIZ_PARAMS: dict[str, object] = dict(
+    _SLIMSEIZ_SHARED_PARAMS,
+    batch_size=32,
+    learning_rate=1e-3,
+    validation_split=0.2,
+)
+
+
+def _raw_classifier_family_params(pipeline: str, label_mode: str) -> dict:
+    """Param dict for --pipeline dbconformer / slimseiz x --label-mode --
+    mirrors `_dense_family_params` above for the raw-EEG classifier family.
+    Returns the module-level dict itself (caller must `dict(...)` copy
+    before overlaying CLI overrides)."""
+    if pipeline == "dbconformer":
+        return PREDICTION_DBCONFORMER_PARAMS if label_mode == "prediction" else DBCONFORMER_PARAMS
+    if pipeline == "slimseiz":
+        return PREDICTION_SLIMSEIZ_PARAMS if label_mode == "prediction" else SLIMSEIZ_PARAMS
+    raise ValueError(f"not a raw-classifier-family pipeline: {pipeline!r}")
+
+
+def _raw_classifier_family_result_dir(
+    output_dir: Path,
+    pipeline: str,
+    label_mode: str,
+    shuffle_labels: bool,
+) -> Path:
+    """Where dbconformer/slimseiz CSVs land: results/<pipeline>/ (detection)
+    or results/<pipeline>/prediction/ -- own subtree per pipeline, same
+    "never pooled with a different architecture's numbers by a downstream
+    glob" reasoning as `_dense_family_result_dir` / truong_stft_cnn's own
+    results/truong_stft_cnn/."""
+    root = output_dir / pipeline
+    if label_mode == "prediction":
+        return root / ("prediction_shuffled_control" if shuffle_labels else "prediction")
+    return root / "shuffled_control" if shuffle_labels else root
+
+
+def _apply_raw_classifier_cli_overrides(clf_params: dict, args: argparse.Namespace) -> None:
+    """Overlay run_pipelines CLI flags onto a dbconformer/slimseiz param
+    dict in place -- the subset of `_apply_dense_family_cli_overrides` that
+    actually applies to this family (no channel_subset_k/cwt_encoder/mamba/
+    precompute/amp flags -- these classifiers have none of those params)."""
+    clf_params["seed"] = args.seed
+    clf_params["device"] = args.device
+    if args.verbose is not None:
+        clf_params["verbose"] = args.verbose
+    if args.validation_split is not None:
+        clf_params["validation_split"] = args.validation_split
+    if args.early_stopping_patience is not None:
+        clf_params["early_stopping_patience"] = args.early_stopping_patience
 
 
 def _build_windowed_dataset(
@@ -1263,12 +1404,264 @@ def leave_one_seizure_out_truong(
     return pd.DataFrame(fold_rows), pd.DataFrame(per_seizure_rows)
 
 
+def leave_one_seizure_out_raw_classifier(
+    classifier_cls,
+    X: np.ndarray,
+    y: np.ndarray,
+    metadata: pd.DataFrame,
+    clf_params: dict,
+    epochs: int,
+    max_folds: int | None = None,
+    skip_folds: set[int] | None = None,
+) -> pd.DataFrame:
+    """Leave-one-recording-out CV for label_mode="detection", shared by the
+    raw-EEG classifier family (--pipeline dbconformer / slimseiz -- plain
+    classifiers over (n_samples, n_channels, n_timepoints) windows, no CWT/
+    dense-edge preprocessing or disk cache). Same fold construction as
+    leave_one_seizure_out_detection above (one held-out (subject, run)
+    recording at a time).
+
+    Deliberately an INDEPENDENT function rather than a classifier_cls
+    parameter bolted onto leave_one_seizure_out_detection -- same "kept
+    independent everywhere it matters" reasoning this file's module
+    docstring gives for detection vs. prediction / dense-family vs.
+    truong_stft_cnn: that function's signature is tied to
+    SparseEvidenceGNNClassifier's cwt_cache/dense_edge_cache_dir constructor
+    args, which this family's classifiers don't have.
+
+    classifier_cls IS shared across BOTH raw-EEG classifiers (DBConformer-
+    Classifier, SlimSeizClassifier), unlike dense-family vs. truong_stft_cnn
+    getting separate loop functions -- those two genuinely differ in
+    preprocessing/output shape (STFT features vs. CWT+dense-edge, prediction-
+    only vs. both label modes), whereas DBConformerClassifier and
+    SlimSeizClassifier share the exact same fit/predict_proba/classes_
+    contract and raw-window input -- only the model architecture differs.
+    """
+    groups = list(zip(metadata["subject"], metadata["run"]))
+    unique_groups = sorted(set(groups), key=lambda g: (g[0], g[1]))
+    if max_folds is not None:
+        unique_groups = unique_groups[: max(1, int(max_folds))]
+
+    rows = []
+    for fold_i, group in enumerate(unique_groups):
+        if skip_folds and fold_i in skip_folds:
+            print(f"  fold {fold_i} subject={group[0]} run={group[1]}: SKIPPED (--skip-folds)")
+            continue
+        test_mask = np.array([g == group for g in groups])
+        train_mask = ~test_mask
+        X_train, y_train = X[train_mask], y[train_mask]
+        X_test, y_test = X[test_mask], y[test_mask]
+
+        clf = classifier_cls(epochs=epochs, **clf_params)
+        clf.fit(X_train, y_train)
+        proba = clf.predict_proba(X_test)
+        y_score = proba[:, 1]
+        y_pred = clf.classes_[np.argmax(proba, axis=1)]
+
+        row = {
+            "subject": group[0],
+            "run": group[1],
+            "n_train": int(train_mask.sum()),
+            "n_test": int(test_mask.sum()),
+            "n_test_ictal": int(y_test.sum()),
+            "accuracy": accuracy_score(y_test, y_pred),
+            "precision": precision_score(y_test, y_pred, zero_division=0),
+            "recall": recall_score(y_test, y_pred, zero_division=0),
+            "f1": f1_score(y_test, y_pred, zero_division=0),
+            "average_precision": average_precision_score(y_test, y_score),
+        }
+        try:
+            row["roc_auc"] = roc_auc_score(y_test, y_score)
+        except ValueError:
+            row["roc_auc"] = float("nan")
+        rows.append(row)
+        print(
+            f"  fold subject={group[0]} run={group[1]}: "
+            f"n_test={row['n_test']} (ictal={row['n_test_ictal']})  "
+            f"precision={row['precision']:.3f} recall={row['recall']:.3f} "
+            f"f1={row['f1']:.3f} auc_pr={row['average_precision']:.3f}"
+        )
+    return pd.DataFrame(rows)
+
+
+def leave_one_seizure_out_raw_classifier_prediction(
+    classifier_cls,
+    X: np.ndarray,
+    y: np.ndarray,
+    metadata: pd.DataFrame,
+    clf_params: dict,
+    epochs: int,
+    window_length: float,
+    negative_to_positive_ratio: float | None = None,
+    subsample_seed: int = 42,
+    k_of_n_k: int = DEFAULT_TRUONG_K_OF_N_K,
+    k_of_n_n: int = DEFAULT_TRUONG_K_OF_N_N,
+    max_folds: int | None = None,
+    skip_folds: set[int] | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Leave-one-seizure-out CV for label_mode="prediction", shared by the
+    raw-EEG classifier family -- see leave_one_seizure_out_raw_classifier's
+    docstring for why this is its own function rather than a classifier_cls
+    param bolted onto leave_one_seizure_out_prediction. Same fold
+    construction, event-level metrics (hit / false_alarms_per_hour, raw and
+    k-of-n-smoothed per Truong et al. 2018 Section II.D), and per-seizure
+    log as leave_one_seizure_out_truong, minus the CWT/dense-edge disk-cache
+    plumbing neither raw classifier needs.
+    """
+    if "seizure_id" not in metadata.columns:
+        raise ValueError("metadata has no seizure_id column -- was this dataset built with label_mode='prediction'?")
+
+    positive_meta = metadata[metadata["seizure_id"].notna()]
+    unique_seizures = (
+        positive_meta[["subject", "run", "seizure_id", "seizure_onset", "seizure_offset"]]
+        .drop_duplicates(subset="seizure_id")
+        .sort_values(["subject", "run", "seizure_onset"])
+        .to_dict("records")
+    )
+    if not unique_seizures:
+        raise ValueError(
+            "No positive (preictal) windows survived label_mode='prediction' labeling -- sph+sop may exceed the "
+            "available lead time before every documented seizure in this dataset."
+        )
+
+    subject_arr = metadata["subject"].to_numpy()
+    run_arr = metadata["run"].to_numpy()
+    seizure_id_arr = metadata["seizure_id"].to_numpy()
+
+    all_run_pairs = sorted(set(zip(subject_arr.tolist(), run_arr.tolist())))
+    seizure_run_pairs = set(zip(positive_meta["subject"], positive_meta["run"]))
+    interictal_only_runs = [rp for rp in all_run_pairs if rp not in seizure_run_pairs]
+    n_folds = len(unique_seizures)
+    fold_interictal_runs = [
+        [rp for j, rp in enumerate(interictal_only_runs) if j % n_folds == i] for i in range(n_folds)
+    ]
+    if max_folds is not None:
+        unique_seizures = unique_seizures[: max(1, int(max_folds))]
+    if not interictal_only_runs:
+        print(
+            "  WARNING: no genuinely seizure-free recordings in this dataset -- every fold's "
+            "false_alarms_per_hour will be undefined."
+        )
+
+    fold_rows = []
+    per_seizure_rows = []
+    for fold_i, seizure in enumerate(unique_seizures):
+        subject, run, seizure_id = seizure["subject"], seizure["run"], seizure["seizure_id"]
+        onset, offset = seizure["seizure_onset"], seizure["seizure_offset"]
+
+        if skip_folds and fold_i in skip_folds:
+            print(f"  fold {fold_i} seizure {seizure_id} (subject={subject} run={run}): SKIPPED (--skip-folds)")
+            continue
+
+        test_run_pairs = {(subject, run), *fold_interictal_runs[fold_i]}
+        test_mask = np.array([(s, r) in test_run_pairs for s, r in zip(subject_arr.tolist(), run_arr.tolist())])
+        train_mask = (~test_mask) & (seizure_id_arr != seizure_id)
+
+        X_train, y_train = X[train_mask], y[train_mask]
+        if negative_to_positive_ratio is not None:
+            meta_train = metadata[train_mask].reset_index(drop=True)
+            X_train, y_train, _ = _subsample_negative_windows(
+                X_train, y_train, meta_train, negative_to_positive_ratio, subsample_seed
+            )
+        X_test, y_test = X[test_mask], y[test_mask]
+        meta_test = metadata[test_mask].reset_index(drop=True)
+
+        clf = classifier_cls(epochs=epochs, **clf_params)
+        clf.fit(X_train, y_train)
+        proba = clf.predict_proba(X_test)
+        y_score = proba[:, 1]
+        y_pred = clf.classes_[np.argmax(proba, axis=1)]
+
+        y_pred_smoothed = np.array(y_pred, dtype=np.int64, copy=True)
+        time_col = "window_start" if "window_start" in meta_test.columns else None
+        for (_s, _r), group in meta_test.groupby(["subject", "run"], sort=False):
+            order = group.sort_values(time_col).index if time_col else group.index
+            order = order.to_numpy()
+            raw = (y_pred[order] == 1).astype(np.int64)
+            y_pred_smoothed[order] = k_of_n_alarm(raw, k=k_of_n_k, n=k_of_n_n)
+
+        row = {
+            "subject": subject,
+            "run": run,
+            "seizure_id": seizure_id,
+            "n_train": int(train_mask.sum()),
+            "n_test": int(test_mask.sum()),
+            "n_test_preictal": int(y_test.sum()),
+            "accuracy": accuracy_score(y_test, y_pred),
+            "precision": precision_score(y_test, y_pred, zero_division=0),
+            "recall": recall_score(y_test, y_pred, zero_division=0),
+            "f1": f1_score(y_test, y_pred, zero_division=0),
+            "average_precision": average_precision_score(y_test, y_score),
+        }
+        try:
+            row["roc_auc"] = roc_auc_score(y_test, y_score)
+        except ValueError:
+            row["roc_auc"] = float("nan")
+
+        own_seizure_mask = (meta_test["seizure_id"] == seizure_id).to_numpy()
+        interictal_mask = y_test == 0
+        interictal_hours = (int(interictal_mask.sum()) * window_length) / 3600.0
+
+        def _event_metrics(preds: np.ndarray) -> dict[str, object]:
+            n_preictal = int(own_seizure_mask.sum())
+            n_hit = int((preds[own_seizure_mask] == 1).sum()) if n_preictal else 0
+            n_false_alarms = int((preds[interictal_mask] == 1).sum())
+            far = (n_false_alarms / interictal_hours) if interictal_hours > 0 else float("nan")
+            return {
+                "hit": n_hit > 0,
+                "n_preictal_windows_predicted_positive": n_hit,
+                "n_false_alarms": n_false_alarms,
+                "false_alarms_per_hour": far,
+            }
+
+        raw_events = _event_metrics(np.asarray(y_pred))
+        smoothed_events = _event_metrics(y_pred_smoothed)
+        row["n_preictal_windows"] = int(own_seizure_mask.sum())
+        row["n_interictal_windows"] = int(interictal_mask.sum())
+        row["interictal_hours_monitored"] = interictal_hours
+        row["hit"] = raw_events["hit"]
+        row["n_false_alarms"] = raw_events["n_false_alarms"]
+        row["false_alarms_per_hour"] = raw_events["false_alarms_per_hour"]
+        row["hit_smoothed"] = smoothed_events["hit"]
+        row["n_false_alarms_smoothed"] = smoothed_events["n_false_alarms"]
+        row["false_alarms_per_hour_smoothed"] = smoothed_events["false_alarms_per_hour"]
+        fold_rows.append(row)
+
+        mean_preictal_score = float(y_score[own_seizure_mask].mean()) if row["n_preictal_windows"] else float("nan")
+        per_seizure_rows.append(
+            {
+                "subject": subject,
+                "run": run,
+                "seizure_id": seizure_id,
+                "seizure_onset_s": onset,
+                "seizure_offset_s": offset,
+                "seizure_duration_s": offset - onset,
+                "hit": raw_events["hit"],
+                "hit_smoothed": smoothed_events["hit"],
+                "n_preictal_windows": row["n_preictal_windows"],
+                "mean_preictal_score": mean_preictal_score,
+                "false_alarms_per_hour": raw_events["false_alarms_per_hour"],
+                "false_alarms_per_hour_smoothed": smoothed_events["false_alarms_per_hour"],
+            }
+        )
+
+        print(
+            f"  seizure {seizure_id}: n_test={row['n_test']} preictal={row['n_preictal_windows']}  "
+            f"hit={raw_events['hit']} (smoothed={smoothed_events['hit']})  "
+            f"FAR/h={raw_events['false_alarms_per_hour']:.3f} "
+            f"(smoothed={smoothed_events['false_alarms_per_hour']:.3f})  "
+            f"precision={row['precision']:.3f} recall={row['recall']:.3f} f1={row['f1']:.3f}"
+        )
+
+    return pd.DataFrame(fold_rows), pd.DataFrame(per_seizure_rows)
+
+
 def _build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--subjects", nargs="+", type=int, default=DEFAULT_SUBJECTS)
     parser.add_argument(
         "--pipeline",
-        choices=["dense_edge_gru", "dense_edge", "dense_edge_mamba", "truong_stft_cnn"],
+        choices=["dense_edge_gru", "dense_edge", "dense_edge_mamba", "truong_stft_cnn", "dbconformer", "slimseiz"],
         default="dense_edge_gru",
         help=(
             "'dense_edge_gru' (default): SparseEvidenceGNNClassifier with "
@@ -1292,7 +1685,17 @@ def _build_argument_parser() -> argparse.ArgumentParser:
             "to their own results/truong_stft_cnn/ subdirectory. "
             "The CWT time-frequency node encoder is --cwt-encoder "
             "(off by default), not a separate pipeline -- it works on any dense-family "
-            "pipeline (dense_edge, dense_edge_gru, dense_edge_mamba)."
+            "pipeline (dense_edge, dense_edge_gru, dense_edge_mamba). "
+            "'dbconformer' (2026-08-25): DBConformer -- dual temporal/spatial-Transformer "
+            "over raw (n_channels, n_timepoints) windows, no CWT/STFT preprocessing (see "
+            "Epilepsy/pipelines/dbconformer_classifier.py's module docstring). Respects "
+            "--label-mode like the dense family; results go under results/dbconformer/. "
+            "'slimseiz' (2026-08-25): SlimSeiz -- 1-D conv stem + a single Mamba (selective "
+            "state-space) block over raw windows, also no CWT/STFT preprocessing (see "
+            "Epilepsy/pipelines/slimseiz_classifier.py's module docstring; its Mamba block "
+            "is a self-contained sequential-scan implementation, not this repo's own "
+            "mambapy-based dense_edge_mamba). Respects --label-mode; results go under "
+            "results/slimseiz/."
         ),
     )
     parser.add_argument(
@@ -1791,6 +2194,82 @@ def main(args: argparse.Namespace) -> None:
         print(means.to_string())
         print(f"event-level hit rate (raw):    {n_hits}/{n_seizures} ({100 * n_hits / n_seizures:.1f}%)")
         print(f"event-level hit rate (k-of-n): {n_hits_smoothed}/{n_seizures} ({100 * n_hits_smoothed / n_seizures:.1f}%)")
+    elif pipeline in ("dbconformer", "slimseiz"):
+        classifier_cls = DBConformerClassifier if pipeline == "dbconformer" else SlimSeizClassifier
+
+        if label_mode == "prediction":
+            clf_params = dict(_raw_classifier_family_params(pipeline, "prediction"))
+            _apply_raw_classifier_cli_overrides(clf_params, args)
+
+            print(
+                f"Running leave-one-seizure-out prediction (pipeline={pipeline}, epochs={epochs}, "
+                f"sph={args.sph}s, sop={args.sop}s, "
+                f"validation_split={clf_params['validation_split']}, "
+                f"early_stopping_patience={clf_params['early_stopping_patience']})..."
+            )
+            results, per_seizure = leave_one_seizure_out_raw_classifier_prediction(
+                classifier_cls, X, y, metadata, clf_params, epochs, window_length,
+                negative_to_positive_ratio=negative_to_positive_ratio,
+                k_of_n_k=args.k_of_n_k, k_of_n_n=args.k_of_n_n,
+                max_folds=args.max_folds,
+                skip_folds=set(args.skip_folds) if args.skip_folds else None,
+            )
+
+            prediction_dir = _raw_classifier_family_result_dir(
+                output_dir, pipeline, "prediction", args.shuffle_labels,
+            )
+            prediction_dir.mkdir(parents=True, exist_ok=True)
+            results_path = prediction_dir / f"prediction_leave_one_seizure_out_{run_id}.csv"
+            per_seizure_path = prediction_dir / f"prediction_per_seizure_{run_id}.csv"
+            results.to_csv(results_path, index=False)
+            per_seizure.to_csv(per_seizure_path, index=False)
+            print(f"\nWrote per-fold results to {results_path}")
+            print(f"Wrote per-seizure log to {per_seizure_path}")
+
+            numeric_cols = [
+                "accuracy", "precision", "recall", "f1", "average_precision", "roc_auc",
+                "false_alarms_per_hour", "false_alarms_per_hour_smoothed",
+            ]
+            means = results[numeric_cols].mean(numeric_only=True)
+            n_hits = int(results["hit"].sum())
+            n_hits_smoothed = int(results["hit_smoothed"].sum())
+            n_seizures = len(results)
+            control_note = " -- LABEL-SHUFFLED NULL CONTROL, NOT a real result" if args.shuffle_labels else ""
+            print(
+                f"\n=== Mean across folds (pipeline={pipeline}, label_mode=prediction; "
+                f"NOT comparable to detection's numbers){control_note} ==="
+            )
+            print(means.to_string())
+            print(f"event-level hit rate (raw):    {n_hits}/{n_seizures} ({100 * n_hits / n_seizures:.1f}%)")
+            print(f"event-level hit rate (k-of-n): {n_hits_smoothed}/{n_seizures} ({100 * n_hits_smoothed / n_seizures:.1f}%)")
+        else:
+            clf_params = dict(_raw_classifier_family_params(pipeline, "detection"))
+            _apply_raw_classifier_cli_overrides(clf_params, args)
+
+            print(
+                f"Running leave-one-seizure-out detection (pipeline={pipeline}, epochs={epochs}, "
+                f"validation_split={clf_params['validation_split']}, "
+                f"early_stopping_patience={clf_params['early_stopping_patience']})..."
+            )
+            results = leave_one_seizure_out_raw_classifier(
+                classifier_cls, X, y, metadata, clf_params, epochs,
+                max_folds=args.max_folds,
+                skip_folds=set(args.skip_folds) if args.skip_folds else None,
+            )
+
+            detection_dir = _raw_classifier_family_result_dir(
+                output_dir, pipeline, "detection", args.shuffle_labels,
+            )
+            detection_dir.mkdir(parents=True, exist_ok=True)
+            results_path = detection_dir / f"leave_one_seizure_out_{run_id}.csv"
+            results.to_csv(results_path, index=False)
+            print(f"\nWrote per-fold results to {results_path}")
+
+            numeric_cols = ["accuracy", "precision", "recall", "f1", "average_precision", "roc_auc"]
+            means = results[numeric_cols].mean(numeric_only=True)
+            control_note = " -- LABEL-SHUFFLED NULL CONTROL, NOT a real result" if args.shuffle_labels else ""
+            print(f"\n=== Mean across folds (pipeline={pipeline}){control_note} ===")
+            print(means.to_string())
     elif label_mode == "prediction":
         clf_params = dict(_dense_family_params(pipeline, "prediction"))
         _apply_dense_family_cli_overrides(clf_params, args)
@@ -1953,7 +2432,15 @@ def _write_results_readme(output_dir: Path) -> None:
         "`dense_edge/prediction/`.\n"
         "- `cwt_encoder/node_only/`: `--cwt-encoder-ablation node_only` -- "
         "CWT encoder with WCT edge features (and WCT compute) off. Not "
-        "comparable to joint CWT+WCT runs under `cwt_encoder/`.\n",
+        "comparable to joint CWT+WCT runs under `cwt_encoder/`.\n\n"
+        "- `dbconformer/` and `slimseiz/`: `--pipeline dbconformer` / "
+        "`--pipeline slimseiz` -- raw-EEG classifiers (no CWT/STFT "
+        "preprocessing; see Epilepsy/pipelines/dbconformer_classifier.py / "
+        "slimseiz_classifier.py). Each respects --label-mode like the dense "
+        "family (`<pipeline>/leave_one_seizure_out_*.csv` for detection, "
+        "`<pipeline>/prediction/` for prediction) -- not comparable to "
+        "dense_edge*/truong_stft_cnn's numbers (different architecture) or "
+        "to each other's across label modes.\n",
         encoding="utf-8",
     )
 
