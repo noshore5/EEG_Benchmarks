@@ -214,7 +214,30 @@ read off a continuous timeline). See "Open threads" below.
 - ~~Mamba 6-fold run~~ -- done, see "Right now" and the session note.
 - Mamba's `1_18_0` recall collapse (0.100 vs GRU's 0.767, same seizure) --
   not investigated, biggest single per-seizure divergence in the
-  comparison.
+  comparison. Tried on 2026-08-25 (Mac shell) to pull raw `predict_proba`
+  scores for that fold's 30 true preictal windows to check
+  ranking-vs-threshold (are scores clustered just under 0.5, i.e. a
+  calibration/threshold problem, not a ranking failure?) without
+  retraining -- couldn't: confirmed **no run in this codebase ever
+  persists a trained model** (`torch.save`/`pickle.dump`/`joblib.dump`
+  all absent from `run_pipelines.py` and `pipelines/*.py`, checked on
+  both `continuous-cwt-mamba` and `origin/mamba-temporal-edge-model`
+  `2985233`, the actual commit that produced this run). `common.py`'s
+  early-stopping `best_state = deepcopy(model_.state_dict())`
+  (~line 2090) is RAM-only, restored into `self.model_` inside `fit()`,
+  gone once the process exits. The `EEG_Benchmarks_mamba` worktree that
+  ran it also only ever existed on the Windows/CUDA box from that
+  session (`C:\Users\User\Documents\noshore5\EEG_Benchmarks`) -- not
+  reachable from a Mac shell. Two ways to actually get this number next
+  time: (a) retrain just this one fold (`--pipeline dense_edge_mamba
+  --skip-folds <all but 1_18_0's index>`, seed 42 for same-protocol
+  reproducibility -- note MPS vs CUDA won't reproduce bit-identical
+  weights even at the same seed, so treat it as representative, not the
+  literal original run) and call `clf.predict_proba(X_test)` once fit
+  completes; or (b) add real checkpoint persistence
+  (`torch.save(model_.state_dict(), ...)` after `fit()`) to
+  `SparseEvidenceGNNClassifier`/`common.py` so future runs like this one
+  don't hit the same dead end.
 - `Epilepsy/runpod_mamba_fast_image_brief.md` -- Task A/B in tree.
   Image **built and pushed** 2026-08-25 (GHA run 32843334915, ~31 min):
   `ghcr.io/noshore5/eeg_benchmarks-mamba:20260825-4760de0` and `:latest`.
