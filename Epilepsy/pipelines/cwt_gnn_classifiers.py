@@ -1958,6 +1958,268 @@ class _DenseEdgeMambaTemporal(nn.Module):
         return out.permute(0, 2, 1).unsqueeze(-1)  # [B, out_channels, E, 1]
 
 
+class _DenseEdgeMambaContinuous(nn.Module):
+    """continuous-cwt-mamba branch, 2026-08-25. Continuous-state counterpart
+    to _DenseEdgeMambaTemporal, for the "CWT the whole recording once, keep
+    Mamba's state running across the entire timeline, window only at the
+    classification readout" paradigm -- NOT a drop-in dense_edge_conv
+    backend (different call contract, see forward()'s docstring), so this
+    does not touch dense_edge_temporal_mode="conv"/"rnn"/"mamba" or
+    anything that builds on them.
+
+    Why this can't just be _DenseEdgeMambaTemporal with a bigger T: that
+    class's Mamba.forward() call is mambapy's PARALLEL-SCAN path (both the
+    pscan=True and pscan=False/sequential variants -- see mamba.py's
+    selective_scan/selective_scan_seq, both of which build a `hs = ...`
+    stack for the FULL sequence before returning), which (a) always starts
+    from h=0 -- there is no way to feed it a carried-in state, so every
+    call is an independent, state-reset sequence no matter how long T is,
+    and (b) materializes a dense [rows, T, d_inner, d_state] tensor for
+    that whole T in one shot, which is exactly what OOM'd at T=480 in
+    _DenseEdgeMambaTemporal's own mamba_chunk_size docstring -- an actual
+    continuous-over-the-whole-recording T (thousands of steps, not
+    hundreds) is not reachable through that path at all, regardless of
+    chunk_size, because chunk_size only splits the ROW (B*E) dimension,
+    never T.
+
+    This class instead drives mambapy's OTHER scan implementation:
+    Mamba.step(x, caches), built upstream for autoregressive generation --
+    one timestep at a time, an explicit caches=[(h, inputs), ...] (one
+    (h, inputs) pair per layer) that the caller both supplies and receives
+    back updated. That is the actual "continuous state space" primitive:
+    loop step() across a chunk's timesteps, carry the returned cache into
+    the NEXT chunk's forward() call instead of discarding it, and the SSM
+    state (h) has then genuinely run continuously across every timestep of
+    the recording seen so far, unbroken by chunk or window boundaries --
+    chunking only bounds how much of that history stays in the autograd
+    graph for backward (classic truncated BPTT: cache is returned
+    .detach()'d, so the forward value carries forward exactly, but
+    gradients for chunk N do not reach back into chunk N-1's computation).
+    Also never materializes a [rows, T, ...] tensor -- each step() call is
+    O(rows * d_inner * d_state), so chunk length is a pure memory/TBPTT
+    knob, decoupled from mamba_chunk_size's row-chunking (both apply
+    independently and can be tuned together against actual GPU memory).
+
+    Wraps mambapy's own `Mamba` (not the lower-level `MambaBlock` that
+    Mamba.layers[i].mixer wraps) specifically so this shares the exact
+    same residual-connection-plus-RMSNorm architecture (see
+    mamba.py's ResidualBlock) that _DenseEdgeMambaTemporal's forward()
+    already uses via Mamba.forward() -- the only difference from that
+    class is WHICH of mambapy's two scan entry points drives the same
+    underlying layers, not a different model.
+
+    Pooling: unlike _DenseEdgeMambaTemporal (which pools to the last
+    timestep as a per-window summary, since each of its calls IS one
+    window), this class returns every timestep's output. Pooling into a
+    classification window happens downstream, at the readout, once the
+    full continuous output stream for a recording exists -- see this
+    branch's paradigm note in run_pipelines.py.
+
+    Only n_layers=1 has been exercised so far (Mamba.step already loops
+    caches per-layer internally for n_layers>1, so multi-layer should work
+    unchanged, but hasn't been correctness-tested against forward() yet --
+    see scripts/dense_edge_mamba_continuous_parity.py).
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        d_model: int = 16,
+        d_state: int = 16,
+        d_conv: int = 4,
+        expand: int = 2,
+        n_layers: int = 1,
+        dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+        try:
+            from mambapy.mamba import Mamba, MambaConfig
+        except ImportError as exc:  # pragma: no cover -- environment-dependent
+            raise ImportError(
+                "_DenseEdgeMambaContinuous requires the 'mambapy' package -- "
+                "see _DenseEdgeMambaTemporal's docstring for why (Windows/MPS "
+                "compatibility; no CUDA extension build). Install with "
+                "`pip install mambapy`."
+            ) from exc
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.d_model = d_model
+        self.in_proj = (
+            nn.Identity() if in_channels == d_model else nn.Linear(in_channels, d_model)
+        )
+        self.config = MambaConfig(
+            d_model=d_model,
+            n_layers=n_layers,
+            d_state=d_state,
+            expand_factor=expand,
+            d_conv=d_conv,
+            use_cuda=False,  # see _DenseEdgeMambaTemporal's docstring -- never mamba-ssm's CUDA kernels
+        )
+        self.mamba = Mamba(self.config)
+        self.dropout = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
+        self.out_proj = nn.Linear(d_model, out_channels)
+
+    def init_cache(self, rows: int, device: torch.device) -> list[tuple[torch.Tensor, torch.Tensor]]:
+        """Zero-init caches=[(h, inputs), ...] (one pair per layer), the
+        "start of recording" state -- see forward()'s docstring on how a
+        non-None cache instead continues an in-progress recording.
+        h: (rows, d_inner, d_state), inputs: (rows, d_inner, d_conv-1),
+        matching MambaBlock.step's own cache contract exactly (mamba.py's
+        "The cache object is initialized as follows: (None, torch.zeros())"
+        note): h=None is what MambaBlock.ssm_step treats as "start from
+        h=0" internally, so h is left as None here rather than an actual
+        zeros tensor -- torch.zeros(rows, d_inner, d_state) would be
+        numerically equivalent but None is mambapy's own documented
+        convention and avoids allocating a tensor that's about to be
+        multiplied away on the first step anyway.
+        """
+        d_inner = self.config.d_inner
+        d_conv = self.config.d_conv
+        return [
+            (None, torch.zeros(rows, d_inner, d_conv - 1, device=device))
+            for _ in range(self.config.n_layers)
+        ]
+
+    def forward(
+        self,
+        conv_in: torch.Tensor,
+        cache: list[tuple[torch.Tensor, torch.Tensor]] | None = None,
+    ) -> tuple[torch.Tensor, list[tuple[torch.Tensor, torch.Tensor]]]:
+        """Processes ONE chunk of a (possibly much longer, possibly
+        already-in-progress) continuous sequence.
+
+        conv_in: [B, C_in, E, T_chunk] -- same per-edge feature layout
+        _DenseEdgeMambaTemporal/_build_dense_feature_conv receive, T_chunk
+        the TBPTT chunk length (a memory/gradient-truncation knob, not a
+        window -- can span, is smaller than, or straddles classification
+        window boundaries; those are applied downstream, at the readout).
+
+        cache: None means "this chunk starts a fresh recording" (zero-init
+        via init_cache). Non-None -- as returned by a PRIOR call to this
+        same forward(), on this same recording, in order -- means "this
+        chunk continues where that call left off": the SSM state carries
+        forward across the chunk boundary with NO reset, which is the
+        entire point of this class over _DenseEdgeMambaTemporal. Caller
+        owns the bookkeeping of which cache belongs to which recording
+        (this class is stateless between calls by design, like every other
+        nn.Module here -- no self.-stored cache -- so the same instance's
+        shared weights can process many recordings' chunks interleaved
+        within one training batch without cross-contaminating state).
+
+        Returns (out_seq, cache): out_seq is [B, out_channels, E, T_chunk]
+        -- every timestep kept, NOT pooled (contrast _DenseEdgeMambaTemporal
+        which pools to one vector per call). cache is the updated
+        caches=[(h, inputs), ...], already .detach()'d -- see class
+        docstring's truncated-BPTT paragraph -- ready to pass straight into
+        the next chunk's forward() call.
+        """
+        batch_size, c_in, num_edges, t_chunk = conv_in.shape
+        assert c_in == self.in_channels, (
+            f"_DenseEdgeMambaContinuous built with in_channels={self.in_channels} "
+            f"but received conv_in with C_in={c_in} -- see this class's "
+            "forward() docstring for the expected [B, C_in, E, T_chunk] contract."
+        )
+        rows = batch_size * num_edges
+        seq = conv_in.permute(0, 2, 3, 1).reshape(rows, t_chunk, c_in)  # [rows, T_chunk, C_in]
+        seq = self.in_proj(seq)  # [rows, T_chunk, d_model]
+        if cache is None:
+            cache = self.init_cache(rows, seq.device)
+        outs = []
+        for t in range(t_chunk):
+            y, cache = self.mamba.step(seq[:, t, :], cache)  # y: [rows, d_model]
+            outs.append(y)
+        out_seq = torch.stack(outs, dim=1)  # [rows, T_chunk, d_model]
+        out_seq = self.dropout(out_seq)
+        out_seq = self.out_proj(out_seq)  # [rows, T_chunk, out_channels]
+        out_seq = out_seq.reshape(batch_size, num_edges, t_chunk, self.out_channels)
+        out_seq = out_seq.permute(0, 3, 1, 2)  # [B, out_channels, E, T_chunk]
+        # Detach so the caller can carry `cache` into the next chunk's
+        # forward() call without chaining that chunk's backward() into
+        # this one -- see class docstring's truncated-BPTT paragraph. The
+        # forward VALUE is untouched (detach doesn't change any number),
+        # only which graph its grad_fn points into.
+        cache = [(h.detach() if h is not None else None, inputs.detach()) for h, inputs in cache]
+        return out_seq, cache
+
+
+def pool_continuous_edge_stream_to_windows(
+    continuous_out: torch.Tensor,
+    window_bounds: list[tuple[int, int]],
+    pool: Literal["last", "mean"] = "last",
+) -> torch.Tensor:
+    """continuous-cwt-mamba paradigm: turns a continuous per-timestep
+    edge-feature stream (as _DenseEdgeMambaContinuous chunks accumulate
+    into, once concatenated along T for one whole recording) into a stack
+    of per-window conv_out-equivalent tensors -- i.e. reproduces the
+    [B, dense_conv_out_channels, E, 1] shape/contract dense_edge_conv
+    itself produces for one window, so SparseEvidenceGNNCore's existing
+    _dense_edge_features_from_conv_out (unmodified) is what actually turns
+    each pooled window into logits. This function only does the pooling;
+    it has no model weights and needs none -- "windowing" in this paradigm
+    is a pure indexing/pooling operation applied AFTER the trainable
+    continuous Mamba pass, never a re-run of it, which is the whole point.
+
+    continuous_out: [B, C, E, T_total] -- T_total spans an entire
+    recording (or however much of it has been processed so far), built by
+    torch.cat'ing successive _DenseEdgeMambaContinuous chunk outputs along
+    dim=-1. T indices are whatever grid the caller's continuous CWT ran
+    on (i.e. already reflects any dense_edge_time_downsample-style
+    downsampling upstream -- this function has no notion of real seconds).
+
+    window_bounds: list of (start, end) index pairs INTO continuous_out's
+    T axis, half-open ([start, end)), one pair per classification window.
+    Windows may be any length, may overlap, and need not tile T_total
+    (e.g. discard a partial trailing window short of a full classification
+    span) -- this function does not assume or enforce non-overlapping/
+    contiguous/exhaustive coverage; that is the caller's labeling
+    convention (SPH/SOP, window_length/step_size -- see run_pipelines.py)
+    translated into index pairs on this specific T grid, not this
+    function's concern.
+
+    pool: "last" (default) takes the window's final timestep -- the direct
+    continuous analogue of _DenseEdgeMambaTemporal/_DenseEdgeGRUTemporal's
+    own "pool to h_T" convention (see their docstrings): because the
+    Mamba recurrence is causal AND, in this paradigm, has run uninterrupted
+    since the start of the recording (not reset at this window's start),
+    that one timestep already summarizes the ENTIRE history up to it, not
+    just this window -- a strict superset of what a window-reset model's
+    h_T could see. "mean" instead averages every timestep inside the
+    window, treating them as symmetric contributors; offered for ablation,
+    not expected to be the default choice.
+
+    Returns [n_windows, B, C, E, 1] (window-major, NOT flattened to
+    n_windows*B -- reshape yourself once you've picked an order, since
+    whether loss/label bookkeeping wants window-major or batch-major
+    depends on the caller). Each [B, C, E, 1] slice is drop-in compatible
+    with _dense_edge_features_from_conv_out (call it once per window, or
+    reshape to [n_windows*B, C, E, 1] and call it once for the whole
+    stack -- both are equivalent since that method has no cross-window
+    computation, only a per-trial batch dim).
+    """
+    if pool not in ("last", "mean"):
+        raise ValueError(f"pool must be 'last' or 'mean', got {pool!r}.")
+    batch_size, _, _, t_total = continuous_out.shape
+    pieces = []
+    for start, end in window_bounds:
+        if not (0 <= start < end <= t_total):
+            raise ValueError(
+                f"window bound ({start}, {end}) out of range for continuous_out "
+                f"with T_total={t_total} (need 0 <= start < end <= T_total)."
+            )
+        window_slice = continuous_out[:, :, :, start:end]  # [B, C, E, w]
+        if pool == "last":
+            pooled = window_slice[:, :, :, -1:]  # [B, C, E, 1]
+        else:
+            pooled = window_slice.mean(dim=-1, keepdim=True)  # [B, C, E, 1]
+        pieces.append(pooled)
+    if not pieces:
+        # Degenerate but well-defined: zero windows -> zero-length stack,
+        # same C/E/B as the input, rather than an ambiguous empty-list error.
+        return continuous_out.new_zeros((0, batch_size, *continuous_out.shape[1:3], 1))
+    return torch.stack(pieces, dim=0)  # [n_windows, B, C, E, 1]
+
+
 class ChannelSignalEncoder(nn.Module):
     """Lightweight learned per-channel signature: gives each graph node an
     actual representation of its raw signal shape, not just the
@@ -4524,7 +4786,20 @@ class SparseEvidenceGNNCore(nn.Module):
         features have no discrete per-event frequency bin), so nothing ever
         reads this array in dense mode.
         """
-        device = dense_edge_raw.device
+        conv_out = self._dense_edge_conv_out(dense_edge_raw)  # [B, dense_conv_out_channels, E, 1]
+        return self._dense_edge_features_from_conv_out(conv_out)
+
+    def _dense_edge_conv_out(self, dense_edge_raw: torch.Tensor) -> torch.Tensor:
+        """The trainable-conv half of _dense_edge_features, split out so the
+        continuous-cwt-mamba paradigm can produce an equivalent conv_out by
+        pooling a continuous per-timestep stream (see
+        pool_continuous_edge_stream_to_windows in this module) instead of
+        calling dense_edge_conv on a single window -- and then hand it to
+        _dense_edge_features_from_conv_out below, unmodified, exactly like
+        this method's own caller does. Purely a split, not a behavior
+        change: dense_edge_conv(conv_in) here is bit-identical to what
+        _dense_edge_features computed inline before this split.
+        """
         batch_size_actual, c_in, num_edges, n_time, nfreqs = dense_edge_raw.shape
         if self.dense_edge_temporal_mode == "rnn" and self.shuffle_time_order:
             dense_edge_raw = self._shuffle_dense_edge_time(dense_edge_raw)
@@ -4535,7 +4810,20 @@ class SparseEvidenceGNNCore(nn.Module):
         conv_in = dense_edge_raw.permute(0, 1, 4, 2, 3).reshape(
             batch_size_actual, c_in * nfreqs, num_edges, n_time
         )
-        conv_out = self.dense_edge_conv(conv_in)  # [B, dense_conv_out_channels, E, 1]
+        return self.dense_edge_conv(conv_in)  # [B, dense_conv_out_channels, E, 1]
+
+    def _dense_edge_features_from_conv_out(self, conv_out: torch.Tensor):
+        """Back half of _dense_edge_features: everything from conv_out
+        onward has no time axis left (T already pooled to 1, whether by
+        dense_edge_conv's own Conv2d/GRU/Mamba pooling or, for the
+        continuous paradigm, by pool_continuous_edge_stream_to_windows
+        pooling a window's slice of a continuous stream beforehand) -- so
+        this is reusable verbatim by both: the caller only needs to supply
+        a [B, dense_conv_out_channels, E, 1] conv_out, regardless of how it
+        was produced. See _dense_edge_conv_out's docstring for the other half.
+        """
+        device = conv_out.device
+        batch_size_actual, _, num_edges, _ = conv_out.shape
         events_padded = conv_out.squeeze(-1).permute(0, 2, 1)  # [B, E, dense_conv_out_channels]
 
         src_padded = self.src_idx.unsqueeze(0).expand(batch_size_actual, -1)

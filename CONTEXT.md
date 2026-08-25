@@ -9,7 +9,7 @@ Claude/Grok shells that don't share context with each other, and this is
 the one file meant to catch a new shell up without it re-reading
 everything.
 
-**Last updated:** 2026-08-25, by Claude.
+**Last updated:** 2026-08-25, by Claude (continuous-cwt-mamba work below).
 
 ---
 
@@ -31,16 +31,73 @@ reproduce in this matched run (0 occurrences across all 6 folds) — looks
 like an artifact of `smoke_test.py`'s small capped train/val split, not a
 real Mamba training-path issue.
 
-**Heads up, found mid-session:** there is uncommitted work in the working
-tree on `continuous-cwt-mamba` (current branch) that this session did not
-write -- 292 lines in `Epilepsy/pipelines/cwt_gnn_classifiers.py` adding a
-new `_DenseEdgeMambaContinuous` class (streaming/TBPTT variant using
-`.step()` + carried cache, distinct from the batch `_DenseEdgeMambaTemporal`
-used in the comparison above), plus an untracked
-`scripts/dense_edge_mamba_continuous_parity.py`. Looks like another
-shell's in-flight work. Not committed, not evaluated by this session --
-if you're picking this branch up, check `git status`/`git diff` before
-assuming this file matches what's on disk.
+**`continuous-cwt-mamba` branch, separate thread from the GRU/Mamba
+comparison above:** a new paradigm, not a tuning change to
+`_DenseEdgeMambaTemporal`. Goal: CWT the whole recording once (not
+arbitrary 30s windows), let Mamba's SSM state run continuously across the
+ENTIRE timeline with no per-window reset, and only window at the
+classification readout, at the end. Motivation: the existing
+`_DenseEdgeMambaTemporal` resets state every window (each call to
+`Mamba.forward()`'s parallel scan always starts h=0) -- that throws away
+exactly the cross-window context Mamba is supposed to be good at.
+
+Built and verified so far, all in `Epilepsy/pipelines/cwt_gnn_classifiers.py`:
+- `_DenseEdgeMambaContinuous` -- drives `mambapy`'s OTHER scan entry point,
+  `Mamba.step(x, cache)` (built upstream for autoregressive generation: one
+  timestep at a time, explicit `(h, inputs)` cache), instead of
+  `_DenseEdgeMambaTemporal`'s `Mamba.forward()` (parallel scan, always
+  h=0, no way to feed in a starting state). Loop `step()` across a chunk,
+  carry the returned (`.detach()`'d) cache into the next chunk -- classic
+  truncated BPTT: forward state chain is unbroken across an entire
+  recording, only the backward graph is cut at chunk boundaries.
+- `pool_continuous_edge_stream_to_windows` -- turns a concatenated
+  continuous `[B,C,E,T_total]` output stream into per-window
+  `[B,C,E,1]` snapshots (pool="last", the continuous analogue of
+  `_DenseEdgeMambaTemporal`'s own "pool to h_T" convention) by pure
+  indexing, no model weights.
+- `_dense_edge_features` split into `_dense_edge_conv_out` +
+  `_dense_edge_features_from_conv_out` (behavior-preserving refactor) so
+  the pooled continuous-stream windows feed into the EXISTING
+  `sparse_message_mlp`/hop-propagation/`sparse_classifier` readout
+  unmodified -- confirmed working end-to-end (unbound-method test, see
+  `scripts/dense_edge_mamba_continuous_parity.py`'s sibling checks in
+  session history; not yet re-saved as a standalone script).
+- **Proven, not just plumbed:** `scripts/continuous_mamba_state_carryover_check.py`
+  -- synthetic task where a signal is injected only into a recording's
+  first chunk and every later window's label depends on it, so a
+  state-reset-every-chunk model has literally zero information for those
+  windows (fresh noise every step, never repeated -- memorization is
+  impossible) while a carried-state model can solve it. Result: carried
+  state hits 0.922 (5-epoch-rolling-avg accuracy on the signal-free
+  windows), reset stays at 0.573 (chance = 0.5). This is the actual
+  evidence the mechanism buys something real, not just "it runs."
+- `scripts/dense_edge_mamba_continuous_parity.py` -- chunking is
+  bit-exact vs. one big call; `step()`-driven output matches `mambapy`'s
+  own `forward()` scan to float32 noise (~6e-8); a chunk's `backward()`
+  genuinely doesn't reach into the previous chunk's freed graph.
+- `scripts/continuous_mamba_gpu_scale_probe.py` -- one-shot real-scale
+  (23ch full mesh, E=253, C_in=192, real defaults d_model=16/d_state=16/
+  expand=2) fwd+bwd probe on this session's RTX 3070 Ti. **Memory turns
+  out NOT to be the binding constraint**: linear at ~2.4 MiB/timestep,
+  T_chunk=1024 -> 2.48GiB, comfortably fits. **Wall-clock time is the
+  real open problem**: ~2.68ms/timestep (B=1) -- a genuine per-timestep
+  Python-loop/kernel-launch cost with no batching-across-time the way a
+  parallel scan gets for free. Scaled to a real ~1hr recording (tens of
+  thousands of timesteps even downsampled) that's roughly a couple
+  minutes of Mamba compute ALONE per recording per epoch -- likely
+  slower than even the already-slow (~65s/epoch, 4.6x GRU) windowed
+  `mambapy` scan this file's "Known gotchas" section documents. Not
+  measured yet: whether batching multiple recordings' rows together
+  (same idea as the existing `mamba_chunk_size` row-chunking) amortizes
+  enough of the per-step launch overhead to matter.
+
+**Not started:** the actual CHB-MIT data pipeline / LOSO loop rewrite --
+everything above was deliberately built and verified in isolation
+(synthetic tensors) before touching `_build_windowed_dataset`/
+`leave_one_seizure_out_*` in `run_pipelines.py`, since that's the highest-
+risk, hardest-to-verify part (recording-level continuous sequences instead
+of independent per-window rows, TBPTT chunk boundaries, windowed labels
+read off a continuous timeline). See "Open threads" below.
 
 ## Branch map
 
@@ -132,7 +189,20 @@ assuming this file matches what's on disk.
   the graph (24-in MLP) -- not a clean same-model ablation against the
   encoder-free full-mesh runs. Needs an encoder-free rerun to close that
   comparison out.
-- The uncommitted `_DenseEdgeMambaContinuous` work described under "Right
-  now" -- status/intent unknown to this session, check with whoever
-  (agent or you) was last working on `continuous-cwt-mamba` before
-  touching it.
+- `continuous-cwt-mamba` paradigm (see "Right now" above) -- component
+  pieces built and verified in isolation, real data pipeline not started.
+  Next concrete steps, in the order they were being approached:
+  1. Investigate the throughput problem before investing in the data
+     pipeline around it: ~2.68ms/timestep (B=1) is slow enough at
+     real-recording scale that it may need addressing first (row-batching
+     multiple recordings together, or something else) rather than after.
+  2. Design + build the continuous CHB-MIT loading path: whole-recording
+     CWT (not `_build_windowed_dataset`'s fixed windows), TBPTT chunk
+     boundaries, and windowed labels (SPH/SOP-derived) read off the
+     continuous timeline via `pool_continuous_edge_stream_to_windows`.
+  3. A parallel `leave_one_seizure_out_*`-equivalent loop in
+     `run_pipelines.py` for recording-level continuous sequences instead
+     of independent per-window rows -- the existing LOSO functions assume
+     per-window rows in `metadata`/`X` throughout, not a bolt-on.
+  4. Only then: a real GPU LOSO run to compare against the
+     `_DenseEdgeMambaTemporal` (windowed) baseline above.
