@@ -1,0 +1,102 @@
+# syntax=docker/dockerfile:1
+#
+# Ready-to-train RunPod image for dense_edge_mamba with the fused
+# mamba-ssm CUDA kernel. Separate from the root Dockerfile on purpose:
+# that one is dependency-only (no repo code, no mamba-ssm) and is used
+# elsewhere -- leave it untouched. See
+# Epilepsy/runpod_mamba_fast_image_brief.md.
+#
+# Diff vs the root Dockerfile:
+#   1. Bakes repo Python code in (this image is meant to `docker run` and
+#      train, not wait for an rsync). Rebuild when the code you want on
+#      the pod changes; ARG GIT_COMMIT records which checkout landed.
+#   2. Compiles mamba-ssm + causal-conv1d against the base image's
+#      torch==2.8.0+cu128 so mambapy's MambaConfig.use_cuda=True path
+#      actually has a kernel to delegate to. --no-build-isolation is
+#      required so pip does not pull a CPU torch into an isolated build
+#      env (mamba-ssm's own install docs).
+#
+# Build (GitHub Actions, not a RunPod pod -- pods have no Docker daemon):
+#   docker build -f Dockerfile.mamba --platform=linux/amd64 \
+#     --build-arg GIT_COMMIT=$(git rev-parse --short HEAD) .
+#
+# nvcc lives in this base image; compiling the extension does not need a
+# GPU. Importing the resulting .so DOES need libcuda (the host driver),
+# so the loud `import selective_scan_fn` check cannot run at build time
+# on GitHub-hosted runners. We instead assert the compiled .so landed
+# on disk here, and print a reminder to run
+# scripts/dense_edge_mamba_cuda_kernel_parity.py on the pod.
+
+FROM runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404
+
+SHELL ["/bin/bash", "-c"]
+
+WORKDIR /workspace
+
+# Dataset layer first -- identical to the root Dockerfile's 2026-08-21
+# block -- so a code/mamba-ssm rebuild never re-downloads 1.6GB of chb01.
+ENV MNE_DATA=/root/mne_data
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends curl ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+COPY THIRD_PARTY_NOTICES.md /workspace/THIRD_PARTY_NOTICES.md
+RUN set -euo pipefail; \
+    ARCHIVE_URL="https://github.com/noshore5/EEG_Benchmarks/releases/download/chbmit-chb01-1.0.0/chb01.tar.gz"; \
+    ARCHIVE_SHA="bf91e579c8b61a6813442d9351fa6e111dd6078d43ab2b04fd66d4660324b6f9"; \
+    DEST_ROOT="/root/mne_data/MNE-chbmit-data/chbmit/1.0.0"; \
+    mkdir -p "$DEST_ROOT"; \
+    curl -fSL --retry 5 --retry-delay 2 -o /tmp/chb01.tar.gz "$ARCHIVE_URL"; \
+    echo "$ARCHIVE_SHA  /tmp/chb01.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/chb01.tar.gz -C "$DEST_ROOT"; \
+    rm -f /tmp/chb01.tar.gz; \
+    n_edf=$(find "$DEST_ROOT/chb01" -name '*.edf' | wc -l); \
+    echo "Extracted $n_edf .edf files for chb01"; \
+    [ "$n_edf" -ge 40 ]
+
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install --break-system-packages --ignore-installed -r /tmp/requirements.txt
+
+# Toolchain for mamba-ssm / causal-conv1d's CUDA extensions. nvcc is
+# expected from the base image; fail here (not at pip install) if it isn't.
+RUN set -euo pipefail; \
+    nvcc --version; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends build-essential ninja-build; \
+    rm -rf /var/lib/apt/lists/*
+
+# sm_86 = 3070 Ti (the Windows box this kernel is meant to beat).
+# sm_89 = 4090 (RunPod pods this image actually boots on).
+# sm_80 / sm_90 = A100 / H100 if a larger pod is used later.
+ENV MAX_JOBS=4
+ENV TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0"
+# Versions: not pinned to a patch -- mamba-ssm wheels/sdists track the
+# torch in the environment when --no-build-isolation is set. Brief asked
+# not to copy a version number from an old blog post. Both packages are
+# installed from PyPI at image-build time; the resulting versions are
+# visible in `pip show mamba-ssm causal-conv1d` inside the image.
+RUN set -euo pipefail; \
+    pip install --break-system-packages --no-build-isolation \
+        "causal-conv1d>=1.4.0" "mamba-ssm>=2.2.2"; \
+    so_count=$(find /usr -name 'selective_scan_cuda*.so' 2>/dev/null | wc -l); \
+    echo "selective_scan_cuda .so files found: $so_count"; \
+    [ "$so_count" -ge 1 ]
+
+# Repo code. Listed explicitly so Epilepsy/results, exports, BCI, .git
+# never land in the image.
+COPY datasets/ /workspace/datasets/
+COPY paradigms/ /workspace/paradigms/
+COPY utils/ /workspace/utils/
+COPY Epilepsy/ /workspace/Epilepsy/
+COPY scripts/ /workspace/scripts/
+COPY tests/ /workspace/tests/
+COPY README.md CONTEXT.md /workspace/
+
+ARG GIT_COMMIT=unknown
+ENV EEG_BENCHMARKS_GIT_COMMIT=${GIT_COMMIT}
+RUN echo "EEG_Benchmarks ${GIT_COMMIT}" > /etc/motd && \
+    echo "Reminder: pass --device cuda. Mamba kernel: auto on this image" >> /etc/motd && \
+    echo "Parity: python scripts/dense_edge_mamba_cuda_kernel_parity.py" >> /etc/motd
+
+# Keep the base image's sshd ENTRYPOINT/CMD -- a Pod needs it. See the
+# root Dockerfile's 2026-08-20 note on why we don't add a serverless
+# handler here.

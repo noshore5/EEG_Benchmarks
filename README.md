@@ -59,6 +59,29 @@ a Runpod template) in place of the stock `runpod/pytorch:...` image, and skip
 `bash setup.sh` entirely. Public GHCR package, no registry credential needed
 to pull.
 
+### `dense_edge_mamba` + fused `mamba-ssm` kernel (`Dockerfile.mamba`)
+
+A second image, `Dockerfile.mamba`, bakes in repo code **and** compiles
+`mamba-ssm`/`causal-conv1d` against the same `torch==2.8.0+cu128` base so
+`_DenseEdgeMambaTemporal`'s `use_cuda_kernel` auto-detect (mambapy
+`MambaConfig.use_cuda=True`) has a real fused scan to call. Windows/Mac
+keep the portable `mambapy` pscan; this image is Linux/CUDA only.
+
+- Workflow: `.github/workflows/build-mamba-pod-image.yml` (`workflow_dispatch`
+  or a push that touches `Dockerfile.mamba`). Tags:
+  `ghcr.io/noshore5/eeg_benchmarks-mamba:<date>-<sha>` and `:latest`.
+- On the pod: `--device cuda --pipeline dense_edge_mamba`. Kernel
+  auto-engages; `--no-mamba-use-cuda-kernel` forces pscan. The Mamba block
+  is excluded from `--train-amp-bf16` (fp32) because the fused kernel is
+  not (b)float16-safe.
+- First thing on a new pod: `python scripts/dense_edge_mamba_cuda_kernel_parity.py`
+  then `python Epilepsy/run_pipelines.py --pipeline dense_edge_mamba
+  --channel-subset-k 23 --device cuda --max-folds 1 --epochs 1`.
+- `_DenseEdgeMambaContinuous` does **not** use this kernel (no initial-state
+  API on `selective_scan_fn`).
+
+See `Epilepsy/runpod_mamba_fast_image_brief.md`.
+
 **Fallback:** `setup.sh` (manual bootstrap on a stock pod) is still the
 documented path until a few real runs have gone through the new image
 cleanly -- don't remove it yet.

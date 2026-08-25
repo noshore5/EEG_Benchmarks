@@ -284,6 +284,7 @@ DENSE_EDGE_MAMBA_PARAMS: dict[str, object] = dict(
     mamba_n_layers=1,
     mamba_dropout=0.0,
     mamba_chunk_size=128,
+    mamba_use_cuda_kernel=None,  # None = auto (CUDA + mamba-ssm importable)
 )
 
 # label_mode="prediction" training dynamics -- its OWN block (not a copy
@@ -337,6 +338,7 @@ PREDICTION_MAMBA_PARAMS: dict[str, object] = dict(
     mamba_n_layers=1,
     mamba_dropout=0.0,
     mamba_chunk_size=128,
+    mamba_use_cuda_kernel=None,  # None = auto (CUDA + mamba-ssm importable)
     validation_split=0.2,
 )
 
@@ -420,6 +422,8 @@ def _apply_dense_family_cli_overrides(clf_params: dict, args: argparse.Namespace
         clf_params["time_frequency_node_ablation"] = args.cwt_encoder_ablation
         if args.cwt_encoder_ablation != "none":
             clf_params["cwt_encoder"] = True
+    if args.mamba_use_cuda_kernel is not None:
+        clf_params["mamba_use_cuda_kernel"] = args.mamba_use_cuda_kernel
 
 
 DEFAULT_DETECTION_EPOCHS = 20
@@ -1547,6 +1551,22 @@ def _build_argument_parser() -> argparse.ArgumentParser:
             "see that constructor param's 2026-08-23 docstring in cwt_gnn_classifiers.py "
             "(TorchEEGClassifier.train_amp_bf16 in common.py). CUDA only; no-op elsewhere. "
             "Independent of --dense-edge-amp-bf16 -- either, both, or neither."
+        ),
+    )
+    parser.add_argument(
+        "--mamba-use-cuda-kernel",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "--pipeline=dense_edge_mamba only: flip mambapy's MambaConfig.use_cuda so "
+            "the fused mamba-ssm CUDA kernel runs instead of the pure-PyTorch pscan. "
+            "Unset (default): auto-detect -- True iff torch.cuda.is_available() and "
+            "mamba-ssm is importable (the Dockerfile.mamba RunPod image), else False. "
+            "--mamba-use-cuda-kernel forces True (errors if the kernel isn't there). "
+            "--no-mamba-use-cuda-kernel forces the portable pscan. The fused kernel "
+            "is not compatible with (b)float16; when it is engaged, the Mamba block "
+            "is excluded from --train-amp-bf16 autocast (fp32) rather than mixing. "
+            "_DenseEdgeMambaContinuous does not use this path (no initial-state API)."
         ),
     )
     parser.add_argument(

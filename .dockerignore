@@ -1,0 +1,14 @@
+# Shared by Dockerfile and Dockerfile.mamba. The dep-only image only
+# COPYs requirements.txt + THIRD_PARTY_NOTICES.md, so ignoring results
+# does not affect it. Dockerfile.mamba COPYs Epilepsy/ and must not
+# pull in run artifacts.
+Epilepsy/results
+exports
+BCI
+**/__pycache__
+**/*.pyc
+.git
+.venv
+venv
+*.egg-info
+.pytest_cache

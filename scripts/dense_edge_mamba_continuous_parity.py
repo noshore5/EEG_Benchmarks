@@ -72,4 +72,29 @@ with torch.no_grad():
     print(f"[scan-vs-step parity] max|pscan - step| = {max_diff2:.3e}  shape={tuple(pscan_out.shape)}")
     assert torch.allclose(pscan_out, step_out, atol=1e-4), "step() recurrence disagrees with forward()'s scan!"
 
-print("OK -- chunking is exact, and the step()-based continuous mechanism matches mambapy's own scan.")
+# Claim 3: the default scan="chunk" path (pscan with carried-in h) is the
+# same recurrence as looping step(), including across a chunk boundary.
+# This is the throughput path -- see _DenseEdgeMambaContinuous's docstring.
+chunk_mod = _DenseEdgeMambaContinuous(
+    in_channels=C_IN, out_channels=4, d_model=D_MODEL, d_state=D_STATE,
+    d_conv=D_CONV, expand=EXPAND, n_layers=1, scan="chunk",
+).to(device)
+step_mod = _DenseEdgeMambaContinuous(
+    in_channels=C_IN, out_channels=4, d_model=D_MODEL, d_state=D_STATE,
+    d_conv=D_CONV, expand=EXPAND, n_layers=1, scan="step",
+).to(device)
+step_mod.load_state_dict(chunk_mod.state_dict())
+chunk_mod.eval()
+step_mod.eval()
+with torch.no_grad():
+    out_chunk_scan, _ = chunk_mod(conv_in)
+    out_step_scan, _ = step_mod(conv_in)
+    max_diff3 = (out_chunk_scan - out_step_scan).abs().max().item()
+    print(f"[chunk-scan vs step-scan] max|chunk - step| = {max_diff3:.3e}")
+    assert torch.allclose(out_chunk_scan, out_step_scan, atol=1e-5)
+
+    # And the default module's own chunking (claim 1, now on scan="chunk")
+    # still matches one full-length call -- already asserted above on
+    # `module`, which defaults to scan="chunk".
+
+print("OK -- chunking is exact, step() matches mambapy's scan, and scan='chunk' matches scan='step'.")

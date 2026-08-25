@@ -242,6 +242,28 @@ def test_shuffle_time_order_rejected_for_mamba():
         _tiny_core(shuffle_time_order=True)
 
 
+def test_use_cuda_kernel_auto_is_false_without_mamba_ssm():
+    """Portable default: no mamba-ssm on this machine -> pscan, no error."""
+    mod = _DenseEdgeMambaTemporal(
+        in_channels=IN_CHANNELS, out_channels=HIDDEN, d_model=8, d_conv=2,
+        n_layers=1, use_cuda_kernel=None,
+    )
+    assert mod.use_cuda_kernel is False
+    assert mod.mamba.config.use_cuda is False
+
+
+def test_use_cuda_kernel_true_errors_without_kernel():
+    from Epilepsy.pipelines.cwt_gnn_classifiers import _mamba_ssm_importable
+
+    if _mamba_ssm_importable() and torch.cuda.is_available():
+        pytest.skip("kernel is actually available here")
+    with pytest.raises(ImportError, match="mamba_use_cuda_kernel=True"):
+        _DenseEdgeMambaTemporal(
+            in_channels=IN_CHANNELS, out_channels=HIDDEN, d_model=8,
+            use_cuda_kernel=True,
+        )
+
+
 def test_classifier_forwards_mamba_hyperparameters():
     clf = SparseEvidenceGNNClassifier(
         sampling_rate=64, lowest=8.0, highest=24.0, nfreqs=NFREQS,
@@ -249,6 +271,7 @@ def test_classifier_forwards_mamba_hyperparameters():
         dense_edge_temporal_mode="mamba",
         mamba_d_model=8, mamba_d_state=8, mamba_d_conv=2, mamba_expand=2,
         mamba_n_layers=1, mamba_dropout=0.1, mamba_chunk_size=3,
+        mamba_use_cuda_kernel=False,
         cwt_backend="torch", device="cpu", verbose=0,
         dense_edge_cache_dir=None, cwt_cache=None, normalize_input=False,
         epochs=1, batch_size=2,
@@ -257,6 +280,7 @@ def test_classifier_forwards_mamba_hyperparameters():
     assert isinstance(model.dense_edge_conv, _DenseEdgeMambaTemporal)
     assert model.dense_edge_conv.d_model == 8
     assert model.dense_edge_conv.chunk_size == 3
+    assert model.dense_edge_conv.use_cuda_kernel is False
     assert isinstance(model.dense_edge_conv.dropout, nn.Dropout)
 
 

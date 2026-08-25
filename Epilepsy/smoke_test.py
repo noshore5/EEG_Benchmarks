@@ -242,6 +242,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--channel-subset-metric", default=_UNSET)
     parser.add_argument("--dense-edge-amp-bf16", action=argparse.BooleanOptionalAction, default=_UNSET)
     parser.add_argument("--train-amp-bf16", action=argparse.BooleanOptionalAction, default=_UNSET)
+    parser.add_argument("--mamba-use-cuda-kernel", action=argparse.BooleanOptionalAction, default=_UNSET)
     parser.add_argument("--disable-disk-cache", action=argparse.BooleanOptionalAction, default=_UNSET)
     parser.add_argument("--device", default=_UNSET)
     parser.add_argument("--verbose", type=int, default=_UNSET)
@@ -301,6 +302,8 @@ def main() -> None:
     clf_params["time_frequency_node_ablation"] = p["cwt_encoder_ablation"]
     if p["cwt_encoder_ablation"] != "none":
         clf_params["cwt_encoder"] = True
+    if p.get("mamba_use_cuda_kernel") is not None:
+        clf_params["mamba_use_cuda_kernel"] = p["mamba_use_cuda_kernel"]
     print(
         f"[smoke_test] dense_edge_temporal_mode="
         f"{clf_params['dense_edge_temporal_mode']!r} "

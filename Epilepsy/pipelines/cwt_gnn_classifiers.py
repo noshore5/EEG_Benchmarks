@@ -1755,6 +1755,43 @@ class _DenseEdgeGRUTemporal(nn.Module):
         return out.permute(0, 2, 1).unsqueeze(-1)  # [B, out_channels, E, 1]
 
 
+def _mamba_ssm_importable() -> bool:
+    """True iff the fused mamba-ssm selective_scan_fn can be imported.
+
+    mambapy's MambaConfig.use_cuda=True path catches ImportError and
+    silently falls back to pscan -- that is a runtime safety net, not
+    something we want at image-build or when the caller asked for the
+    kernel. This helper is the loud check.
+    """
+    try:
+        from mamba_ssm.ops.selective_scan_interface import (  # noqa: F401
+            selective_scan_fn,
+        )
+    except ImportError:
+        return False
+    return True
+
+
+def _resolve_mamba_use_cuda_kernel(use_cuda_kernel: bool | None) -> bool:
+    """None = auto (CUDA + mamba-ssm importable). False = force pscan.
+    True = require the kernel or raise, no silent fallback.
+    """
+    available = bool(torch.cuda.is_available()) and _mamba_ssm_importable()
+    if use_cuda_kernel is False:
+        return False
+    if use_cuda_kernel is True:
+        if not available:
+            raise ImportError(
+                "mamba_use_cuda_kernel=True requires a CUDA device and an "
+                "importable mamba-ssm (from mamba_ssm.ops.selective_scan_"
+                "interface import selective_scan_fn). The fused kernel has "
+                "no Windows/Mac wheel -- leave this unset (auto) or False "
+                "on those machines, or use the Dockerfile.mamba RunPod image."
+            )
+        return True
+    return available
+
+
 class _DenseEdgeMambaTemporal(nn.Module):
     """dense_edge_temporal_mode="mamba" counterpart to _DenseEdgeGRUTemporal /
     _build_dense_feature_conv -- 2026-08-24, event_mode="dense" only. A third,
@@ -1781,22 +1818,29 @@ class _DenseEdgeMambaTemporal(nn.Module):
     change on top of the existing GRU.
 
     mamba-ssm (the official/upstream package) was evaluated first and
-    rejected for THIS repo's environment, not for architectural reasons --
-    see the 2026-08-24 session note for the full investigation. Summary:
+    rejected as the *default* for THIS repo's environment, not for
+    architectural reasons -- see the 2026-08-24 session note. Summary:
     mamba-ssm ships no Windows wheel (PyPI: sdist only) and its selective-
     scan/causal-conv1d kernels are custom CUDA extensions that require
     nvcc + a matching Linux toolchain to build from source; this repo runs
-    on Windows (see setup.sh / requirements.txt's cu128 extra-index-url
-    comment) and must keep working on the MPS path too (macOS dev machine --
-    see the module docstring's device history), which mamba-ssm's CUDA-only
-    kernels cannot support at all. `mambapy` (PyPI, github.com/alxndrTL/
-    mamba.py) is used instead: a pure-PyTorch reimplementation of the same
-    selective-SSM recurrence (parallel-scan by default, `use_cuda=False`
-    forced below so this NEVER reaches for mamba-ssm's kernels even if that
-    package happens to be installed too), so it runs identically on
-    CUDA/MPS/CPU with no custom kernel compilation step -- the least
-    invasive option that still uses a real, maintained Mamba implementation
-    rather than a from-scratch reimplementation of the selective-scan math.
+    on Windows and must keep working on the MPS path too (macOS), which
+    mamba-ssm's CUDA-only kernels cannot support at all. `mambapy` (PyPI,
+    github.com/alxndrTL/mamba.py) is used as the portable default: a
+    pure-PyTorch reimplementation of the same selective-SSM recurrence.
+
+    On a Linux/CUDA box with `mamba-ssm` importable (the RunPod
+    `Dockerfile.mamba` image), `use_cuda_kernel=None` (default) auto-
+    detects and flips mambapy's own `MambaConfig.use_cuda=True` so the
+    fused kernel runs instead of the pure-PyTorch pscan -- a flag flip,
+    not a different model. Explicit `False` keeps today's portable path;
+    explicit `True` errors if CUDA/`mamba-ssm` aren't there rather than
+    silently falling back. The fused kernel is not compatible with
+    (b)float16 (mambapy's own comment); when it is engaged, `_mamba_pooled`
+    disables autocast and runs that block in fp32 so `--train-amp-bf16`
+    on the rest of the model does not silently feed bf16 into the kernel.
+    `_DenseEdgeMambaContinuous` does NOT use this path -- the fused
+    `selective_scan_fn` has no initial-state argument, so carried-state
+    continuous scans stay on the local pscan (`scan="chunk"`).
 
     `d_model` (mamba_d_model) is independent of in_channels (4*nfreqs) and
     out_channels (dense_conv_out_channels) -- an input nn.Linear projects
@@ -1871,6 +1915,7 @@ class _DenseEdgeMambaTemporal(nn.Module):
         n_layers: int = 1,
         dropout: float = 0.0,
         chunk_size: int = 128,
+        use_cuda_kernel: bool | None = None,
     ) -> None:
         super().__init__()
         try:
@@ -1879,8 +1924,8 @@ class _DenseEdgeMambaTemporal(nn.Module):
             raise ImportError(
                 "dense_edge_temporal_mode='mamba' requires the 'mambapy' package "
                 "(pure-PyTorch Mamba SSM -- see _DenseEdgeMambaTemporal's "
-                "docstring for why the upstream 'mamba-ssm' CUDA package was not "
-                "used). Install with `pip install mambapy`."
+                "docstring for why the upstream 'mamba-ssm' CUDA package is "
+                "not the portable default). Install with `pip install mambapy`."
             ) from exc
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -1888,6 +1933,8 @@ class _DenseEdgeMambaTemporal(nn.Module):
         self.in_proj = (
             nn.Identity() if in_channels == d_model else nn.Linear(in_channels, d_model)
         )
+        resolved = _resolve_mamba_use_cuda_kernel(use_cuda_kernel)
+        self.use_cuda_kernel = resolved
         self.mamba = Mamba(
             MambaConfig(
                 d_model=d_model,
@@ -1895,15 +1942,20 @@ class _DenseEdgeMambaTemporal(nn.Module):
                 d_state=d_state,
                 expand_factor=expand,
                 d_conv=d_conv,
-                # Force the pure-PyTorch parallel-scan path on every device --
-                # see class docstring. Never reaches for mamba-ssm's CUDA
-                # kernels even if that package happens to also be installed.
-                use_cuda=False,
+                # None/auto: True only on Linux/CUDA with mamba-ssm importable
+                # (Dockerfile.mamba). False everywhere else -- see class
+                # docstring. Never silently mix with (b)float16; _mamba_pooled
+                # disables autocast when this is True.
+                use_cuda=resolved,
             )
         )
         self.dropout = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
         self.out_proj = nn.Linear(d_model, out_channels)
         self.chunk_size = max(1, int(chunk_size))
+        print(
+            f"_DenseEdgeMambaTemporal use_cuda_kernel={resolved} "
+            f"({'mamba-ssm fused scan' if resolved else 'mambapy pure-PyTorch pscan'})"
+        )
 
     def _mamba_pooled(self, seq_chunk: torch.Tensor) -> torch.Tensor:
         """seq_chunk: [rows, T, d_model] -> [rows, d_model], one Mamba call
@@ -1911,6 +1963,14 @@ class _DenseEdgeMambaTemporal(nn.Module):
         docstring) plus the same last-timestep pooling forward() documents.
         Split out so it can be handed to torch.utils.checkpoint per chunk.
         """
+        if self.use_cuda_kernel:
+            # mambapy: use_cuda is "not compatible with (b)float16". Keep
+            # the kernel in fp32 even when --train-amp-bf16 wraps the rest
+            # of the trainable forward.
+            device_type = seq_chunk.device.type
+            with torch.autocast(device_type=device_type, enabled=False):
+                out_seq = self.mamba(seq_chunk.float())
+            return out_seq[:, -1, :].to(dtype=seq_chunk.dtype)
         out_seq = self.mamba(seq_chunk)  # [rows, T, d_model] -- causal
         return out_seq[:, -1, :]  # [rows, d_model] -- last timestep == h_T analogue
 
@@ -1982,31 +2042,47 @@ class _DenseEdgeMambaContinuous(nn.Module):
     chunk_size, because chunk_size only splits the ROW (B*E) dimension,
     never T.
 
-    This class instead drives mambapy's OTHER scan implementation:
-    Mamba.step(x, caches), built upstream for autoregressive generation --
-    one timestep at a time, an explicit caches=[(h, inputs), ...] (one
-    (h, inputs) pair per layer) that the caller both supplies and receives
-    back updated. That is the actual "continuous state space" primitive:
-    loop step() across a chunk's timesteps, carry the returned cache into
-    the NEXT chunk's forward() call instead of discarding it, and the SSM
-    state (h) has then genuinely run continuously across every timestep of
-    the recording seen so far, unbroken by chunk or window boundaries --
-    chunking only bounds how much of that history stays in the autograd
-    graph for backward (classic truncated BPTT: cache is returned
-    .detach()'d, so the forward value carries forward exactly, but
-    gradients for chunk N do not reach back into chunk N-1's computation).
-    Also never materializes a [rows, T, ...] tensor -- each step() call is
-    O(rows * d_inner * d_state), so chunk length is a pure memory/TBPTT
-    knob, decoupled from mamba_chunk_size's row-chunking (both apply
-    independently and can be tuned together against actual GPU memory).
+    Carrying state across chunks needs an API `Mamba.forward()` does not
+    have: accept an initial (h, conv-inputs) cache, emit the whole chunk,
+    return the updated cache. Pinned mambapy==1.2.0 only offers
+    `Mamba.step(x, caches)` for that, which is the autoregressive
+    generation path -- one Python call per timestep. A 2026-08-25 GPU
+    probe at real 23ch-mesh scale measured that at ~2.68ms/timestep
+    (B=1, RTX 3070 Ti): a per-timestep launch cost, not a memory cost
+    (T_chunk=1024 still fit in 2.48GiB). Looping `step()` across a real
+    ~1hr recording is therefore minutes of Mamba compute per recording
+    per epoch, slower than even the already-slow windowed
+    `_DenseEdgeMambaTemporal` pscan.
+
+    Default scan="chunk" is a local reimplementation of mambapy's
+    unreleased `Mamba.chunk_step` (alxndrTL/mamba.py@67000c9, 2025-12-15
+    -- not in the 1.2.0 PyPI wheel this repo pins): the SAME Blelloch
+    pscan `Mamba.forward()` already uses, but with the previous chunk's
+    h injected into the first timestep (`BX[:,0] += deltaA[:,0] * h0`)
+    and the conv1d's left context taken from the carried `inputs` cache
+    instead of zeros. Numerically this is the `step()` recurrence (same
+    cache contract, same ResidualBlock + mixer weights); computationally
+    it is one scan over T, not T kernel launches. scan="step" keeps the
+    original Python loop as a bit-level parity/ablation path -- not the
+    training default.
+
+    Truncated BPTT is unchanged: cache is returned .detach()'d, so the
+    forward VALUE carries across chunks exactly and gradients for chunk
+    N do not reach back into chunk N-1. scan="chunk" DOES materialize
+    the pscan's [rows, T, d_inner, d_state] intermediates (the tensors
+    `_DenseEdgeMambaTemporal`'s mamba_chunk_size exists to bound) --
+    at B=1, E=253, T_chunk=1024 that is ~0.5GiB/tensor, still fine on
+    an 8GB card. Batching many recordings together reintroduces the
+    rows*T scaling that OOM'd Temporal; if that happens, split the
+    leading dim the same way Temporal does, independently of T_chunk.
 
     Wraps mambapy's own `Mamba` (not the lower-level `MambaBlock` that
     Mamba.layers[i].mixer wraps) specifically so this shares the exact
     same residual-connection-plus-RMSNorm architecture (see
     mamba.py's ResidualBlock) that _DenseEdgeMambaTemporal's forward()
     already uses via Mamba.forward() -- the only difference from that
-    class is WHICH of mambapy's two scan entry points drives the same
-    underlying layers, not a different model.
+    class is that this one feeds a carried-in state into the scan,
+    not a different model.
 
     Pooling: unlike _DenseEdgeMambaTemporal (which pools to the last
     timestep as a per-window summary, since each of its calls IS one
@@ -2015,10 +2091,9 @@ class _DenseEdgeMambaContinuous(nn.Module):
     full continuous output stream for a recording exists -- see this
     branch's paradigm note in run_pipelines.py.
 
-    Only n_layers=1 has been exercised so far (Mamba.step already loops
-    caches per-layer internally for n_layers>1, so multi-layer should work
-    unchanged, but hasn't been correctness-tested against forward() yet --
-    see scripts/dense_edge_mamba_continuous_parity.py).
+    n_layers=1 is the trained default; n_layers=2 is correctness-tested
+    (chunk-scan vs step-scan, including carried cache across uneven
+    chunks -- tests/test_dense_edge_mamba_continuous.py).
     """
 
     def __init__(
@@ -2031,6 +2106,7 @@ class _DenseEdgeMambaContinuous(nn.Module):
         expand: int = 2,
         n_layers: int = 1,
         dropout: float = 0.0,
+        scan: Literal["chunk", "step"] = "chunk",
     ) -> None:
         super().__init__()
         try:
@@ -2059,6 +2135,13 @@ class _DenseEdgeMambaContinuous(nn.Module):
         self.mamba = Mamba(self.config)
         self.dropout = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
         self.out_proj = nn.Linear(d_model, out_channels)
+        if scan not in ("chunk", "step"):
+            raise ValueError(
+                f"scan must be 'chunk' or 'step', got {scan!r}. 'chunk' is the "
+                "training default (pscan with carried-in state); 'step' is the "
+                "original per-timestep Python loop, kept as a parity path."
+            )
+        self.scan = scan
 
     def init_cache(self, rows: int, device: torch.device) -> list[tuple[torch.Tensor, torch.Tensor]]:
         """Zero-init caches=[(h, inputs), ...] (one pair per layer), the
@@ -2080,6 +2163,120 @@ class _DenseEdgeMambaContinuous(nn.Module):
             (None, torch.zeros(rows, d_inner, d_conv - 1, device=device))
             for _ in range(self.config.n_layers)
         ]
+
+    def _chunk_step(
+        self,
+        seq: torch.Tensor,
+        cache: list[tuple[torch.Tensor, torch.Tensor]],
+    ) -> tuple[torch.Tensor, list[tuple[torch.Tensor, torch.Tensor]]]:
+        """One ResidualBlock stack over a full chunk, with carried-in state.
+
+        seq: [rows, T_chunk, d_model]. cache: init_cache-shaped list, one
+        (h, inputs) pair per layer. Returns (out_seq, updated cache) with
+        the same shapes `Mamba.step` would produce if looped over T_chunk
+        -- see class docstring.
+        """
+        cache = list(cache)
+        for i, layer in enumerate(self.mamba.layers):
+            seq, cache[i] = self._residual_chunk_step(layer, seq, cache[i])
+        return seq, cache
+
+    def _residual_chunk_step(
+        self,
+        layer: nn.Module,
+        x_seq: torch.Tensor,
+        cache: tuple[torch.Tensor, torch.Tensor],
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        # ResidualBlock.forward is mixer(norm(x)) + x; same residual, but
+        # the mixer is driven by the carried-state pscan instead of
+        # MambaBlock.forward's always-h=0 pscan.
+        y_seq, cache = self._mixer_chunk_step(layer.mixer, layer.norm(x_seq), cache)
+        return y_seq + x_seq, cache
+
+    def _mixer_chunk_step(
+        self,
+        mixer: nn.Module,
+        x_seq: torch.Tensor,
+        cache: tuple[torch.Tensor, torch.Tensor],
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        """Carried-state parallel scan for one MambaBlock.
+
+        Local reimplementation of unreleased mambapy `MambaBlock.chunk_step`
+        (see class docstring) against pinned 1.2.0 internals: same in_proj /
+        causal conv / SSM / out_proj as MambaBlock.step, but the SSM runs
+        as a pscan over the whole chunk with h0 folded into timestep 0,
+        and the conv's left context is the carried `inputs` cache.
+        """
+        h0, inputs = cache
+        batch, length, _ = x_seq.shape
+        xz = mixer.in_proj(x_seq)  # [rows, T, 2*d_inner]
+        x_pre, z = xz.chunk(2, dim=-1)
+        k = max(mixer.config.d_conv - 1, 0)
+        if k > 0:
+            # Prepend the previous chunk's last k pre-conv activations so
+            # the depthwise conv is causal across the chunk boundary, then
+            # slice off the extra padding conv1d still applies (it was
+            # constructed with padding=d_conv-1 for the always-h=0
+            # forward() path). Same indexing mambapy's unreleased
+            # chunk_step uses; matches looping step() which does
+            # conv1d(cat([inputs, x_t]))[..., d_conv-1] per timestep.
+            x_cat = torch.cat([inputs, x_pre.transpose(1, 2)], dim=2)
+            x_conv = mixer.conv1d(x_cat)[:, :, k : k + length]
+            x_act = F.silu(x_conv.transpose(1, 2))
+        else:
+            x_act = F.silu(
+                mixer.conv1d(x_pre.transpose(1, 2))[:, :, :length].transpose(1, 2)
+            )
+        y_seq, hs = self._mixer_ssm_chunk(mixer, x_act, h0)
+        y_seq = mixer.out_proj(y_seq * F.silu(z))
+        h_t = hs[:, -1]
+        if k > 0:
+            pre_full = torch.cat([inputs.transpose(1, 2), x_pre], dim=1)
+            inputs_last = pre_full[:, -k:, :].transpose(1, 2).contiguous()
+        else:
+            inputs_last = torch.zeros(
+                batch, mixer.config.d_inner, 0, device=x_seq.device, dtype=x_seq.dtype
+            )
+        return y_seq, (h_t, inputs_last)
+
+    def _mixer_ssm_chunk(
+        self,
+        mixer: nn.Module,
+        x: torch.Tensor,
+        h0: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Selective SSM over a chunk, with optional carried-in h0.
+
+        Same delta/A/B/C/D construction as MambaBlock.ssm / ssm_step.
+        When h0 is not None, folds it into BX at t=0 so pscan's
+        H[t] = A[t]*H[t-1]+X[t] (H[-1]=0) recurrence starts from h0
+        rather than zeros -- the whole reason this exists vs
+        Mamba.forward().
+        """
+        from mambapy.pscan import pscan
+
+        A = -torch.exp(mixer.A_log.float())
+        D = mixer.D.float()
+        deltaBC = mixer.x_proj(x)
+        delta, B, C = torch.split(
+            deltaBC,
+            [mixer.config.dt_rank, mixer.config.d_state, mixer.config.d_state],
+            dim=-1,
+        )
+        delta, B, C = mixer._apply_layernorms(delta, B, C)
+        delta = F.softplus(mixer.dt_proj(delta))
+        deltaA = torch.exp(delta.unsqueeze(-1) * A)
+        deltaB = delta.unsqueeze(-1) * B.unsqueeze(2)
+        BX = deltaB * x.unsqueeze(-1)
+        if h0 is not None:
+            # Avoid in-place on a tensor that may be in the autograd graph
+            # (`BX[:, 0] = ...` trips a version-counter error under backward).
+            bx0 = BX[:, 0] + deltaA[:, 0] * h0
+            BX = torch.cat([bx0.unsqueeze(1), BX[:, 1:]], dim=1)
+        hs = pscan(deltaA, BX)
+        y = (hs @ C.unsqueeze(-1)).squeeze(3)
+        y = y + D * x
+        return y, hs
 
     def forward(
         self,
@@ -2125,11 +2322,17 @@ class _DenseEdgeMambaContinuous(nn.Module):
         seq = self.in_proj(seq)  # [rows, T_chunk, d_model]
         if cache is None:
             cache = self.init_cache(rows, seq.device)
-        outs = []
-        for t in range(t_chunk):
-            y, cache = self.mamba.step(seq[:, t, :], cache)  # y: [rows, d_model]
-            outs.append(y)
-        out_seq = torch.stack(outs, dim=1)  # [rows, T_chunk, d_model]
+        if self.scan == "step":
+            # Original 2026-08-25 path: mambapy 1.2.0's only carried-state
+            # entry point. Kept as a parity/ablation scan, not the default
+            # -- see class docstring for the throughput reason.
+            outs = []
+            for t in range(t_chunk):
+                y, cache = self.mamba.step(seq[:, t, :], cache)  # y: [rows, d_model]
+                outs.append(y)
+            out_seq = torch.stack(outs, dim=1)  # [rows, T_chunk, d_model]
+        else:
+            out_seq, cache = self._chunk_step(seq, cache)  # [rows, T_chunk, d_model]
         out_seq = self.dropout(out_seq)
         out_seq = self.out_proj(out_seq)  # [rows, T_chunk, out_channels]
         out_seq = out_seq.reshape(batch_size, num_edges, t_chunk, self.out_channels)
@@ -2739,6 +2942,9 @@ class SparseEvidenceGNNCore(nn.Module):
         # Memory tactic only -- see _DenseEdgeMambaTemporal's mamba_chunk_size
         # docstring (2026-08-24 CUDA-OOM finding). Does not change any output.
         mamba_chunk_size: int = 128,
+        # None = auto-detect (True iff CUDA + mamba-ssm importable). See
+        # _DenseEdgeMambaTemporal.use_cuda_kernel / Dockerfile.mamba.
+        mamba_use_cuda_kernel: bool | None = None,
         # 2026-08-11, dense_edge_temporal_mode="rnn" only -- the negative
         # control for that mode: same architecture, same parameter count,
         # scrambled time order. When True, _dense_edge_features
@@ -3272,6 +3478,7 @@ class SparseEvidenceGNNCore(nn.Module):
         self.mamba_n_layers = mamba_n_layers
         self.mamba_dropout = mamba_dropout
         self.mamba_chunk_size = mamba_chunk_size
+        self.mamba_use_cuda_kernel = mamba_use_cuda_kernel
         if event_mode == "dense" and dense_edge_temporal_mode == "rnn":
             # See _DenseEdgeGRUTemporal's own docstring -- same in_channels
             # (frequency folded in) / out_channels contract as the Conv2d
@@ -3295,6 +3502,7 @@ class SparseEvidenceGNNCore(nn.Module):
                 n_layers=mamba_n_layers,
                 dropout=mamba_dropout,
                 chunk_size=mamba_chunk_size,
+                use_cuda_kernel=mamba_use_cuda_kernel,
             )
         elif event_mode == "dense":
             # Frequency is folded into in_channels here (see
@@ -3413,6 +3621,7 @@ class SparseEvidenceGNNCore(nn.Module):
                 f"mamba_d_conv={self.mamba_d_conv} mamba_expand={self.mamba_expand} "
                 f"mamba_n_layers={self.mamba_n_layers} mamba_dropout={self.mamba_dropout} "
                 f"mamba_chunk_size={self.mamba_chunk_size} "
+                f"mamba_use_cuda_kernel={self.mamba_use_cuda_kernel} "
                 if self.dense_edge_temporal_mode == "mamba"
                 else ""
             )
@@ -5422,6 +5631,7 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         mamba_n_layers: int = 1,
         mamba_dropout: float = 0.0,
         mamba_chunk_size: int = 128,
+        mamba_use_cuda_kernel: bool | None = None,
         # 2026-08-11, forwarded to SparseEvidenceGNNCore -- see that class's
         # docstring / shuffle_time_order. The negative control for
         # dense_edge_temporal_mode="rnn": independently scrambles each
@@ -5843,6 +6053,7 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         self.mamba_n_layers = mamba_n_layers
         self.mamba_dropout = mamba_dropout
         self.mamba_chunk_size = mamba_chunk_size
+        self.mamba_use_cuda_kernel = mamba_use_cuda_kernel
         self.temporal_graph_edge_dim = temporal_graph_edge_dim
         if time_frequency_node_ablation not in ("none", "zero_node_embed", "node_only"):
             raise ValueError(
@@ -7310,6 +7521,7 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
             mamba_n_layers=self.mamba_n_layers,
             mamba_dropout=self.mamba_dropout,
             mamba_chunk_size=self.mamba_chunk_size,
+            mamba_use_cuda_kernel=self.mamba_use_cuda_kernel,
             shuffle_time_order=self.shuffle_time_order,
             temporal_graph_edge_dim=self.temporal_graph_edge_dim,
             cwt_encoder=self.cwt_encoder,

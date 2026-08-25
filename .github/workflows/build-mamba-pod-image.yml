@@ -1,0 +1,56 @@
+name: Build and push RunPod mamba-ssm pod image
+
+# Dockerfile.mamba: deps + baked repo code + compiled mamba-ssm CUDA
+# kernels. Same GHCR-not-a-pod-build rationale as build-pod-image.yml
+# (pods have no Docker daemon; RunPod's GitHub-integration registry is
+# not pullable by a plain Pod).
+#
+# Compiling mamba-ssm does not need a GPU (nvcc is in the base image).
+# Importing the .so does, so the image's loud import check is a "file
+# exists" assertion at build time; run
+# scripts/dense_edge_mamba_cuda_kernel_parity.py on the pod.
+on:
+  push:
+    branches: [continuous-cwt-mamba, main]
+    paths:
+      - "Dockerfile.mamba"
+      - "requirements.txt"
+      - "THIRD_PARTY_NOTICES.md"
+      - ".github/workflows/build-mamba-pod-image.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tag
+        id: tag
+        run: echo "tag=$(date -u +%Y%m%d)-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.mamba
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            GIT_COMMIT=${{ github.sha }}
+          tags: |
+            ghcr.io/noshore5/eeg_benchmarks-mamba:${{ steps.tag.outputs.tag }}
+            ghcr.io/noshore5/eeg_benchmarks-mamba:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

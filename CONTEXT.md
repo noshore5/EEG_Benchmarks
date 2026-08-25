@@ -9,7 +9,7 @@ Claude/Grok shells that don't share context with each other, and this is
 the one file meant to catch a new shell up without it re-reading
 everything.
 
-**Last updated:** 2026-08-25, by Claude (continuous-cwt-mamba work below).
+**Last updated:** 2026-08-25, by Grok (`scan="chunk"` + `Dockerfile.mamba` / `use_cuda_kernel` plumbing).
 
 ---
 
@@ -42,14 +42,18 @@ classification readout, at the end. Motivation: the existing
 exactly the cross-window context Mamba is supposed to be good at.
 
 Built and verified so far, all in `Epilepsy/pipelines/cwt_gnn_classifiers.py`:
-- `_DenseEdgeMambaContinuous` -- drives `mambapy`'s OTHER scan entry point,
-  `Mamba.step(x, cache)` (built upstream for autoregressive generation: one
-  timestep at a time, explicit `(h, inputs)` cache), instead of
-  `_DenseEdgeMambaTemporal`'s `Mamba.forward()` (parallel scan, always
-  h=0, no way to feed in a starting state). Loop `step()` across a chunk,
-  carry the returned (`.detach()`'d) cache into the next chunk -- classic
-  truncated BPTT: forward state chain is unbroken across an entire
-  recording, only the backward graph is cut at chunk boundaries.
+- `_DenseEdgeMambaContinuous` -- default `scan="chunk"` is a local
+  reimplementation of unreleased mambapy `Mamba.chunk_step`
+  (alxndrTL/mamba.py@67000c9; **not** in the pinned `mambapy==1.2.0` PyPI
+  wheel): the same Blelloch pscan `_DenseEdgeMambaTemporal`'s
+  `Mamba.forward()` already uses, but with the previous chunk's `h`
+  injected at timestep 0 and the conv1d's left context taken from the
+  carried `inputs` cache. `scan="step"` keeps the original per-timestep
+  `Mamba.step()` Python loop as a parity/ablation path. Truncated BPTT
+  unchanged: cache returned `.detach()`'d, so the forward state chain is
+  unbroken across a recording and gradients for chunk N do not reach
+  chunk N-1. See
+  `Epilepsy/Session_notes/2026_08_25/continuous_mamba_chunk_scan_throughput.md`.
 - `pool_continuous_edge_stream_to_windows` -- turns a concatenated
   continuous `[B,C,E,T_total]` output stream into per-window
   `[B,C,E,1]` snapshots (pool="last", the continuous analogue of
@@ -71,25 +75,28 @@ Built and verified so far, all in `Epilepsy/pipelines/cwt_gnn_classifiers.py`:
   state hits 0.922 (5-epoch-rolling-avg accuracy on the signal-free
   windows), reset stays at 0.573 (chance = 0.5). This is the actual
   evidence the mechanism buys something real, not just "it runs."
-- `scripts/dense_edge_mamba_continuous_parity.py` -- chunking is
+- `scripts/dense_edge_mamba_continuous_parity.py` -- T-chunking is
   bit-exact vs. one big call; `step()`-driven output matches `mambapy`'s
-  own `forward()` scan to float32 noise (~6e-8); a chunk's `backward()`
-  genuinely doesn't reach into the previous chunk's freed graph.
-- `scripts/continuous_mamba_gpu_scale_probe.py` -- one-shot real-scale
-  (23ch full mesh, E=253, C_in=192, real defaults d_model=16/d_state=16/
-  expand=2) fwd+bwd probe on this session's RTX 3070 Ti. **Memory turns
-  out NOT to be the binding constraint**: linear at ~2.4 MiB/timestep,
-  T_chunk=1024 -> 2.48GiB, comfortably fits. **Wall-clock time is the
-  real open problem**: ~2.68ms/timestep (B=1) -- a genuine per-timestep
-  Python-loop/kernel-launch cost with no batching-across-time the way a
-  parallel scan gets for free. Scaled to a real ~1hr recording (tens of
-  thousands of timesteps even downsampled) that's roughly a couple
-  minutes of Mamba compute ALONE per recording per epoch -- likely
-  slower than even the already-slow (~65s/epoch, 4.6x GRU) windowed
-  `mambapy` scan this file's "Known gotchas" section documents. Not
-  measured yet: whether batching multiple recordings' rows together
-  (same idea as the existing `mamba_chunk_size` row-chunking) amortizes
-  enough of the per-step launch overhead to matter.
+  own `forward()` scan to float32 noise (~1e-7); `scan="chunk"` matches
+  `scan="step"` to the same tolerance (and matches `Mamba.forward()`
+  bit-exactly on a fresh cache). A chunk's `backward()` genuinely
+  doesn't reach into the previous chunk's freed graph.
+- `tests/test_dense_edge_mamba_continuous.py` -- the above, plus n_layers=2
+  and `pool_continuous_edge_stream_to_windows`.
+- `scripts/continuous_mamba_gpu_scale_probe.py` -- real-scale (23ch full
+  mesh, E=253, C_in=192, d_model=16/d_state=16/expand=2) fwd+bwd probe,
+  now comparing both scans and sweeping B. **The step()-loop throughput
+  problem is closed as a blocker:** CPU median ~40x (`step` ~82ms/step vs
+  `chunk` ~2ms/step at T=256); MPS ~1.55x at T=512 (chunk flat in T at
+  ~0.94ms/step, step growing). CUDA 3070 Ti was the original 2.68ms/step
+  `scan="step"` measurement -- not re-run this session (Mac shell); the
+  updated probe is what to run on that box. Row-batching (B>1) is linear
+  in rows once T is fused, so it is **not** the fix and is not a
+  prerequisite for the data pipeline. `scan="chunk"` does allocate the
+  pscan `[rows,T,d_inner,d_state]` intermediates (~0.5GiB/tensor at
+  B=1,E=253,T=1024) -- still fine at B=1 on 8GB; stacking many
+  recordings will reintroduce Temporal's rows*T OOM and would need the
+  same `mamba_chunk_size`-style row split.
 
 **Not started:** the actual CHB-MIT data pipeline / LOSO loop rewrite --
 everything above was deliberately built and verified in isolation
@@ -109,7 +116,8 @@ read off a continuous timeline). See "Open threads" below.
   `mamba-temporal-edge-model` both merged in (so `dense_edge_mamba` IS
   available here, HEAD has 11 references to `_DenseEdgeMambaTemporal`),
   plus a `--skip-folds` CLI flag for resuming partial multi-fold runs, plus
-  the uncommitted continuous/streaming Mamba work described above.
+  committed continuous/streaming Mamba (`aa3c565`) and uncommitted
+  `scan="chunk"` throughput work described above.
 - `tf-node-encoding`, `dynmaic_subset` -- exist locally, not investigated
   this session; don't assume they have dense-edge-mamba unless you check.
 - If you're starting a session and need `dense_edge_mamba`: check you're
@@ -181,21 +189,29 @@ read off a continuous timeline). See "Open threads" below.
 - Mamba's `1_18_0` recall collapse (0.100 vs GRU's 0.767, same seizure) --
   not investigated, biggest single per-seizure divergence in the
   comparison.
-- `Epilepsy/runpod_mamba_fast_image_brief.md` -- unexecuted brief for a
-  fast RunPod image (real `mamba-ssm` kernel + baked dataset). Written,
-  not built.
+- `Epilepsy/runpod_mamba_fast_image_brief.md` -- Task A (`Dockerfile.mamba`)
+  and Task B (`use_cuda_kernel` plumbing) are in the tree. Image is built
+  by `.github/workflows/build-mamba-pod-image.yml` (not locally -- this
+  Mac has no Docker, RunPod pods have no daemon). **Not yet pushed /
+  built on GHCR.** After the image exists: kernel-vs-pscan parity
+  (`scripts/dense_edge_mamba_cuda_kernel_parity.py`) then
+  `--max-folds 1 --epochs 1` on a pod, and record epoch_time vs the
+  ~65s/epoch mambapy baseline. Fused kernel is windowed Temporal only;
+  continuous `scan="chunk"` cannot use `selective_scan_fn` (no
+  initial-state argument).
 - Channel-subset-k sweep (`Epilepsy/Session_notes/2026_08_24/
   k_sweep_channel_subset_cuda.md`) still has the `ChannelSignalEncoder` in
   the graph (24-in MLP) -- not a clean same-model ablation against the
   encoder-free full-mesh runs. Needs an encoder-free rerun to close that
   comparison out.
 - `continuous-cwt-mamba` paradigm (see "Right now" above) -- component
-  pieces built and verified in isolation, real data pipeline not started.
+  pieces built and verified in isolation, `scan="chunk"` throughput path
+  in place (item 1 below done). Real data pipeline not started.
   Next concrete steps, in the order they were being approached:
-  1. Investigate the throughput problem before investing in the data
-     pipeline around it: ~2.68ms/timestep (B=1) is slow enough at
-     real-recording scale that it may need addressing first (row-batching
-     multiple recordings together, or something else) rather than after.
+  1. ~~Investigate the throughput problem~~ -- done. Default is now
+     `scan="chunk"` (carried-state pscan). See the 2026-08-25 session
+     note. CUDA 3070 Ti re-measure of the updated probe is optional
+     confirmation, not a blocker.
   2. Design + build the continuous CHB-MIT loading path: whole-recording
      CWT (not `_build_windowed_dataset`'s fixed windows), TBPTT chunk
      boundaries, and windowed labels (SPH/SOP-derived) read off the
