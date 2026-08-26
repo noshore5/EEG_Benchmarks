@@ -9,12 +9,31 @@ Claude/Grok shells that don't share context with each other, and this is
 the one file meant to catch a new shell up without it re-reading
 everything.
 
-**Last updated:** 2026-08-26, by Claude (chb02-04 dense-edge-GRU baseline
-extension + GitHub-release mirror generalized from chb01-only to any
-subject -- separate thread from everything below, on a fresh branch off
-this commit rather than the now-deleted `continuous-cwt-mamba`; see
-"Right now (chb02-04 baseline + GitHub-release mirror)" below). Prior
-entry, still current: Claude (committed all outstanding
+**Last updated:** 2026-08-26, by Claude (merged branch `cg-mambanet` into
+`main` -- built `Epilepsy/pipelines/cg_mambanet_classifier.py`, a
+CNN-GCN-Mamba-BiLSTM architecture reconstructed from the CG-MambaNet paper
+(arXiv:2606.08226, no public code), wired as `--pipeline cg_mambanet`
+under this repo's own chb01 leave-one-seizure-out protocol (NOT the
+paper's own multi-patient LOPO -- that's still deferred). Real chb01
+smoke test succeeded (wiring verified), but a REAL (non-smoke) run is
+currently BLOCKED: `mambapy`'s Mamba scan (both `pscan=True` and
+`pscan=False`) does not scale to this encoder's size (12 layers x 2
+directions, seq_len=480) on CPU OR MPS -- severely super-linear batch-size
+scaling, MPS OOMs outright at batch=16. Full investigation, numbers, and
+next steps:
+`Session_notes/2026_08_26/cg_mambanet_architecture_and_mambapy_scaling_wall.md`.
+Decision: stop here rather than shrink `mamba_n_layers` further, resume once
+this runs on the RunPod CUDA image (fused `mamba-ssm` kernel sidesteps the
+whole problem, and per the entry directly below may already have a
+mambapy-vs-fused-kernel comparison worth reading first). Added a new
+"Known gotchas" entry below for this -- don't re-discover it.). Prior
+entry, still current: Claude (chb02-04 dense-edge-GRU baseline extension +
+GitHub-release mirror generalized from chb01-only to any subject --
+separate thread from cg-mambanet, on a fresh branch off the same
+pre-cg-mambanet commit; see "Right now (chb02-04 baseline + GitHub-release
+mirror)" below -- this may also resolve part of cg-mambanet's own deferred
+"montage unification across CHB-MIT patients" blocker, worth checking
+before re-deriving it). Prior entry, still current: Claude (committed all outstanding
 work on `continuous-cwt-mamba` -- SlimSeiz channel-select stage, the
 `--slimseiz-fixed-channels` flag, the DBConformer depth/weight sweep, the
 4-way pipeline comparison note, and this file's own recent edits --
@@ -317,26 +336,31 @@ read off a continuous timeline). See "Open threads" below.
 
 ## Branch map
 
-- `main` -- **current branch as of 2026-08-26** (this section was stale
-  in main's own last update -- it said `continuous-cwt-mamba` was still
-  "current" one paragraph after that same update's own note said it was
-  merged+deleted; corrected here). Has everything: `dense_edge_mamba`
-  (from `mamba-temporal-edge-model`, merged at `6d38573`), the cwt node
-  encoder, the continuous-cwt-mamba paradigm plumbing (`aa3c565`,
-  `4760de0`), `use_cuda_kernel` + `Dockerfile.mamba` + the live GHCR
-  `eeg_benchmarks-mamba` image, SlimSeiz, dbconformer, and (as of this
-  session) the chb01-04 GitHub-release mirror generalization.
+- `main` -- **current branch, everything is merged here as of 2026-08-26.**
+  Has `dense_edge_mamba` (from `mamba-temporal-edge-model`, merged at
+  `6d38573`), the cwt node encoder, the continuous-cwt-mamba paradigm
+  plumbing (`aa3c565`, `4760de0`), `use_cuda_kernel` + `Dockerfile.mamba` +
+  the live GHCR `eeg_benchmarks-mamba` image, SlimSeiz, dbconformer, the
+  chb01-04 GitHub-release mirror generalization, AND (this update)
+  `cg_mambanet` -- see the 2026-08-26 "Last updated" entries above for both.
 - `mamba-temporal-edge-model` (remote, `origin/`) -- where
   `dense_edge_temporal_mode="mamba"` (`_DenseEdgeMambaTemporal`) was
-  originally developed, before merging into `main`. Likely stale/inactive
-  now that `main` has everything; check before assuming it's ahead of
-  `main` on anything.
+  originally developed, before merging into `main` at `6d38573`. Archived
+  and removed by another shell mid-2026-08-26 (see
+  `Session_notes/2026_08_26/mamba_temporal_edge_model_branch_archived.md`)
+  -- don't assume it still exists.
 - `continuous-cwt-mamba` -- **no longer exists.** Merged into `main` and
-  deleted (both locally and on `origin`) by another shell mid-2026-08-26;
-  don't assume it's still there, and don't recreate it without checking
-  `main` first (this session accidentally did exactly that with a stale
-  local copy -- see the "chb02-04 baseline + GitHub-release mirror"
-  entry above for how that got sorted out).
+  deleted (both locally and on `origin`) 2026-08-25; don't assume it's
+  still there, and don't recreate it without checking `main` first (one
+  shell this session accidentally did exactly that with a stale local
+  copy -- see the "chb02-04 baseline + GitHub-release mirror" entry above
+  for how that got sorted out).
+- `cg-mambanet` -- **merged into `main` 2026-08-26** (fast-forward, this
+  update), still exists as a branch (locally and on `origin`) but has
+  nothing `main` doesn't now. Left un-deleted since a real run is still
+  blocked on `mambapy`'s scan performance (see "Known gotchas" below) --
+  may be worth resuming work on this branch specifically once that's
+  unblocked, rather than starting fresh on `main`.
 - `tf-node-encoding`, `dynmaic_subset` -- exist locally, not investigated
   recently; don't assume they have anything `main` doesn't unless you
   check.
@@ -346,6 +370,30 @@ read off a continuous timeline). See "Open threads" below.
 
 ## Known gotchas (keep rediscovering these -- stop rediscovering them)
 
+- **`mambapy`'s Mamba scan (BOTH `pscan=True` and `pscan=False`) does not
+  scale to a "many stacked/parallel Mamba instances x long-ish sequence"
+  encoder, on CPU OR MPS -- measured 2026-08-26 building
+  `cg_mambanet_classifier.py`'s bidirectional 12-layer encoder (24 total
+  directional Mamba instances at seq_len=480).** `pscan=True` (default):
+  severely super-linear batch-size scaling (batch 4/8/16 -> 3.1s/12.5s/
+  40.3s total on CPU) and an outright MPS OOM at batch=16 (`pad_npo2`
+  padding the sequence to a power of two and keeping intermediate tensors
+  at every scan level for backward, across all 24 instances at once).
+  `pscan=False` (mambapy's own documented fallback): forward stays cheap
+  but BACKWARD explodes worse (960.89s at batch=16 on CPU) -- the
+  sequential Python loop's ~11,500 chained autograd nodes (24 instances x
+  480 timesteps) is its own catastrophic-backward failure mode. Neither
+  mode is a fix for the other's problem; this is a `mambapy` (pure-PyTorch
+  Mamba) limitation at this depth/sequence-length/instance-count
+  combination, not something a classifier's own hyperparameters (d_model,
+  batch_size within reason) can route around -- `_DenseEdgeMambaTemporal`
+  never hit this because it's a single unidirectional instance, not 24 at
+  once. Full numbers:
+  `Session_notes/2026_08_26/cg_mambanet_architecture_and_mambapy_scaling_wall.md`.
+  The fused `mamba-ssm` CUDA kernel (RunPod image) is a different code path
+  (a real kernel, not chained PyTorch ops) and is expected to sidestep this
+  -- not yet confirmed, no kernel-vs-pscan parity check run for this
+  specific encoder shape yet.
 - **`--pipeline slimseiz` (non-smoke) once blew up memory/crashed this
   Mac; root cause NOT cleanly pinned down despite real profiling; a
   hardening fix is in place but is a mitigation, not a proven fix.**

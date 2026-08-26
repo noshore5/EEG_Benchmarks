@@ -495,6 +495,9 @@ def test_tf_encoder_is_a_flag_not_a_pipeline() -> None:
         "dense_edge",
         "dense_edge_mamba",
         "truong_stft_cnn",
+        "dbconformer",
+        "slimseiz",
+        "cg_mambanet",
     }
     encoder_action = next(
         action

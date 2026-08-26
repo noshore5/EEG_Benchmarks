@@ -334,6 +334,7 @@ def test_dense_edge_mamba_is_a_pipeline_choice():
     )
     assert set(pipeline_action.choices) == {
         "dense_edge_gru", "dense_edge", "dense_edge_mamba", "truong_stft_cnn",
+        "dbconformer", "slimseiz", "cg_mambanet",
     }
 
     for label_mode in ("prediction", "detection"):
