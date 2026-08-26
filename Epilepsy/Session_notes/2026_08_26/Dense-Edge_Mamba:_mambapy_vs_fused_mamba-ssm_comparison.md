@@ -232,7 +232,7 @@ The fused Mamba therefore has the highest:
 - Raw event hit rate
 - k-of-n/smoothed event hit rate
 
-It does not have the highest accuracy; SlimSeiz does.
+It does not have the highest accuracy; Mambapy does.
 
 The fused run's `1_26_0` ROC-AUC is explicitly **0.916972**. The complete six-fold fused ROC-AUC mean should only be reported once all six per-fold AUC values have been retained/calculated; it should not be inferred from the other models' aggregate AUC.
 
