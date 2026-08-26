@@ -1,0 +1,2 @@
+subject,run,seizure_id,seizure_onset_s,seizure_offset_s,seizure_duration_s,hit,hit_smoothed,n_preictal_windows,mean_preictal_score,false_alarms_per_hour,false_alarms_per_hour_smoothed
+1,02,1_02_0,2996.0,3036.0,40.0,True,True,30,0.5265027284622192,645.0,345.0

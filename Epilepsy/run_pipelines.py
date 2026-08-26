@@ -10,10 +10,11 @@ the Truong et al. 2018 STFT+CNN replica, DBConformer, and SlimSeiz).
     python Epilepsy/run_pipelines.py --pipeline truong_stft_cnn --smoke
     python Epilepsy/run_pipelines.py --pipeline dbconformer --smoke
     python Epilepsy/run_pipelines.py --pipeline slimseiz --smoke
+    python Epilepsy/run_pipelines.py --pipeline cg_mambanet --smoke
 
 --pipeline {dense_edge_gru, dense_edge, dense_edge_mamba, truong_stft_cnn,
-dbconformer, slimseiz}: which CLASSIFIER runs, on top of --label-mode's
-which TASK it's trained for.
+dbconformer, slimseiz, cg_mambanet}: which CLASSIFIER runs, on top of
+--label-mode's which TASK it's trained for.
 "dense_edge_gru" (default) is this file's own SparseEvidenceGNNClassifier with
 dense_edge_temporal_mode="rnn" (per-edge GRU) and respects --label-mode
 normally. "dense_edge" is the same classifier with
@@ -64,6 +65,20 @@ which genuinely differ in preprocessing). Own hyperparameter blocks
 (DBCONFORMER_PARAMS/PREDICTION_DBCONFORMER_PARAMS,
 SLIMSEIZ_PARAMS/PREDICTION_SLIMSEIZ_PARAMS) and own results/dbconformer/,
 results/slimseiz/ output directories.
+
+"cg_mambanet" (2026-08-26) is CGMambaNetClassifier
+(Epilepsy/pipelines/cg_mambanet_classifier.py) -- a CNN-GCN-Mamba-BiLSTM
+architecture built from the CG-MambaNet paper's own description
+(arXiv:2606.08226; no public code exists to vendor, unlike DBConformer/
+SlimSeiz). Shares the same leave_one_seizure_out_raw_classifier[_prediction]
+loops as dbconformer/slimseiz (same raw-window, no-CWT/STFT-preprocessing
+family). Run under THIS REPO'S OWN chb01-only protocol and standard
+training recipe -- NOT the paper's own multi-patient leave-one-patient-out
+evaluation, which is a separate, deferred effort (see that module's
+docstring for every deviation this quick pass makes). Always applies the
+paper's fixed 16-channel montage (CG_MAMBANET_CHANNEL_INDICES, chb01-only).
+Own hyperparameter block (CG_MAMBANET_PARAMS/PREDICTION_CG_MAMBANET_PARAMS)
+and own results/cg_mambanet/ output directory.
 
 This is the epilepsy counterpart to BCI/run_pipelines.py's "dense_edge" /
 "dense_edge_gru" pipelines (SparseEvidenceGNNClassifier, event_mode="dense",
@@ -136,6 +151,7 @@ from Epilepsy.pipelines.dense_edge_cache import default_dense_edge_cache_root
 from Epilepsy.pipelines.truong_stft_cnn_classifier import TruongSTFTCNNClassifier, k_of_n_alarm
 from Epilepsy.pipelines.dbconformer_classifier import DBConformerClassifier
 from Epilepsy.pipelines.slimseiz_classifier import SlimSeizClassifier
+from Epilepsy.pipelines.cg_mambanet_classifier import CGMambaNetClassifier
 
 
 def resolve_disable_disk_cache(device, explicit: bool | None) -> bool:
@@ -184,6 +200,21 @@ CHB01_CHANNEL_NAMES = [
 SLIMSEIZ_PAPER_FIXED_CHANNELS = [
     "P3-O1", "P8-O2", "C3-P3", "C4-P4", "FZ-CZ", "P4-O2", "CZ-PZ", "F3-C3",
 ]
+
+# CG-MambaNet's paper-specified 16-channel bipolar montage (arXiv 2606.08226,
+# see cg_mambanet_classifier.py's module docstring) -- a strict subset of
+# CHB01_CHANNEL_NAMES (CHB-MIT's native montage is already this same
+# bipolar double-banana derivation, so no re-referencing is needed). Always
+# applied for --pipeline cg_mambanet (not an optional CLI flag, unlike
+# --slimseiz-fixed-channels) since the GCN's 16x16 learnable adjacency is a
+# defining part of the architecture, not an optional preprocessing choice.
+# chb01-only, same as CHB01_CHANNEL_NAMES itself -- see the subjects guard
+# in _apply_raw_classifier_cli_overrides.
+CG_MAMBANET_PAPER_CHANNELS = [
+    "FP1-F7", "F7-T7", "T7-P7", "P7-O1", "FP1-F3", "F3-C3", "C3-P3", "P3-O1",
+    "FP2-F4", "F4-C4", "C4-P4", "P4-O2", "FP2-F8", "F8-T8", "T8-P8-0", "P8-O2",
+]
+CG_MAMBANET_CHANNEL_INDICES = [CHB01_CHANNEL_NAMES.index(n) for n in CG_MAMBANET_PAPER_CHANNELS]
 
 # label_mode="prediction" defaults (task: add SPH/SOP as configurable
 # parameters). Starting points, not tuned -- see
@@ -687,16 +718,71 @@ PREDICTION_SLIMSEIZ_PARAMS: dict[str, object] = dict(
     validation_split=0.2,
 )
 
+# 2026-08-26: CGMambaNetClassifier, run under THIS REPO'S OWN protocol (not
+# a paper-exact reproduction -- see cg_mambanet_classifier.py's module
+# docstring for every deviation). Hyperparameters below are the paper's own
+# stated architecture numbers (12 Mamba layers, d_state=64, d_conv=4, 2 GCN
+# layers, BiLSTM hidden=128/direction, dropout=0.3) where the paper gives
+# them; training-dynamics knobs (batch_size, learning_rate, validation_
+# split, early_stopping_patience) match DBConformer/SlimSeiz's own matched-
+# protocol values, not tuned separately. patch_size=256 = 1 patch/second at
+# this repo's native 256Hz (7680/256=30 patches for the 30s prediction
+# window, 1024/256=4 for the 4s detection window -- both divide evenly).
+_CG_MAMBANET_SHARED_PARAMS: dict[str, object] = dict(
+    seed=42,
+    device="mps",
+    patch_size=256,
+    # d_embed=64: decouples the GCN/Mamba/BiLSTM embedding width from
+    # patch_size -- see cg_mambanet_classifier.py's "CNN front-end -> GCN
+    # handoff" docstring entry. Set to None (paper-literal d=patch_size)
+    # once this runs on the RunPod CUDA image with the fused mamba-ssm
+    # kernel; on this Mac's portable mambapy pscan, d_embed=None measured
+    # ~93s/batch at SMOKE scale (2026-08-26) -- impractical to train.
+    d_embed=64,
+    gcn_layers=2,
+    mamba_n_layers=12,
+    mamba_d_state=64,
+    mamba_d_conv=4,
+    mamba_expand_factor=2,
+    lstm_hidden=128,
+    lstm_layers=2,
+    lstm_dropout=0.3,
+    head_dropout=0.3,
+    normalize_input=True,
+    channel_select_fixed_indices=CG_MAMBANET_CHANNEL_INDICES,
+    weight_decay=1e-4,
+    grad_clip_norm=None,
+    early_stopping_patience=5,
+    use_class_weights=True,
+    verbose=1,
+)
+
+CG_MAMBANET_PARAMS: dict[str, object] = dict(
+    _CG_MAMBANET_SHARED_PARAMS,
+    batch_size=32,
+    learning_rate=1e-3,
+    validation_split=0.2,
+)
+
+PREDICTION_CG_MAMBANET_PARAMS: dict[str, object] = dict(
+    _CG_MAMBANET_SHARED_PARAMS,
+    batch_size=32,
+    learning_rate=1e-3,
+    validation_split=0.2,
+)
+
 
 def _raw_classifier_family_params(pipeline: str, label_mode: str) -> dict:
-    """Param dict for --pipeline dbconformer / slimseiz x --label-mode --
-    mirrors `_dense_family_params` above for the raw-EEG classifier family.
-    Returns the module-level dict itself (caller must `dict(...)` copy
-    before overlaying CLI overrides)."""
+    """Param dict for --pipeline dbconformer / slimseiz / cg_mambanet x
+    --label-mode -- mirrors `_dense_family_params` above for the raw-EEG
+    classifier family. Returns the module-level dict itself (caller must
+    `dict(...)` copy before overlaying CLI overrides)."""
     if pipeline == "dbconformer":
         return PREDICTION_DBCONFORMER_PARAMS if label_mode == "prediction" else DBCONFORMER_PARAMS
     if pipeline == "slimseiz":
         return PREDICTION_SLIMSEIZ_PARAMS if label_mode == "prediction" else SLIMSEIZ_PARAMS
+    if pipeline == "cg_mambanet":
+        return PREDICTION_CG_MAMBANET_PARAMS if label_mode == "prediction" else CG_MAMBANET_PARAMS
     raise ValueError(f"not a raw-classifier-family pipeline: {pipeline!r}")
 
 
@@ -734,6 +820,13 @@ def _apply_raw_classifier_cli_overrides(
         clf_params["validation_split"] = args.validation_split
     if args.early_stopping_patience is not None:
         clf_params["early_stopping_patience"] = args.early_stopping_patience
+    if pipeline == "cg_mambanet" and args.subjects != [1]:
+        raise ValueError(
+            "cg_mambanet's fixed 16-channel montage (CG_MAMBANET_CHANNEL_INDICES) "
+            f"resolves names against CHB01_CHANNEL_NAMES (chb01 only) -- got --subjects "
+            f"{args.subjects}. Extend CHB01_CHANNEL_NAMES to a per-subject lookup "
+            "before running cg_mambanet on other subjects."
+        )
     if pipeline == "slimseiz":
         if args.slimseiz_select_channels is not None:
             clf_params["select_channels"] = args.slimseiz_select_channels
@@ -2043,7 +2136,7 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         "--pipeline",
         choices=[
             "dense_edge_gru", "dense_edge", "dense_edge_mamba", "continuous_cwt_mamba",
-            "truong_stft_cnn", "dbconformer", "slimseiz",
+            "truong_stft_cnn", "dbconformer", "slimseiz", "cg_mambanet",
         ],
         default="dense_edge_gru",
         help=(
@@ -2092,7 +2185,18 @@ def _build_argument_parser() -> argparse.ArgumentParser:
             "--slimseiz-select-channels / --slimseiz-n-channels and "
             "slimseiz_channel_select.py) -- the condition the paper's SOTA numbers are "
             "reported under; earlier runs before 2026-08-25 fed the full montage instead. "
-            "Respects --label-mode; results go under results/slimseiz/."
+            "Respects --label-mode; results go under results/slimseiz/. "
+            "'cg_mambanet' (2026-08-26): CNN-GCN-Mamba-BiLSTM, built from the CG-MambaNet "
+            "paper's own architecture description (arXiv:2606.08226 -- no public code exists "
+            "to vendor; see Epilepsy/pipelines/cg_mambanet_classifier.py's module docstring "
+            "for every interpretive choice/deviation). Run under THIS REPO'S OWN chb01-only "
+            "leave-one-seizure-out protocol and standard training recipe, NOT the paper's own "
+            "multi-patient leave-one-patient-out evaluation -- that fuller reproduction is a "
+            "separate, deferred effort; this pass is a fast architecture-only comparison "
+            "against dense_edge_mamba and the rest of this table. Always applies the paper's "
+            "fixed 16-channel montage (CG_MAMBANET_CHANNEL_INDICES) -- chb01-only "
+            "(--subjects must be [1]). Respects --label-mode; results go under "
+            "results/cg_mambanet/."
         ),
     )
     parser.add_argument(
@@ -2766,8 +2870,12 @@ def main(args: argparse.Namespace) -> None:
         print(means.to_string())
         print(f"event-level hit rate (raw):    {n_hits}/{n_seizures} ({100 * n_hits / n_seizures:.1f}%)")
         print(f"event-level hit rate (k-of-n): {n_hits_smoothed}/{n_seizures} ({100 * n_hits_smoothed / n_seizures:.1f}%)")
-    elif pipeline in ("dbconformer", "slimseiz"):
-        classifier_cls = DBConformerClassifier if pipeline == "dbconformer" else SlimSeizClassifier
+    elif pipeline in ("dbconformer", "slimseiz", "cg_mambanet"):
+        classifier_cls = {
+            "dbconformer": DBConformerClassifier,
+            "slimseiz": SlimSeizClassifier,
+            "cg_mambanet": CGMambaNetClassifier,
+        }[pipeline]
 
         if label_mode == "prediction":
             clf_params = dict(_raw_classifier_family_params(pipeline, "prediction"))
