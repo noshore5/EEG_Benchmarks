@@ -1,37 +1,67 @@
-# Dense-Edge Mamba: mambapy vs fused mamba-ssm comparison
+# Dense-Edge Mamba: mambapy vs fused `mamba-ssm` comparison
 
 ## Purpose
 
-Follow-up to the 2026-08-25 dense-edge pipeline comparison. The documented Mamba baseline showed an unusually poor result on seizure `1_18_0`, where recall collapsed to 0.100 and F1 to 0.171. A follow-up run was performed using the same dense-edge Mamba pipeline but with the `mamba-ssm` fused CUDA implementation and bf16 AMP.
+Follow-up to the 2026-08-25 pipeline comparison of GRU, Mamba, DBConformer, and SlimSeiz on CHB-MIT subject 1.
 
-The purpose of this run was to determine whether the `1_18_0` failure was characteristic of the dense-edge Mamba architecture or specific to the original Mamba implementation/configuration.
+The original dense-edge Mamba run showed an unusually severe failure on seizure `1_18_0`: recall collapsed to **0.100** and F1 to **0.171**, despite an AP of **0.618**. A second dense-edge Mamba run was therefore performed using the `mamba-ssm` fused CUDA implementation with bf16 AMP.
 
-## Experimental configurations
+The purpose was to determine whether the `1_18_0` failure represented a general limitation of dense-edge Mamba or a configuration/implementation-specific failure.
 
-### Documented Mamba baseline
+---
 
-Run: `20260825-113049`
+## Shared evaluation protocol
 
-* Pipeline: `dense_edge_mamba`
-* Temporal model: Mamba via **mambapy**
-* No fused Mamba CUDA kernel
-* Prediction task
-* Subject: CHB-MIT subject 1
-* LOSO folds:
+Both Mamba runs use:
 
-  * `1_03_0`
-  * `1_04_0`
-  * `1_15_0`
-  * `1_16_0`
-  * `1_18_0`
-  * `1_26_0`
-* Channel subset: `k=23`
-* SPH: 300 s
-* SOP: 900 s
-* 20 training epochs
-* Validation split: 0.2
+- Dataset: **CHB-MIT, subject 1**
+- Label mode: **prediction**
+- SPH: **300 s**
+- SOP: **900 s**
+- LOSO folds:
+  - `1_03_0`
+  - `1_04_0`
+  - `1_15_0`
+  - `1_16_0`
+  - `1_18_0`
+  - `1_26_0`
+- Channel subset: **23 channels**
+- Epochs: **20**
 
-### Fused-kernel follow-up
+---
+
+# 1. Original MambaPy configuration
+
+Source run:
+
+`20260825-113049`
+
+Temporal model:
+
+- Dense-edge Mamba
+- **mambapy** implementation
+- Pure PyTorch Mamba scan
+- No fused CUDA Mamba kernel
+- Original numerical precision/configuration
+
+Six-fold aggregate:
+
+| Metric | MambaPy |
+|---|---:|
+| Accuracy | **0.896** |
+| Precision | **0.348** |
+| Recall | **0.750** |
+| F1 | **0.389** |
+| AP | **0.499** |
+| ROC-AUC | **0.953** |
+| FAR/h raw | **11.73** |
+| FAR/h smoothed | **6.39** |
+| Raw event hit | **6/6** |
+| k-of-n / smoothed hit | **5/6** |
+
+---
+
+# 2. Fused-kernel configuration
 
 Command:
 
@@ -44,115 +74,222 @@ python Epilepsy/run_pipelines.py \
   --epochs 20 \
   --dense-edge-amp-bf16 \
   --train-amp-bf16 \
+  --mamba-use-cuda-kernel \
   --skip-folds 0 1 2 3 4
 ```
 
 Configuration:
 
-* Pipeline: `dense_edge_mamba`
-* Temporal model: dense-edge Mamba
-* **`mamba-ssm` fused CUDA scan enabled**
-* **bf16 AMP enabled for dense-edge processing**
-* **bf16 AMP enabled during training**
-* Disk CWT cache disabled
-* Channel subset: `k=23`
-* Same six-fold LOSO set
-* Same prediction task, SPH/SOP, and 20-epoch budget
+- Dense-edge Mamba
+- **`mamba-ssm` fused CUDA scan**
+- `use_cuda_kernel=True`
+- **bf16 AMP for dense-edge processing**
+- **bf16 AMP for training**
+- CUDA
+- Disk CWT cache disabled
+- `k=23`
+- 20 epochs
 
-The run explicitly reports `use_cuda_kernel=True (mamba-ssm fused scan)`.
+---
 
-## Fold-by-fold comparison
+# 3. Fold-by-fold F1 comparison
 
-| Seizure      | MambaPy AP |  Fused AP |       Δ AP | MambaPy Recall | Fused Recall |   Δ Recall | MambaPy F1 |  Fused F1 |       Δ F1 |
-| ------------ | ---------: | --------: | ---------: | -------------: | -----------: | ---------: | ---------: | --------: | ---------: |
-| `1_03_0`     |      0.156 |     0.273 |     +0.117 |          0.800 |        0.967 |     +0.167 |      0.310 |     0.341 | **+0.031** |
-| `1_04_0`     |      0.480 |     0.598 |     +0.118 |          0.967 |        1.000 |     +0.033 |      0.283 |     0.244 | **−0.039** |
-| `1_15_0`     |      0.629 |     0.573 |     −0.056 |          0.900 |        0.967 |     +0.067 |      0.551 |     0.496 | **−0.055** |
-| `1_16_0`     |      0.883 |     0.977 |     +0.094 |          1.000 |        1.000 |      0.000 |      0.657 |     0.622 | **−0.035** |
-| **`1_18_0`** |  **0.618** | **0.778** | **+0.160** |      **0.100** |    **0.633** | **+0.533** |  **0.171** | **0.704** | **+0.533** |
-| `1_26_0`     |      0.229 |     0.231 |     +0.002 |          0.733 |        0.800 |     +0.067 |      0.364 |     0.387 | **+0.023** |
+| Seizure | MambaPy | Fused Mamba | Δ |
+|---|---:|---:|---:|
+| `1_03_0` | 0.310 | **0.341** | +0.031 |
+| `1_04_0` | 0.283 | **0.244** | -0.039 |
+| `1_15_0` | 0.551 | **0.496** | -0.055 |
+| `1_16_0` | 0.657 | **0.622** | -0.035 |
+| `1_18_0` | **0.171** | **0.704** | **+0.533** |
+| `1_26_0` | 0.364 | **0.387** | +0.023 |
 
-### Key observation
+The key observation is that **five of six F1 differences are within ±0.055**. The entire major divergence is `1_18_0`.
 
-The F1 difference is extremely small on every fold except `1_18_0`:
+---
 
-* `1_03_0`: +0.031
-* `1_04_0`: −0.039
-* `1_15_0`: −0.055
-* `1_16_0`: −0.035
-* **`1_18_0`: +0.533**
-* `1_26_0`: +0.023
+# 4. Fold-by-fold AP comparison
 
-Thus, the two Mamba configurations produce broadly similar fold-level behavior on **five of six seizures**. The aggregate difference is dominated by a single catastrophic MambaPy result on `1_18_0`.
+| Seizure | MambaPy | Fused Mamba | Δ |
+|---|---:|---:|---:|
+| `1_03_0` | 0.156 | 0.273 | +0.117 |
+| `1_04_0` | 0.480 | 0.598 | +0.118 |
+| `1_15_0` | 0.629 | 0.573 | -0.056 |
+| `1_16_0` | 0.883 | 0.977 | +0.094 |
+| `1_18_0` | 0.618 | **0.778** | +0.160 |
+| `1_26_0` | 0.229 | **0.231** | +0.002 |
 
-## The `1_18_0` anomaly
+Importantly, the original `1_18_0` problem was **not actually an AP catastrophe**. MambaPy had AP = **0.618**, its second-best fold. The catastrophe occurred after applying the 0.5 decision threshold.
 
-The original MambaPy run essentially failed to detect the preictal interval on `1_18_0`:
+---
 
-* Recall: **0.100**
-* F1: **0.171**
-* AUC-PR: **0.618**
+# 5. The `1_18_0` catastrophe
 
-The fused-kernel/bf16 configuration instead produced:
+### Original MambaPy
 
-* Recall: **0.633**
-* F1: **0.704**
-* AUC-PR: **0.778**
-* Precision: **0.792**
-* FAR/h: **0.833 → 0.000** after smoothing
-* Preictal hit: **yes**
+| Metric | `1_18_0` |
+|---|---:|
+| AP | 0.618 |
+| Recall | **0.100** |
+| F1 | **0.171** |
 
-This is a very large behavioral difference on exactly one seizure. The fused run does not merely improve the score slightly; it changes `1_18_0` from the principal failure case into the strongest F1 result in the six-fold experiment.
+### Fused + bf16 Mamba
 
-## Full fused-kernel results
+| Metric | `1_18_0` |
+|---|---:|
+| AP | **0.778** |
+| Precision | **0.792** |
+| Recall | **0.633** |
+| F1 | **0.704** |
+| FAR/h raw → smoothed | **0.833 → 0.000** |
+| Event hit | **✓** |
+| k-of-n hit | **✓** |
 
-|  # | Seizure  | Hit | FAR/h raw → smoothed | Precision | Recall |    F1 | AUC-PR |
-| -: | -------- | :-: | -------------------: | --------: | -----: | ----: | -----: |
-|  1 | `1_03_0` |  ✓  |      18.500 → 14.000 |     0.207 |  0.967 | 0.341 |  0.273 |
-|  2 | `1_04_0` |  ✓  |      36.000 → 25.161 |     0.139 |  1.000 | 0.244 |  0.598 |
-|  3 | `1_15_0` |  ✓  |       10.116 → 4.186 |     0.333 |  0.967 | 0.496 |  0.573 |
-|  4 | `1_16_0` |  ✓  |        4.667 → 0.000 |     0.451 |  1.000 | 0.622 |  0.977 |
-|  5 | `1_18_0` |  ✓  |        0.833 → 0.000 |     0.792 |  0.633 | 0.704 |  0.778 |
-|  6 | `1_26_0` |  ✓  |       14.000 → 6.600 |     0.255 |  0.800 | 0.387 |  0.231 |
+The fused implementation converts `1_18_0` from the original Mamba's catastrophic fold into its **best F1 fold**.
 
-The `1_26_0` run completed successfully with F1=0.387, recall=0.800, and AUC-PR=0.231.
+For comparison, GRU on this fold had approximately:
 
-The resulting fused-kernel six-fold means are:
+- Recall: **0.767**
+- F1: **0.754**
 
-* AP: **0.572**
-* Recall: **0.895**
-* F1: **0.466**
+Thus fused Mamba reaches essentially the same performance regime on the fold that previously made Mamba look dramatically inferior.
 
-The run also achieved a 6/6 event-level hit rate.
+---
 
-For comparison, the documented MambaPy six-fold means were:
+# 6. The completed `1_26_0` fold
 
-* AP: **0.499**
-* Recall: **0.750**
-* F1: **0.389**
+The sixth fold completed with the fused configuration and reported:
 
-## Interpretation
+| Metric | Fused Mamba `1_26_0` |
+|---|---:|
+| Accuracy | **0.879365** |
+| Precision | **0.255319** |
+| Recall | **0.800000** |
+| F1 | **0.387097** |
+| AP | **0.230622** |
+| ROC-AUC | **0.916972** |
+| FAR/h raw | **14.000** |
+| FAR/h k-of-n | **6.600** |
+| Raw event hit | **1/1 (100%)** |
+| k-of-n event hit | **1/1 (100%)** |
 
-The important result is not simply that the fused-kernel configuration has higher six-fold means. The fold-level pattern is more informative.
+Original MambaPy on `1_26_0`:
 
-The fused and MambaPy configurations remain within roughly ±0.055 F1 on **five of the six seizures**. The only major divergence is `1_18_0`, where F1 increases from 0.171 to 0.704 and recall increases from 0.100 to 0.633.
+| Metric | MambaPy |
+|---|---:|
+| Recall | 0.733 |
+| F1 | 0.364 |
+| AP | 0.229 |
 
-Furthermore, `1_26_0` is almost unchanged between configurations:
+So this fold is almost unchanged:
 
-* AP: 0.229 → 0.231
-* F1: 0.364 → 0.387
-* Recall: 0.733 → 0.800
+- AP: **0.229 → 0.231**
+- F1: **0.364 → 0.387**
+- Recall: **0.733 → 0.800**
 
-This makes the `1_18_0` result particularly notable. The fused configuration does not appear to be producing a wholesale change in model behavior across all seizures. Instead, it appears to eliminate a specific failure observed in the MambaPy run.
+This supports the interpretation that the fused configuration did **not** simply produce globally different behavior. The enormous difference is concentrated in `1_18_0`.
 
-### Current conclusion
+---
 
-The original `1_18_0` Mamba result should therefore **not be interpreted as evidence that dense-edge Mamba intrinsically fails on this seizure**.
+# 7. Full fused-Mamba fold results
 
-The more defensible conclusion is:
+| # | Seizure | Test preictal | Hit | FAR/h raw → k-of-n | Precision | Recall | F1 | AP |
+|---:|---|---:|:---:|---:|---:|---:|---:|---:|
+| 1 | `1_03_0` | 30 | ✓ | 18.500 → 14.000 | 0.207 | 0.967 | 0.341 | 0.273 |
+| 2 | `1_04_0` | 30 | ✓ | 36.000 → 25.161 | 0.139 | 1.000 | 0.244 | 0.598 |
+| 3 | `1_15_0` | 30 | ✓ | 10.116 → 4.186 | 0.333 | 0.967 | 0.496 | 0.573 |
+| 4 | `1_16_0` | 23 | ✓ | 4.667 → 0.000 | 0.451 | 1.000 | 0.622 | 0.977 |
+| 5 | `1_18_0` | 30 | ✓ | 0.833 → 0.000 | **0.792** | 0.633 | **0.704** | **0.778** |
+| 6 | `1_26_0` | 30 | ✓ | 14.000 → 6.600 | 0.255 | 0.800 | 0.387 | 0.231 |
 
-> The MambaPy run exhibited a severe, apparently configuration-sensitive failure on `1_18_0`. Re-running the same dense-edge Mamba pipeline with the `mamba-ssm` fused CUDA kernel and bf16 AMP reproduced broadly similar performance on five of six folds while eliminating the `1_18_0` recall/F1 collapse.
+### Event-level reliability
 
-There is still a confound: the follow-up changes both the Mamba implementation and numerical precision (fused `mamba-ssm` + bf16), so the experiment does **not yet establish which change caused the rescue**. A controlled FP32 fused-kernel or bf16 MambaPy run would be needed to isolate that effect.
+- **Raw event hit rate: 6/6 (100%)**
+- **k-of-n / smoothed event hit rate: 6/6 (100%)**
 
-Nevertheless, the fold-by-fold result strongly suggests that the dramatic `1_18_0` failure in the original MambaPy experiment was an **outlier associated with that particular implementation/configuration**, rather than a stable architectural characteristic of dense-edge Mamba.
+---
+
+# 8. Full-model comparison
+
+The original six-fold comparison was:
+
+| Metric | GRU | MambaPy | DBConformer | SlimSeiz | **Fused Mamba** |
+|---|---:|---:|---:|---:|---:|
+| Accuracy | 0.878 | 0.896 | 0.897 | **0.913** | **0.879** |
+| Precision | 0.343 | 0.348 | 0.273 | 0.286 | **0.363** |
+| Recall | 0.807 | 0.750 | 0.772 | 0.556 | **0.895** |
+| F1 | 0.436 | 0.389 | 0.366 | 0.340 | **0.466** |
+| **AP** | 0.423 | 0.499 | 0.442 | 0.431 | **0.572** |
+| AUC | 0.944 | 0.953 | 0.952 | 0.951 | **see note below** |
+| Raw hit | 6/6 | 6/6 | 6/6 | 5/6 | **6/6** |
+| k-of-n hit | 5/6 | 5/6 | 5/6 | 4/6 | **6/6** |
+
+The fused Mamba therefore has the highest:
+
+- **AP**
+- **Precision**
+- **Recall**
+- **F1**
+- Raw event hit rate
+- k-of-n/smoothed event hit rate
+
+It does not have the highest accuracy; SlimSeiz does.
+
+The fused run's `1_26_0` ROC-AUC is explicitly **0.916972**. The complete six-fold fused ROC-AUC mean should only be reported once all six per-fold AUC values have been retained/calculated; it should not be inferred from the other models' aggregate AUC.
+
+---
+
+# 9. Interpretation
+
+The strongest result from this experiment is not simply that the fused Mamba has a higher aggregate score.
+
+It is the **fold-by-fold stability**.
+
+For F1:
+
+```text
+1_03_0     +0.031
+1_04_0     -0.039
+1_15_0     -0.055
+1_16_0     -0.035
+1_18_0     +0.533   <-- catastrophic MambaPy divergence
+1_26_0     +0.023
+```
+
+Thus **five of six folds differ only marginally**, while one fold changes dramatically.
+
+The same pattern is particularly convincing at `1_26_0`: the fused configuration is almost identical to MambaPy there despite the enormous improvement on `1_18_0`.
+
+The original comparison had interpreted `1_18_0` as the major reason GRU had the best recall/F1. The fused run shows that this conclusion is specific to the original MambaPy configuration rather than necessarily to dense-edge Mamba itself.
+
+---
+
+# Conclusion
+
+The evidence supports the following conclusion:
+
+> **The severe `1_18_0` failure observed in the original MambaPy run appears to be configuration-sensitive rather than an inherent failure mode of dense-edge Mamba.**
+
+The fused `mamba-ssm` + bf16 configuration produces broadly similar results to MambaPy on **five of six folds**, while dramatically rescuing `1_18_0`.
+
+Across the completed six-fold experiment it achieves:
+
+- **Accuracy: 0.879**
+- **Precision: 0.363**
+- **Recall: 0.895**
+- **F1: 0.466**
+- **AP: 0.572**
+- **Raw event hits: 6/6 (100%)**
+- **k-of-n / smoothed event hits: 6/6 (100%)**
+
+This makes fused Mamba the strongest result so far on the project's primary **AP** metric, while also giving the highest recall and F1 among the compared configurations.
+
+## Caveat
+
+The fused experiment changes two coupled factors relative to MambaPy:
+
+1. Mamba implementation: `mambapy` → `mamba-ssm` fused CUDA kernel
+2. Numerical regime: original precision → bf16 AMP
+
+Therefore this experiment does **not** isolate whether the rescue comes from the fused kernel, bf16, or their interaction.
+
+The appropriate next controlled experiment would be to separate those factors. However, the current result is already strong evidence that the original `1_18_0` MambaPy catastrophe should **not** be treated as a stable architectural property of dense-edge Mamba.
