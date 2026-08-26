@@ -9,7 +9,35 @@ Claude/Grok shells that don't share context with each other, and this is
 the one file meant to catch a new shell up without it re-reading
 everything.
 
-**Last updated:** 2026-08-26, by Claude (wired continuous-cwt-mamba into
+**Last updated:** 2026-08-26, by Claude (ran the planned next diagnostic
+step on `continuous_cwt_mamba`'s open CUDA bug, from a fresh Mac shell:
+`--pipeline continuous_cwt_mamba --smoke --continuous-mamba-t-chunk 64
+--max-folds 1 --device cpu`. **Completed cleanly, exit 0** -- fit (2
+epochs), validated, predicted, wrote both result CSVs, no exception
+anywhere including the `torch.cat` call CUDA's error pointed at. This
+rules out a general Python-level off-by-one in
+`_train_recording_incremental`'s slicing or `_sample_to_output_index`'s
+fallback branch (both exercised correctly here, real 12-recording/
+775-window smoke dataset) -- **the bug is CUDA/mambapy-pscan-specific,
+not a portable logic bug.** Next actual step needs a CUDA box: rerun with
+`CUDA_LAUNCH_BLOCKING=1 --device cuda`, and if that still just points at
+`torch.cat`, add `torch.cuda.synchronize()` after every per-chunk
+`_DenseEdgeMambaContinuous` call in the streaming loop to force each
+chunk's error synchronous and pin down which (recording, chunk index,
+tensor shape) triggers it. Full writeup: `Session_notes/2026_08_26/
+continuous_cwt_mamba_pipeline_wip.md`'s "CPU repro attempt" section (new,
+appended below the original bug writeup -- read both). **Still don't
+trust a real run of this pipeline until the CUDA bug is actually fixed;**
+this update only narrows where to look, no code changed.
+Separately, also this session: another Mac shell had independently started
+re-deriving `ContinuousLabelingParadigm.get_continuous_data()` from
+scratch (as `iter_labeled_runs`/`label_run`, a different-shaped refactor)
+before pulling and discovering Phase B already existed on `main` -- caught
+before it was pushed, branch deleted, no trace left. Flagging only so a
+future shell doesn't wonder why a `label_run` method was almost added:
+it wasn't, `get_continuous_data()` is the one and only loader.).
+
+Prior entry, still current: Claude (wired continuous-cwt-mamba into
 `run_pipelines.py` as `--pipeline continuous_cwt_mamba` -- Open threads'
 items 2+3 below. **WIP, not working yet:** new
 `Epilepsy/pipelines/continuous_dense_edge.py` (whole-recording chunked
@@ -547,6 +575,24 @@ read off a continuous timeline). See "Open threads" below.
 
 ## Open threads
 
+- **Significance channel may be redundant in the canonical config, untested
+  (2026-08-26)**: `_build_dense_edge_input`'s 4th dense-edge channel is
+  `significance = (coh - threshold) / threshold`
+  (`Epilepsy/pipelines/cwt_gnn_classifiers.py:4506`). Under
+  `coherence_threshold_mode="fixed"` -- what `dense_edge_gru`/
+  `dense_edge_mamba`'s canonical configs actually use
+  (`run_pipelines.py:285`, `coherence_threshold=0.90`, a single scalar for
+  every edge/frequency/trial) -- this is a pure affine transform of `coh`
+  alone (same rank ordering, no new information); it would only carry
+  real independent information under `coherence_threshold_mode="surrogate"`/
+  `"surrogate_cluster"`, where the threshold varies per (edge, frequency,
+  trial). Never actually ablated. Worth trying: rerun `dense_edge_gru` or
+  `dense_edge_mamba` with the significance channel dropped (3-channel
+  `[coh, sinφ, cosφ]` dense-edge input instead of 4), same protocol/seed,
+  to see whether it changes accuracy/AP at all and how much it saves
+  (smaller `dense_edge_conv` `in_channels`, narrower per-edge feature
+  stack into the temporal model -- not the dominant cost, which is the
+  coherence/phase construction itself, but a real secondary saving).
 - ~~Mamba 6-fold run~~ -- done, see "Right now" and the session note.
 - **chb02/chb03 GRU baseline extension (2026-08-26)**: chb02 total
   collapse (0/2 hit rate, AUC at chance), chb03 3/7 with a stark

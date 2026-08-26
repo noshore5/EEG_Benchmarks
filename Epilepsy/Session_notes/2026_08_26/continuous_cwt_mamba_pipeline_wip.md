@@ -104,3 +104,45 @@ kernel launches with an oddly-shaped tensor at some chunk).
 **Do not trust any `--pipeline continuous_cwt_mamba` run's results until
 this is fixed and re-verified** -- Phases A and B are solid; Phase C's
 training-loop OOM is fixed; this second bug is real and open.
+
+## CPU repro attempt (2026-08-26, different shell) -- does NOT reproduce
+
+Ran the exact documented next step: `--pipeline continuous_cwt_mamba
+--smoke --continuous-mamba-t-chunk 64 --max-folds 1 --device cpu` on a Mac
+(no CUDA available here to instead try `CUDA_LAUNCH_BLOCKING=1` on the
+original box). **Completed cleanly, exit code 0** -- fit (2 epochs),
+validated, predicted, wrote both result CSVs
+(`prediction_leave_one_seizure_out_20260826-173317.csv` /
+`prediction_per_seizure_20260826-173317.csv`). No crash, no exception, at
+any point (including `_stream_recording`'s `torch.cat`, the call the CUDA
+error pointed at).
+
+This lands on the branch of the note's own "if CPU does NOT reproduce it"
+reasoning above: **rules out a general Python-level off-by-one** in
+`_train_recording_incremental`'s buffer-trimming/slicing or
+`_sample_to_output_index`'s fallback branch (both ran correctly here,
+across a real 12-recording/775-window smoke dataset, all 8 training + 2
+validation recordings, without incident) -- if either had a real
+index/shape bug it would very likely have thrown a plain Python exception
+here too, not just silently produced wrong numbers, given how it manifests
+on CUDA (immediate crash, not a quiet miscalculation).
+
+Points the remaining investigation at something CUDA/mambapy-pscan-
+specific instead, as the note anticipated -- most likely `mambapy`'s
+`pscan` under repeated small-batch/oddly-shaped-tensor kernel launches
+across many chunk calls (one call per `t_chunk=64`-sized chunk per
+recording, streamed sequentially -- CPU has no equivalent async/kernel-
+launch failure mode to hit here). **Not yet re-investigated on CUDA** --
+this Mac has none; next actual step needs a CUDA box (RunPod pod, or
+whatever machine produced the original crash) rerunning the same smoke
+command with `CUDA_LAUNCH_BLOCKING=1 --device cuda` and, if that still
+just points at `torch.cat`, adding a `torch.cuda.synchronize()` after
+every per-chunk `_DenseEdgeMambaContinuous` call inside the streaming loop
+to force each chunk's CUDA errors to surface synchronously and pin down
+exactly which chunk (recording, chunk index, tensor shape) triggers it --
+cheaper than bisecting blind.
+
+Smoke output also reproduced the already-documented `1_02_0` fabricated-
+seizure-ID gotcha (chb01_02.edf has 0 real seizures --
+`chb01-summary.txt`) -- expected under `--smoke`'s capped interictal
+recording selection, not a new bug, see CONTEXT.md's "Known gotchas".
