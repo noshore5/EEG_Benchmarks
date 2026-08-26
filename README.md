@@ -1,18 +1,30 @@
 # EEG_Benchmarks
 Benchmarking on MOABB BCI benchmarks along with additional paradigms
 
-## CHB-MIT subject 1
+## CHB-MIT subjects
 
-Default epilepsy pipelines use CHB-MIT subject `chb01`. The recordings are
-not in git; they live on the
-[`chbmit-chb01-1.0.0`](https://github.com/noshore5/EEG_Benchmarks/releases/tag/chbmit-chb01-1.0.0)
-GitHub Release as `chb01.tar.gz` (~991MB, 42 EDFs + summary, PhysioNet
-1.0.0, ODC-By 1.0 -- see `THIRD_PARTY_NOTICES.md`).
+Default epilepsy pipelines use CHB-MIT subject `chb01`. Recordings for any
+subject aren't in git; a subject with a known GitHub Release mirror is
+fetched from there instead of PhysioNet's (throttled) S3 mirror --
+currently `chb01`-`chb04`, see `GITHUB_RELEASE_SHA256` in
+`datasets/epilepsy/chb_mit.py` for the live list:
 
-`datasets/epilepsy/chb_mit.py` downloads that archive on first use and
-extracts it into the MNE cache (`~/mne_data/MNE-chbmit-data/chbmit/1.0.0/chb01/`).
-Other subjects still come from PhysioNet's S3 mirror. Override the archive
-with `CHBMIT_CHB01_ARCHIVE_URL` / `CHBMIT_CHB01_SHA256` if needed.
+- [`chbmit-chb01-1.0.0`](https://github.com/noshore5/EEG_Benchmarks/releases/tag/chbmit-chb01-1.0.0) -- `chb01.tar.gz` (~991MB, 42 EDFs + summary)
+- [`chbmit-chb02-1.0.0`](https://github.com/noshore5/EEG_Benchmarks/releases/tag/chbmit-chb02-1.0.0) -- `chb02.tar.gz` (~859MB, 36 EDFs + summary)
+- [`chbmit-chb03-1.0.0`](https://github.com/noshore5/EEG_Benchmarks/releases/tag/chbmit-chb03-1.0.0) -- `chb03.tar.gz` (~863MB, 38 EDFs + summary)
+- [`chbmit-chb04-1.0.0`](https://github.com/noshore5/EEG_Benchmarks/releases/tag/chbmit-chb04-1.0.0) -- `chb04.part1.tar.xz` + `chb04.part2.tar.xz` (~1.6GB combined, 42 EDFs + summary split across 2 assets -- chb04's raw size doesn't fit GitHub's 2GiB-per-asset cap as one archive)
+
+All PhysioNet 1.0.0, ODC-By 1.0 -- see `THIRD_PARTY_NOTICES.md`.
+
+`datasets/epilepsy/chb_mit.py` downloads a registered subject's archive(s)
+on first use and extracts them into the MNE cache
+(`~/mne_data/MNE-chbmit-data/chbmit/1.0.0/chbXX/`). A subject NOT in
+`GITHUB_RELEASE_SHA256` downloads from PhysioNet's S3 mirror instead, same
+as before this mechanism existed. Override any subject's archive with
+`CHBMIT_CHB{NN}_ARCHIVE_URL` / `CHBMIT_CHB{NN}_SHA256` (e.g.
+`CHBMIT_CHB01_ARCHIVE_URL` / `CHBMIT_CHB01_SHA256`) if needed -- the env
+override always describes a single archive, even for a subject normally
+split into parts.
 
 ## RunPod pod image
 

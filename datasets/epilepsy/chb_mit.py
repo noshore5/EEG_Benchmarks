@@ -32,7 +32,7 @@ import tarfile
 import urllib.request
 from pathlib import Path
 from typing import Dict, List, Optional, Union
-from urllib.parse import unquote, urlparse
+from urllib.parse import quote, urlparse
 
 import mne
 from mne.utils import _url_to_local_path
@@ -70,18 +70,39 @@ log = logging.getLogger(__name__)
 BASE_URL = "https://physionet-open.s3.amazonaws.com/chbmit/1.0.0/"
 SIGN = "CHBMIT"
 
-CHB01_GITHUB_TAG = "chbmit-chb01-1.0.0"
-CHB01_GITHUB_ARCHIVE_URL = (
-    "https://github.com/noshore5/EEG_Benchmarks/releases/download/"
-    f"{CHB01_GITHUB_TAG}/chb01.tar.gz"
-)
-# SHA-256 of the GitHub Release asset chb01.tar.gz. Override with
-# CHBMIT_CHB01_SHA256 in tests or if the archive is rebuilt.
-CHB01_GITHUB_SHA256 = "bf91e579c8b61a6813442d9351fa6e111dd6078d43ab2b04fd66d4660324b6f9"
-CHB01_GITHUB_SUBJECT = 1
+# Subjects with a known GitHub Release mirror, keyed by subject number ->
+# sha256 of that subject's chbXX.tar.gz (tag "chbmit-chbXX-1.0.0", same
+# ODC-By 1.0 provenance as chb01 -- see THIRD_PARTY_NOTICES.md). A subject
+# NOT in this dict falls through to PhysioNet S3 exactly as if this
+# registry didn't exist -- adding a subject here is the only thing that
+# turns GitHub-first fetching on for it (originally chb01-only, 2026-08-24;
+# generalized to any subject 2026-08-26).
+#
+# Value is either a single sha256 string (one asset, "chbXX.tar.gz") or a
+# list of sha256 strings for a subject split across multiple assets
+# ("chbXX.partN.tar.xz", 1-indexed) -- GitHub Releases caps a single asset
+# at 2 GiB, which chb04's ~6.4GB raw recordings don't fit in one gzipped
+# archive. All parts share one release/tag and extract into the same
+# subject directory (they're disjoint file sets, so extraction order
+# doesn't matter); the subject's cache only counts as complete once every
+# part has landed.
+GITHUB_RELEASE_SHA256 = {
+    1: "bf91e579c8b61a6813442d9351fa6e111dd6078d43ab2b04fd66d4660324b6f9",
+    2: "d0985a0213815c235e320222552a1dba35455225fcc2a2d1cf03130025cd12d6",
+    3: "40ebd8e66a8d4ed24cb70b569dd33e1f64dd6aaacd8fb502c8b93ab29ea6219b",
+    # chb04's ~6.4GB raw recordings don't fit GitHub's 2GiB-per-asset cap
+    # as one gzipped archive (confirmed: gzip got it to 3.7GB) -- split
+    # into two xz-compressed, size-balanced parts instead (~1.6-1.7GB
+    # each). See GITHUB_RELEASE_SHA256's own docstring above.
+    4: [
+        "1d7d02d78fea2708af36d8ceab66a8649773e6d934bf53adc4b7b90914dd3d6c",
+        "4be4083432f4a4dfefbf24696e9ec5f565fd6a7afdc406c27b811b1c51ac74df",
+    ],
+}
 
-# One failed GitHub prefetch per process: don't retry on every missing EDF.
-_CHB01_PREFETCH_FAILED = False
+# One failed GitHub prefetch per subject per process: don't retry on every
+# missing EDF within the same run.
+_GITHUB_PREFETCH_FAILED: set = set()
 
 _FILE_RE = re.compile(r"File Name:\s*(\S+)")
 # Single-seizure files write "Seizure Start Time: N seconds"; files with
@@ -132,12 +153,44 @@ def parse_summary(text: str) -> List[dict]:
     return records
 
 
-def _chb01_archive_url() -> str:
-    return os.environ.get("CHBMIT_CHB01_ARCHIVE_URL", CHB01_GITHUB_ARCHIVE_URL)
+def _github_release_tag(subject: int) -> str:
+    return f"chbmit-chb{subject:02d}-1.0.0"
 
 
-def _chb01_archive_sha256() -> str:
-    return os.environ.get("CHBMIT_CHB01_SHA256", CHB01_GITHUB_SHA256)
+def _github_release_parts(subject: int) -> List[str]:
+    """sha256 list for this subject's archive part(s), in order.
+
+    Empty list means "no registered release" (caller falls back to
+    PhysioNet S3). The CHBMIT_CHB{:02d}_SHA256 env override always
+    describes a single archive -- it's meant for tests / a one-off rebuilt
+    archive, not for reproducing a multi-part split.
+    """
+    env = os.environ.get(f"CHBMIT_CHB{subject:02d}_SHA256")
+    if env:
+        return [env]
+    value = GITHUB_RELEASE_SHA256.get(subject)
+    if value is None:
+        return []
+    return [value] if isinstance(value, str) else list(value)
+
+
+def _github_archive_part_url(subject: int, part_index: int, n_parts: int) -> str:
+    """URL for the ``part_index``-th (0-based) of ``n_parts`` archive(s).
+
+    n_parts == 1 -> ``chbXX.tar.gz`` (the common case, matches chb01).
+    n_parts > 1 -> ``chbXX.partN.tar.xz`` (1-indexed N), the same asset
+    names uploaded to that subject's release when it needed a split.
+    """
+    env = os.environ.get(f"CHBMIT_CHB{subject:02d}_ARCHIVE_URL")
+    if env:
+        return env
+    tag = _github_release_tag(subject)
+    fname = (
+        f"chb{subject:02d}.tar.gz"
+        if n_parts == 1
+        else f"chb{subject:02d}.part{part_index + 1}.tar.xz"
+    )
+    return f"https://github.com/noshore5/EEG_Benchmarks/releases/download/{tag}/{fname}"
 
 
 def cache_destination(url: str, path: Optional[Union[str, Path]] = None) -> Path:
@@ -146,13 +199,14 @@ def cache_destination(url: str, path: Optional[Union[str, Path]] = None) -> Path
     return Path(_url_to_local_path(url, str(root)))
 
 
-def chb01_cache_dir(path: Optional[Union[str, Path]] = None) -> Path:
-    return cache_destination(f"{BASE_URL}chb01/chb01-summary.txt", path).parent
+def subject_cache_dir(subject: int, path: Optional[Union[str, Path]] = None) -> Path:
+    subject_dir = f"chb{subject:02d}"
+    return cache_destination(f"{BASE_URL}{subject_dir}/{subject_dir}-summary.txt", path).parent
 
 
-def chb01_cache_complete(dest_dir: Path) -> bool:
-    """True if dest_dir has the summary and every EDF it lists."""
-    summary = dest_dir / "chb01-summary.txt"
+def subject_cache_complete(dest_dir: Path, subject: int) -> bool:
+    """True if dest_dir has the subject's summary and every EDF it lists."""
+    summary = dest_dir / f"chb{subject:02d}-summary.txt"
     if not summary.is_file():
         return False
     try:
@@ -162,6 +216,17 @@ def chb01_cache_complete(dest_dir: Path) -> bool:
     if not records:
         return False
     return all((dest_dir / rec["filename"]).is_file() for rec in records)
+
+
+# Back-compat aliases (subject-1-only names predate the 2026-08-26
+# generalization to any subject; kept since they're still the clearest
+# spelling when subject is always 1, e.g. in the RunPod Dockerfile's docs).
+def chb01_cache_dir(path: Optional[Union[str, Path]] = None) -> Path:
+    return subject_cache_dir(1, path)
+
+
+def chb01_cache_complete(dest_dir: Path) -> bool:
+    return subject_cache_complete(dest_dir, 1)
 
 
 def _sha256_file(path: Path) -> str:
@@ -196,7 +261,11 @@ def download_url(url: str, dest: Path, sha256: Optional[str] = None) -> Path:
     log.info("Downloading %s -> %s", url, dest)
     parsed = urlparse(url)
     if parsed.scheme == "file":
-        shutil.copy2(unquote(parsed.path), tmp)
+        # unquote(parsed.path) alone is wrong on Windows: urlparse() leaves
+        # a leading "/" before the drive letter ("/C:/Users/...") that
+        # shutil.copy2 can't open. url2pathname strips that correctly on
+        # every platform (same helper MNE's _url_to_local_path uses).
+        shutil.copy2(urllib.request.url2pathname(parsed.path), tmp)
     else:
         try:
             from pooch import retrieve
@@ -234,12 +303,18 @@ def _safe_tar_members(tar: tarfile.TarFile):
         yield member
 
 
-def extract_chb01_archive(archive: Path, extract_root: Path) -> Path:
-    """Extract ``chb01/...`` members of ``archive`` into ``extract_root``.
+def extract_subject_archive(archive: Path, extract_root: Path, subject: int) -> Path:
+    """Extract ``chbXX/...`` members of ``archive`` into ``extract_root``.
 
     ``extract_root`` is the PhysioNet version directory (``.../1.0.0``), so
-    members named ``chb01/chb01_01.edf`` land at the S3 cache path.
+    members named ``chbXX/chbXX_01.edf`` land at the S3 cache path.
+
+    Does NOT check ``subject_cache_complete`` itself -- a multi-part
+    subject (see GITHUB_RELEASE_SHA256) is legitimately incomplete after
+    any one part. ``prefetch_subject_from_github`` checks completeness
+    once, after every part has extracted.
     """
+    subject_dir = f"chb{subject:02d}"
     extract_root = Path(extract_root)
     extract_root.mkdir(parents=True, exist_ok=True)
     with tarfile.open(archive, "r:*") as tar:
@@ -248,62 +323,87 @@ def extract_chb01_archive(archive: Path, extract_root: Path) -> Path:
             tar.extractall(extract_root, members=members, filter="data")
         except TypeError:
             tar.extractall(extract_root, members=members)
-    dest_dir = extract_root / "chb01"
-    if not chb01_cache_complete(dest_dir):
-        raise RuntimeError(
-            f"Extracted {archive} into {extract_root} but chb01 cache is incomplete"
+    return extract_root / subject_dir
+
+
+def extract_chb01_archive(archive: Path, extract_root: Path) -> Path:
+    return extract_subject_archive(archive, extract_root, 1)
+
+
+def prefetch_subject_from_github(
+    subject: int,
+    path: Optional[Union[str, Path]] = None,
+    force: bool = False,
+) -> bool:
+    """Populate one subject's MNE cache from its GitHub Release archive(s).
+
+    Returns True if the cache is complete afterwards. Returns False if the
+    subject has no known release (not in GITHUB_RELEASE_SHA256 / no
+    CHBMIT_CHB{:02d}_SHA256 override) or an archive could not be fetched
+    (caller should fall back to PhysioNet S3 either way). Summary-only
+    lookups should not call this -- it pulls up to a few GB. A subject with
+    multiple parts (see GITHUB_RELEASE_SHA256) fetches+extracts each in
+    turn before the completeness check runs.
+    """
+    parts = _github_release_parts(subject)
+    if not parts:
+        return False
+    dest_dir = subject_cache_dir(subject, path)
+    if not force and subject_cache_complete(dest_dir, subject):
+        return True
+    if subject in _GITHUB_PREFETCH_FAILED and not force:
+        return False
+    if force:
+        _GITHUB_PREFETCH_FAILED.discard(subject)
+
+    extract_root = dest_dir.parent
+    n_parts = len(parts)
+    for part_index, sha256 in enumerate(parts):
+        url = _github_archive_part_url(subject, part_index, n_parts)
+        archive_name = Path(urlparse(url).path).name or f"chb{subject:02d}.tar.gz"
+        archive = (
+            Path(get_dataset_path(SIGN, path))
+            / f"MNE-{SIGN.lower()}-data"
+            / "github-releases"
+            / archive_name
         )
-    return dest_dir
+        try:
+            download_url(url, archive, sha256=sha256)
+            extract_subject_archive(archive, extract_root, subject)
+        except Exception as exc:
+            _GITHUB_PREFETCH_FAILED.add(subject)
+            log.warning(
+                "GitHub chb%02d archive (part %d/%d) failed (%s); falling back to PhysioNet S3",
+                subject,
+                part_index + 1,
+                n_parts,
+                exc,
+            )
+            return False
+        finally:
+            if archive.is_file():
+                try:
+                    archive.unlink()
+                except OSError:
+                    pass
+    if not subject_cache_complete(dest_dir, subject):
+        _GITHUB_PREFETCH_FAILED.add(subject)
+        log.warning(
+            "GitHub chb%02d: all %d part(s) extracted but cache is still incomplete; "
+            "falling back to PhysioNet S3",
+            subject,
+            n_parts,
+        )
+        return False
+    _GITHUB_PREFETCH_FAILED.discard(subject)
+    return True
 
 
 def prefetch_chb01_from_github(
     path: Optional[Union[str, Path]] = None,
     force: bool = False,
 ) -> bool:
-    """Populate the subject-1 MNE cache from the GitHub Release archive.
-
-    Returns True if the cache is complete afterwards. Returns False if the
-    archive could not be fetched (caller should fall back to PhysioNet S3).
-    Summary-only lookups should not call this -- it pulls ~1GB.
-    """
-    global _CHB01_PREFETCH_FAILED
-    dest_dir = chb01_cache_dir(path)
-    if not force and chb01_cache_complete(dest_dir):
-        return True
-    if _CHB01_PREFETCH_FAILED and not force:
-        return False
-
-    if force:
-        _CHB01_PREFETCH_FAILED = False
-
-    url = _chb01_archive_url()
-    sha256 = _chb01_archive_sha256()
-    extract_root = dest_dir.parent
-    archive_name = Path(urlparse(url).path).name or "chb01.tar.gz"
-    archive = (
-        Path(get_dataset_path(SIGN, path))
-        / f"MNE-{SIGN.lower()}-data"
-        / "github-releases"
-        / archive_name
-    )
-    try:
-        download_url(url, archive, sha256=sha256)
-        extract_chb01_archive(archive, extract_root)
-    except Exception as exc:
-        _CHB01_PREFETCH_FAILED = True
-        log.warning(
-            "GitHub chb01 archive failed (%s); falling back to PhysioNet S3",
-            exc,
-        )
-        return False
-    finally:
-        if archive.is_file():
-            try:
-                archive.unlink()
-            except OSError:
-                pass
-    _CHB01_PREFETCH_FAILED = False
-    return chb01_cache_complete(dest_dir)
+    return prefetch_subject_from_github(1, path=path, force=force)
 
 
 class CHBMIT(BaseDataset):
@@ -315,9 +415,11 @@ class CHBMIT(BaseDataset):
         Optional filter restricting which recordings are used per subject,
         e.g. ``{1: ["chb01_03.edf", "chb01_04.edf"]}``. If a subject has no
         entry (or ``records`` is None), all recordings listed in that
-        subject's summary file are used. For subjects other than 1 this
-        still skips unused S3 downloads. Subject 1 is filled from one
-        GitHub archive, so a filter no longer saves the first-run fetch.
+        subject's summary file are used. For a subject with no registered
+        GitHub release (see ``GITHUB_RELEASE_SHA256``) this still skips
+        unused S3 downloads. A subject that IS registered is filled from
+        one GitHub archive, so a filter no longer saves the first-run fetch
+        for that subject specifically.
     """
 
     def __init__(self, records: Optional[Dict[int, List[str]]] = None):
@@ -354,7 +456,12 @@ class CHBMIT(BaseDataset):
         return f"{BASE_URL}{subject_dir}/{subject_dir}-summary.txt"
 
     def _record_url(self, subject: int, filename: str) -> str:
-        return f"{BASE_URL}{self._subject_dir(subject)}/{filename}"
+        # quote() is required for filenames the S3 mirror won't serve
+        # unescaped -- e.g. chb02's "chb02_16+.edf" 404s as a literal "+"
+        # but 200s as "%2B". _url_to_local_path (via request.url2pathname)
+        # unquotes the path again when deriving the local cache filename,
+        # so the file still lands on disk as "chb02_16+.edf", unchanged.
+        return f"{BASE_URL}{self._subject_dir(subject)}/{quote(filename)}"
 
     def _local_file(
         self,
@@ -365,8 +472,9 @@ class CHBMIT(BaseDataset):
     ) -> Path:
         """Return the cached path for one CHB-MIT file, downloading if needed.
 
-        Subject 1 EDFs (not the tiny summary) are filled from the GitHub
-        Release archive when the S3-shaped cache is incomplete. Other
+        EDFs (not the tiny summary) for a subject registered in
+        GITHUB_RELEASE_SHA256 are filled from that subject's GitHub Release
+        archive when the S3-shaped cache is incomplete. Unregistered
         subjects, and any GitHub failure, use PhysioNet S3 via ``data_dl``.
         """
         url = self._record_url(subject, filename)
@@ -374,8 +482,8 @@ class CHBMIT(BaseDataset):
         if dest.is_file() and not force_update:
             return dest
         is_edf = filename.lower().endswith(".edf")
-        if subject == CHB01_GITHUB_SUBJECT and is_edf:
-            prefetch_chb01_from_github(path=path, force=force_update)
+        if is_edf and _github_release_parts(subject):
+            prefetch_subject_from_github(subject, path=path, force=force_update)
             if dest.is_file():
                 return dest
         return Path(data_dl(url, SIGN, path, force_update))

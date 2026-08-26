@@ -9,7 +9,12 @@ Claude/Grok shells that don't share context with each other, and this is
 the one file meant to catch a new shell up without it re-reading
 everything.
 
-**Last updated:** 2026-08-25, by Claude (committed all outstanding
+**Last updated:** 2026-08-26, by Claude (chb02-04 dense-edge-GRU baseline
+extension + GitHub-release mirror generalized from chb01-only to any
+subject -- separate thread from everything below, on a fresh branch off
+this commit rather than the now-deleted `continuous-cwt-mamba`; see
+"Right now (chb02-04 baseline + GitHub-release mirror)" below). Prior
+entry, still current: Claude (committed all outstanding
 work on `continuous-cwt-mamba` -- SlimSeiz channel-select stage, the
 `--slimseiz-fixed-channels` flag, the DBConformer depth/weight sweep, the
 4-way pipeline comparison note, and this file's own recent edits --
@@ -44,6 +49,57 @@ channel-select crash under a memory watchdog, added a `max_samples` cap to
 confirmed, see "Known gotchas" below). Before that: Claude (`--pipeline
 dbconformer`/`slimseiz` added). Before that: Grok (`scan="chunk"`,
 `use_cuda_kernel`, GHCR `eeg_benchmarks-mamba` image live).
+
+---
+
+## Right now (chb02-04 baseline + GitHub-release mirror, 2026-08-26)
+
+Two things, done on a fresh branch off this commit of `main`
+(`continuous-cwt-mamba` no longer exists, see the entry above -- this
+work started on it before that was known, then got cherry-picked onto
+`main` directly once the divergence was discovered). Full detail:
+`Epilepsy/Session_notes/2026_08_26/
+chb02_chb03_chb04_gru_baseline_and_github_release_generalization.md`.
+
+1. **Matched dense-edge-GRU baseline extended to chb02 and chb03** (same
+   protocol as chb01's `full_6fold_23ch_encoderfree_val_gru.md`). chb02:
+   **total collapse** -- 0/2 hit rate, AP 0.016, AUC 0.498 (chance),
+   model predicts negative on every single preictal window in both folds.
+   chb03: **3/7 hit rate** with a striking split -- the 4 earliest folds
+   (`chb03_01`-`04`) collapse the same way chb02 did, the 3 latest
+   (`chb03_34`-`36`, after a long seizure-free gap) train and predict
+   well (recall 0.67-0.83, AUC 0.88-0.91). Leading theory (not tested):
+   each LOSO fold on these subjects trains on very few other seizures'
+   preictal windows (chb02 has only 2 usable seizures total after
+   SPH/SOP filtering), so it's data starvation, not GRU-specific --
+   proposed but didn't run the same protocol with `dense_edge`/
+   `dense_edge_mamba` to check. **Also found, not fixed:** chb02's
+   reported seizure IDs (`2_17_0`, `2_20_0`) are off by +1 real file
+   number vs. `chb02-summary.txt` (real seizures are in `chb02_16+.edf`
+   and `chb02_19.edf`) -- same "+`.edf` file shifts a position-based
+   index" family of bug as chb01's fabricated `1_02_0`, but this time
+   both seizures are real, just mislabeled. Root cause not traced (likely
+   `run_pipelines.py`'s `unique_seizures` construction).
+2. **GitHub-release mirror generalized from chb01-only to any subject.**
+   `datasets/epilepsy/chb_mit.py`'s `GITHUB_RELEASE_SHA256` registry (was
+   `CHB01_GITHUB_*` single-subject constants) now covers chb01-04, with
+   multi-part support added for chb04 (its ~6.4GB raw doesn't fit
+   GitHub's 2GiB-per-asset cap as one archive -- split into two xz parts).
+   Four live releases: `chbmit-chb01-1.0.0` through `chbmit-chb04-1.0.0`.
+   Two unrelated bugs found+fixed along the way: chb02's `chb02_16+.edf`
+   404'd on PhysioNet S3 (unescaped `+` in the URL -- `_record_url` now
+   `quote()`s the filename) and a pre-existing (confirmed via `git
+   stash`, not introduced this session) Windows-only bug in
+   `download_url`'s `file://` handling. 13/13 tests passing
+   (`tests/test_chb_mit_github_prefetch.py`, rewritten for the
+   generalization), plus a live check that every published asset URL
+   resolves with the right `Content-Length`.
+
+Also mid-session: disk hit 92% (77G/894G free) from this session's own
+downloads+caches -- purged pip cache (3.6G) and deleted
+`~/mne_data/dense_edge_cache` (16G, pure recompute cache, safe, rebuilds
+automatically) at user's request. If dense-edge training looks slower on
+the very next run after this, that's the recompute, not a regression.
 
 ---
 
@@ -261,23 +317,32 @@ read off a continuous timeline). See "Open threads" below.
 
 ## Branch map
 
-- `main` -- baseline, no dense-edge-mamba, no cwt node encoder.
+- `main` -- **current branch as of 2026-08-26** (this section was stale
+  in main's own last update -- it said `continuous-cwt-mamba` was still
+  "current" one paragraph after that same update's own note said it was
+  merged+deleted; corrected here). Has everything: `dense_edge_mamba`
+  (from `mamba-temporal-edge-model`, merged at `6d38573`), the cwt node
+  encoder, the continuous-cwt-mamba paradigm plumbing (`aa3c565`,
+  `4760de0`), `use_cuda_kernel` + `Dockerfile.mamba` + the live GHCR
+  `eeg_benchmarks-mamba` image, SlimSeiz, dbconformer, and (as of this
+  session) the chb01-04 GitHub-release mirror generalization.
 - `mamba-temporal-edge-model` (remote, `origin/`) -- where
   `dense_edge_temporal_mode="mamba"` (`_DenseEdgeMambaTemporal`) was
-  developed. Merged into `main` at `6d38573`.
-- `continuous-cwt-mamba` -- **current branch**, tracking
-  `origin/continuous-cwt-mamba`. Has `main` + `mamba-temporal-edge-model`
-  both merged in (so `dense_edge_mamba` IS available here), plus
-  `--skip-folds`, plus committed continuous Mamba (`aa3c565` plumbing,
-  `4760de0` `scan="chunk"` + `use_cuda_kernel` + `Dockerfile.mamba`).
-  Working tree was clean at last update.
+  originally developed, before merging into `main`. Likely stale/inactive
+  now that `main` has everything; check before assuming it's ahead of
+  `main` on anything.
+- `continuous-cwt-mamba` -- **no longer exists.** Merged into `main` and
+  deleted (both locally and on `origin`) by another shell mid-2026-08-26;
+  don't assume it's still there, and don't recreate it without checking
+  `main` first (this session accidentally did exactly that with a stale
+  local copy -- see the "chb02-04 baseline + GitHub-release mirror"
+  entry above for how that got sorted out).
 - `tf-node-encoding`, `dynmaic_subset` -- exist locally, not investigated
-  this session; don't assume they have dense-edge-mamba unless you check.
-- If you're starting a session and need `dense_edge_mamba`: check you're
-  on (or have merged) `continuous-cwt-mamba` or `mamba-temporal-edge-model`
-  first. `git log --oneline -- Epilepsy/pipelines/cwt_gnn_classifiers.py`
-  or `grep _DenseEdgeMambaTemporal` is a fast way to confirm rather than
-  assuming from the branch name alone.
+  recently; don't assume they have anything `main` doesn't unless you
+  check.
+- `dense_edge_mamba` is on `main` now, so there's no need to hunt for a
+  branch that has it -- just confirm with `grep _DenseEdgeMambaTemporal
+  Epilepsy/pipelines/cwt_gnn_classifiers.py` if in doubt.
 
 ## Known gotchas (keep rediscovering these -- stop rediscovering them)
 
@@ -375,11 +440,13 @@ read off a continuous timeline). See "Open threads" below.
   wasted work).
 - **`run_pipelines.py` defaults to `--device mps`** (author's Mac). Always
   pass `--device cuda` explicitly on a CUDA box.
-- **chb01 is the only subject exercised by default anywhere in this repo**
-  (`DEFAULT_SUBJECTS=[1]`). It's baked into the RunPod `Dockerfile` and
-  redistributed via a GitHub Release (see `README.md`) specifically
-  because PhysioNet's own server throttles hard. Other subjects still pull
-  from PhysioNet's S3 mirror on demand, not baked into any image.
+- **chb01 is still the only subject `DEFAULT_SUBJECTS` exercises and the
+  only one baked into the RunPod `Dockerfile`**, but as of 2026-08-26 it's
+  no longer the only subject mirrored on GitHub Releases -- chb02/03/04
+  are too now (`GITHUB_RELEASE_SHA256` in `datasets/epilepsy/chb_mit.py`,
+  see this file's 2026-08-26 section above and `README.md`'s "CHB-MIT
+  subjects" section). A subject NOT in that registry still pulls from
+  PhysioNet's S3 mirror on demand, same as before this existed.
 - **`1_26_0`** (a chb01 seizure) is a persistent k-of-n miss for every
   *GRU*/encoder-in-graph variant tried so far (encoder-in-graph,
   encoder-free, k=4 through full mesh) -- but the matched Mamba run
@@ -395,10 +462,30 @@ read off a continuous timeline). See "Open threads" below.
   it produces zero surviving preictal windows at SPH=300/SOP=900 (onset
   too close to its own recording's start), so it never enters
   `leave_one_seizure_out_prediction`'s fold list at all.
+- **chb02's reported seizure IDs are off by +1 real file number**
+  (2026-08-26, not fixed). `2_17_0`/`2_20_0` are what the LOSO loop
+  prints, but `chb02-summary.txt`'s actual seizures are in
+  `chb02_16+.edf` and `chb02_19.edf` (onset/offset timestamps match
+  exactly) -- a third real seizure in `chb02_16.edf` never enters the
+  fold list at all (same too-close-to-recording-start reason as chb01's
+  `1_21_0`). Same family of bug as chb01's fabricated `1_02_0` ID, but
+  this time the seizures ARE real, just mislabeled. Root cause not
+  traced -- likely `run_pipelines.py`'s `unique_seizures` construction
+  building `seizure_id` from a recording-list position rather than the
+  filename's numeric suffix, thrown off by `chb02_16+.edf` sitting
+  between `chb02_16.edf` and `chb02_17.edf` in file order.
 
 ## Open threads
 
 - ~~Mamba 6-fold run~~ -- done, see "Right now" and the session note.
+- **chb02/chb03 GRU baseline extension (2026-08-26)**: chb02 total
+  collapse (0/2 hit rate, AUC at chance), chb03 3/7 with a stark
+  early-recordings-fail / late-recordings-work split -- see this file's
+  2026-08-26 section above and its session note. Leading theory is data
+  starvation (few preictal windows per LOSO fold on these subjects), not
+  tested against conv/Mamba backbones yet -- that comparison is the
+  obvious next step if this thread continues.
+- chb02's seizure-ID off-by-one (immediately above) -- not fixed.
 - Mamba's `1_18_0` recall collapse (0.100 vs GRU's 0.767, same seizure) --
   not investigated, biggest single per-seizure divergence in the
   comparison. Tried on 2026-08-25 (Mac shell) to pull raw `predict_proba`
