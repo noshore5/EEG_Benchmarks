@@ -604,29 +604,31 @@ read off a continuous timeline). See "Open threads" below.
   the selected clique is relative to the full 253-edge mesh -- untested,
   and would need `mamba_chunk_size`'s row-grouping (see that class's
   docstring) reworked to skip rows rather than just batch them.
-- **Try reordering aggregate-then-Mamba instead of Mamba-then-aggregate
-  (2026-08-26)**: current `dense_edge_mamba` runs temporal-then-spatial --
-  each edge's whole time sequence goes through Mamba independently first,
-  producing one summary vector per edge, and the GNN's aggregation step
-  only runs ONCE at the very end on those summaries (see
-  `_aggregate_events`). The alternative: spatial-then-temporal -- at EACH
-  timestep, aggregate across edges into one graph-level state (or one
-  state per node) first, producing a sequence of T graph-states, then feed
-  THAT sequence through a single shared Mamba across time. This does not
-  need an invented edge ordering (unlike naively flattening all edges into
-  one long sequence, which was rejected) because message-passing
-  aggregation is already permutation-invariant -- it collapses the graph
-  into a fixed-size embedding at each timestep regardless of edge order,
-  leaving only the time axis for Mamba to scan. This is the standard
-  "spatial-then-temporal" pattern from spatiotemporal-GNN forecasting
-  literature (e.g. DCRNN/STGCN-style: graph conv per timestep -> temporal
-  model across the resulting sequence), just not yet tried on this
-  pipeline's specific mirror-image (temporal-then-spatial) design. Lets
-  the temporal model see graph-level context at every timestep instead of
-  only after each edge has fully digested its own history alone --
-  a real, scoped experiment (reorder existing stages, not build new
-  machinery), distinct from the more open-ended spatiotemporal-SSM
-  literature scan below.
+- **Aggregate-then-Mamba: IN PROGRESS on branch `graph-state-mamba`
+  (2026-08-26, not yet merged, not yet pushed)**: turned out this ordering
+  already existed, half-built -- `event_mode="temporal_graph"` (2026-08-11)
+  is exactly "aggregate every edge's per-timestep message to its
+  destination node first, then walk a persistent per-node state forward
+  through the resulting sequence" (`_temporal_graph_node_states`), just
+  with `nn.GRU` as that per-node temporal model, and never wired to a
+  `--pipeline` CLI flag. This branch added a Mamba alternative
+  (`temporal_graph_mode="mamba"`, mirroring `dense_edge_temporal_mode`'s
+  existing "rnn" vs "mamba" choice for the PER-EDGE case) by reusing
+  `_DenseEdgeMambaTemporal` UNCHANGED with the node axis (`n_channels`,
+  ~23) in the slot its usual caller puts the edge axis (`E`, 253) in --
+  its `[B, C_in, X, T] -> [B, out_channels, X, 1]` contract doesn't care
+  what `X` indexes. Smoke-tested successfully, CPU, both `"gru"` (still
+  bit-identical to before) and `"mamba"` paths fit/predict cleanly; the
+  `event_mode != "temporal_graph"` guard raises as expected. Full writeup:
+  `Session_notes/2026_08_26/temporal_graph_mamba_aggregate_then_mamba.md`.
+  **Not done**: no `--pipeline` CLI wiring (several `run_pipelines.py`
+  dispatch sites gate on a fixed pipeline-name set -- deliberately not
+  touched yet, to avoid risking working pipelines' dispatch logic without
+  room to verify each site), no real-scale run, no memory/speed
+  characterization at real batch sizes. See that session note's "Next
+  steps" for the concrete order (CLI wiring -> smoke run via CLI -> real
+  chb01 LOSO comparison, gru vs mamba, and separately vs `dense_edge_mamba`
+  itself -- the actual open question this branch exists to answer).
 - **Explore spatiotemporal state-space models (2026-08-26)**: current
   `dense_edge_mamba` runs one shared Mamba per edge, independently -- time
   (per-edge Mamba) and space (the GNN's message-passing/aggregation step)

@@ -2979,6 +2979,39 @@ class SparseEvidenceGNNCore(nn.Module):
         # two modes' sparse_message_mlp/sparse_classifier stay comparably
         # sized, not because it's been tuned.
         temporal_graph_edge_dim: int = 8,
+        # 2026-08-26: event_mode="temporal_graph"-only. Swaps
+        # temporal_node_gru (the persistent per-node recurrence that walks
+        # forward through the per-timestep mean-aggregated node sequence --
+        # see _temporal_graph_node_states) for a per-node Mamba block,
+        # mirroring dense_edge_temporal_mode's existing "rnn" vs "mamba"
+        # choice for the PER-EDGE temporal model (_DenseEdgeGRUTemporal vs
+        # _DenseEdgeMambaTemporal) -- same selective-state-space motivation
+        # (linear-time in T', input-dependent gating), just applied to the
+        # node axis instead of the edge axis, i.e. AFTER aggregation instead
+        # of before it. This is the "aggregate-then-Mamba" ordering: mean-
+        # aggregate every edge's per-timestep message to its destination
+        # node FIRST (temporal_edge_proj + sparse_message_mlp + the mean
+        # scatter, unchanged), producing one graph-state sequence per node,
+        # THEN run a single shared Mamba across that sequence -- the mirror
+        # image of dense_edge_temporal_mode="mamba", which runs Mamba per
+        # edge first and aggregates the (already time-pooled) summaries
+        # once at the end. Reuses _DenseEdgeMambaTemporal directly (its
+        # [B, C_in, X, T] -> [B, out_channels, X, 1] contract does not care
+        # whether X is edges or nodes), with X=n_channels instead of X=E --
+        # a much smaller axis (23 vs 253 at this pipeline's usual channel
+        # count), so mamba_chunk_size-style row-chunking is far less likely
+        # to be needed here, though the knob is exposed for parity/safety
+        # anyway. Rejected (ValueError) when event_mode != "temporal_graph"
+        # and this is not "gru" -- same "explicit no-op rejection"
+        # precedent as event_aggregation's own temporal_graph requirement.
+        temporal_graph_mode: Literal["gru", "mamba"] = "gru",
+        temporal_graph_mamba_d_state: int = 16,
+        temporal_graph_mamba_d_conv: int = 4,
+        temporal_graph_mamba_expand: int = 2,
+        temporal_graph_mamba_n_layers: int = 1,
+        temporal_graph_mamba_dropout: float = 0.0,
+        temporal_graph_mamba_chunk_size: int = 128,
+        temporal_graph_mamba_use_cuda_kernel: bool | None = None,
         # Learned per-channel CWT time-frequency node encoder -- additive to
         # the existing WCT/coherence EDGE pathway, not a replacement. False
         # (default) is bit-identical to before this param existed:
@@ -3043,6 +3076,20 @@ class SparseEvidenceGNNCore(nn.Module):
                 f"-- got event_aggregation={event_aggregation!r}. See event_mode's "
                 "docstring above for why this experiment is deliberately scoped "
                 "to the existing mean aggregation."
+            )
+        if temporal_graph_mode not in ("gru", "mamba"):
+            raise ValueError(
+                f"temporal_graph_mode must be 'gru' or 'mamba', got {temporal_graph_mode!r}."
+            )
+        if temporal_graph_mode != "gru" and event_mode != "temporal_graph":
+            # Same "explicit no-op rejection" precedent as event_aggregation's
+            # own temporal_graph requirement above -- temporal_graph_mode only
+            # affects _temporal_graph_node_states, which no other event_mode
+            # ever calls, so a non-default value here would otherwise be
+            # silently ignored rather than raising.
+            raise ValueError(
+                "temporal_graph_mode='mamba' requires event_mode='temporal_graph' "
+                f"-- got event_mode={event_mode!r}."
             )
         if event_aggregation == "concat" and event_mode != "dense":
             # "concat"'s per-node readout (_aggregate_events' "concat" branch)
@@ -3295,6 +3342,7 @@ class SparseEvidenceGNNCore(nn.Module):
         self.dense_edge_time_downsample = int(dense_edge_time_downsample)
         self.time_averaged_graph = bool(time_averaged_graph)
         self.temporal_graph_edge_dim = temporal_graph_edge_dim
+        self.temporal_graph_mode = temporal_graph_mode
         self.cwt_encoder = bool(cwt_encoder)
         self.node_embedding_dim = int(
             hidden_dim if node_embedding_dim is None else node_embedding_dim
@@ -3551,12 +3599,39 @@ class SparseEvidenceGNNCore(nn.Module):
             self.temporal_edge_proj = nn.Sequential(
                 nn.Linear(4 * nfreqs, temporal_graph_edge_dim), nn.GELU()
             )
-            self.temporal_node_gru = nn.GRU(
-                input_size=hidden_dim, hidden_size=hidden_dim, batch_first=True
-            )
+            if temporal_graph_mode == "mamba":
+                # Reuses _DenseEdgeMambaTemporal unchanged -- its
+                # [B, C_in, X, T] -> [B, out_channels, X, 1] contract is
+                # agnostic to what X indexes, so passing X=n_channels here
+                # (instead of X=E, its usual per-EDGE caller) is exactly the
+                # "same shared temporal model, applied after aggregation
+                # instead of before it" swap this mode's docstring describes.
+                # in_channels=out_channels=hidden_dim to match
+                # temporal_node_gru's own hidden_dim->hidden_dim shape (no
+                # separate node-state width knob, for a fair like-for-like
+                # comparison against the GRU path).
+                self.temporal_node_mamba = _DenseEdgeMambaTemporal(
+                    in_channels=hidden_dim,
+                    out_channels=hidden_dim,
+                    d_model=hidden_dim,
+                    d_state=temporal_graph_mamba_d_state,
+                    d_conv=temporal_graph_mamba_d_conv,
+                    expand=temporal_graph_mamba_expand,
+                    n_layers=temporal_graph_mamba_n_layers,
+                    dropout=temporal_graph_mamba_dropout,
+                    chunk_size=temporal_graph_mamba_chunk_size,
+                    use_cuda_kernel=temporal_graph_mamba_use_cuda_kernel,
+                )
+                self.temporal_node_gru = None
+            else:
+                self.temporal_node_mamba = None
+                self.temporal_node_gru = nn.GRU(
+                    input_size=hidden_dim, hidden_size=hidden_dim, batch_first=True
+                )
         else:
             self.temporal_edge_proj = None
             self.temporal_node_gru = None
+            self.temporal_node_mamba = None
 
         # CWT node encoder LAST -- same init-order precedent as
         # dense_edge_conv / temporal_edge_proj above. Unused (stays None)
@@ -5063,6 +5138,14 @@ class SparseEvidenceGNNCore(nn.Module):
         the shape _aggregate_events' "mean" branch returns, so the caller
         (forward()) can feed it straight into the same n_hops>1 propagation
         and sparse_classifier every other event_mode already shares.
+
+        temporal_graph_mode="mamba" (2026-08-26): everything through the
+        per-timestep mean-aggregation to `node_seq` below is IDENTICAL to
+        the "gru" path -- only the walk-through-time step at the end
+        differs (self.temporal_node_mamba instead of self.temporal_node_gru),
+        via _DenseEdgeMambaTemporal reused with the node axis in the edge
+        axis's usual slot. See temporal_graph_mode's own constructor
+        docstring for the full "aggregate-then-Mamba" motivation.
         """
         batch_size_actual, c_in, num_edges, n_time, nfreqs = dense_edge_raw.shape
 
@@ -5114,6 +5197,17 @@ class SparseEvidenceGNNCore(nn.Module):
         # hidden state) is the "T walked through to the end" counterpart to
         # dense mode's AdaptiveAvgPool2d((None, 1)) -- an actual summary
         # carried through memory, not a pooled/convolved snapshot.
+        if self.temporal_graph_mode == "mamba":
+            # _DenseEdgeMambaTemporal's contract is [B, C_in, X, T] ->
+            # [B, out_channels, X, 1] -- X=n_channels here (node axis),
+            # in place of its usual X=E (edge axis). node_seq is
+            # [B, n_channels, T, hidden_dim]; permute hidden_dim to the
+            # channel slot the same way conv_in already arrives shaped for
+            # every OTHER caller of that class.
+            conv_in = node_seq.permute(0, 3, 1, 2)  # [B, hidden_dim, n_channels, T]
+            out = self.temporal_node_mamba(conv_in)  # [B, hidden_dim, n_channels, 1]
+            evidence = out.squeeze(-1).permute(0, 2, 1)  # [B, n_channels, hidden_dim]
+            return evidence
         gru_in = node_seq.reshape(batch_size_actual * self.n_channels, n_time, self.hidden_dim)
         _, h_n = self.temporal_node_gru(gru_in)  # h_n: [1, B*n_channels, hidden_dim]
         evidence = h_n.squeeze(0).reshape(batch_size_actual, self.n_channels, self.hidden_dim)
@@ -5646,6 +5740,16 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         # Default (8) matches dense_conv_out_channels's own default purely
         # for comparable sizing, not because it's been tuned.
         temporal_graph_edge_dim: int = 8,
+        # Forwarded to SparseEvidenceGNNCore -- see Core's matching
+        # docstring ("aggregate-then-Mamba", 2026-08-26).
+        temporal_graph_mode: Literal["gru", "mamba"] = "gru",
+        temporal_graph_mamba_d_state: int = 16,
+        temporal_graph_mamba_d_conv: int = 4,
+        temporal_graph_mamba_expand: int = 2,
+        temporal_graph_mamba_n_layers: int = 1,
+        temporal_graph_mamba_dropout: float = 0.0,
+        temporal_graph_mamba_chunk_size: int = 128,
+        temporal_graph_mamba_use_cuda_kernel: bool | None = None,
         # Forwarded to SparseEvidenceGNNCore -- False (default) leaves the
         # existing dense-edge GRU path unchanged. True adds a shared CWT
         # time-frequency node encoder whose embeddings join WCT edge
@@ -6055,6 +6159,14 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         self.mamba_chunk_size = mamba_chunk_size
         self.mamba_use_cuda_kernel = mamba_use_cuda_kernel
         self.temporal_graph_edge_dim = temporal_graph_edge_dim
+        self.temporal_graph_mode = temporal_graph_mode
+        self.temporal_graph_mamba_d_state = temporal_graph_mamba_d_state
+        self.temporal_graph_mamba_d_conv = temporal_graph_mamba_d_conv
+        self.temporal_graph_mamba_expand = temporal_graph_mamba_expand
+        self.temporal_graph_mamba_n_layers = temporal_graph_mamba_n_layers
+        self.temporal_graph_mamba_dropout = temporal_graph_mamba_dropout
+        self.temporal_graph_mamba_chunk_size = temporal_graph_mamba_chunk_size
+        self.temporal_graph_mamba_use_cuda_kernel = temporal_graph_mamba_use_cuda_kernel
         if time_frequency_node_ablation not in ("none", "zero_node_embed", "node_only"):
             raise ValueError(
                 "time_frequency_node_ablation must be 'none', 'zero_node_embed', "
@@ -7524,6 +7636,14 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
             mamba_use_cuda_kernel=self.mamba_use_cuda_kernel,
             shuffle_time_order=self.shuffle_time_order,
             temporal_graph_edge_dim=self.temporal_graph_edge_dim,
+            temporal_graph_mode=self.temporal_graph_mode,
+            temporal_graph_mamba_d_state=self.temporal_graph_mamba_d_state,
+            temporal_graph_mamba_d_conv=self.temporal_graph_mamba_d_conv,
+            temporal_graph_mamba_expand=self.temporal_graph_mamba_expand,
+            temporal_graph_mamba_n_layers=self.temporal_graph_mamba_n_layers,
+            temporal_graph_mamba_dropout=self.temporal_graph_mamba_dropout,
+            temporal_graph_mamba_chunk_size=self.temporal_graph_mamba_chunk_size,
+            temporal_graph_mamba_use_cuda_kernel=self.temporal_graph_mamba_use_cuda_kernel,
             cwt_encoder=self.cwt_encoder,
             node_embedding_dim=self.node_embedding_dim,
             time_frequency_node_ablation=self.time_frequency_node_ablation,
