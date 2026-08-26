@@ -1,0 +1,5 @@
+=== tarring chb02 ===
+tar (child): Cannot connect to C: resolve failed
+tar: C\:/Users/User/mne_data/github-release-staging/chb02.tar.gz: Cannot write: Broken pipe
+tar: Child returned status 128
+tar: Error is not recoverable: exiting now

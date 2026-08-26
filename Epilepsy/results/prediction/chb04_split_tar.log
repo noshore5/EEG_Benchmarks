@@ -1,0 +1,54 @@
+=== building chb04.part1.tar.xz ===
+tar: chb04/chb04-summary.txt\r: Cannot stat: No such file or directory
+tar: chb04/chb04_02.edf\r: Cannot stat: No such file or directory
+tar: chb04/chb04_04.edf\r: Cannot stat: No such file or directory
+tar: chb04/chb04_09.edf\r: Cannot stat: No such file or directory
+tar: chb04/chb04_12.edf\r: Cannot stat: No such file or directory
+tar: chb04/chb04_13.edf\r: Cannot stat: No such file or directory
+tar: chb04/chb04_14.edf\r: Cannot stat: No such file or directory
+tar: chb04/chb04_15.edf\r: Cannot stat: No such file or directory
+tar: chb04/chb04_17.edf\r: Cannot stat: No such file or directory
+tar: chb04/chb04_19.edf\r: Cannot stat: No such file or directory
+tar: chb04/chb04_22.edf\r: Cannot stat: No such file or directory
+tar: chb04/chb04_23.edf\r: Cannot stat: No such file or directory
+tar: chb04/chb04_26.edf\r: Cannot stat: No such file or directory
+tar: chb04/chb04_27.edf\r: Cannot stat: No such file or directory
+tar: chb04/chb04_31.edf\r: Cannot stat: No such file or directory
+tar: chb04/chb04_33.edf\r: Cannot stat: No such file or directory
+tar: chb04/chb04_35.edf\r: Cannot stat: No such file or directory
+tar: chb04/chb04_37.edf\r: Cannot stat: No such file or directory
+tar: chb04/chb04_38.edf\r: Cannot stat: No such file or directory
+tar: chb04/chb04_40.edf\r: Cannot stat: No such file or directory
+tar: chb04/chb04_42.edf\r: Cannot stat: No such file or directory
+tar: chb04/chb04_43.edf\r: Cannot stat: No such file or directory
+tar: Exiting with failure status due to previous errors
+=== sha256 part1 ===
+83bdfcdb94f595ba525eb869997187e9898d4201cd3c7655a19da71e7d59c125 *C:/Users/User/mne_data/github-release-staging/chb04.part1.tar.xz
+1.0K	C:/Users/User/mne_data/github-release-staging/chb04.part1.tar.xz
+=== building chb04.part2.tar.xz ===
+tar: chb04/chb04_01.edf\r: Cannot stat: No such file or directory
+tar: chb04/chb04_03.edf\r: Cannot stat: No such file or directory
+tar: chb04/chb04_05.edf\r: Cannot stat: No such file or directory
+tar: chb04/chb04_06.edf\r: Cannot stat: No such file or directory
+tar: chb04/chb04_07.edf\r: Cannot stat: No such file or directory
+tar: chb04/chb04_08.edf\r: Cannot stat: No such file or directory
+tar: chb04/chb04_10.edf\r: Cannot stat: No such file or directory
+tar: chb04/chb04_11.edf\r: Cannot stat: No such file or directory
+tar: chb04/chb04_16.edf\r: Cannot stat: No such file or directory
+tar: chb04/chb04_18.edf\r: Cannot stat: No such file or directory
+tar: chb04/chb04_21.edf\r: Cannot stat: No such file or directory
+tar: chb04/chb04_24.edf\r: Cannot stat: No such file or directory
+tar: chb04/chb04_25.edf\r: Cannot stat: No such file or directory
+tar: chb04/chb04_28.edf\r: Cannot stat: No such file or directory
+tar: chb04/chb04_29.edf\r: Cannot stat: No such file or directory
+tar: chb04/chb04_30.edf\r: Cannot stat: No such file or directory
+tar: chb04/chb04_32.edf\r: Cannot stat: No such file or directory
+tar: chb04/chb04_34.edf\r: Cannot stat: No such file or directory
+tar: chb04/chb04_36.edf\r: Cannot stat: No such file or directory
+tar: chb04/chb04_39.edf\r: Cannot stat: No such file or directory
+tar: chb04/chb04_41.edf\r: Cannot stat: No such file or directory
+tar: Exiting with failure status due to previous errors
+=== sha256 part2 ===
+83bdfcdb94f595ba525eb869997187e9898d4201cd3c7655a19da71e7d59c125 *C:/Users/User/mne_data/github-release-staging/chb04.part2.tar.xz
+1.0K	C:/Users/User/mne_data/github-release-staging/chb04.part2.tar.xz
+ALL DONE
