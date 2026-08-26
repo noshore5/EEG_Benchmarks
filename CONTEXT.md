@@ -604,6 +604,29 @@ read off a continuous timeline). See "Open threads" below.
   the selected clique is relative to the full 253-edge mesh -- untested,
   and would need `mamba_chunk_size`'s row-grouping (see that class's
   docstring) reworked to skip rows rather than just batch them.
+- **Try reordering aggregate-then-Mamba instead of Mamba-then-aggregate
+  (2026-08-26)**: current `dense_edge_mamba` runs temporal-then-spatial --
+  each edge's whole time sequence goes through Mamba independently first,
+  producing one summary vector per edge, and the GNN's aggregation step
+  only runs ONCE at the very end on those summaries (see
+  `_aggregate_events`). The alternative: spatial-then-temporal -- at EACH
+  timestep, aggregate across edges into one graph-level state (or one
+  state per node) first, producing a sequence of T graph-states, then feed
+  THAT sequence through a single shared Mamba across time. This does not
+  need an invented edge ordering (unlike naively flattening all edges into
+  one long sequence, which was rejected) because message-passing
+  aggregation is already permutation-invariant -- it collapses the graph
+  into a fixed-size embedding at each timestep regardless of edge order,
+  leaving only the time axis for Mamba to scan. This is the standard
+  "spatial-then-temporal" pattern from spatiotemporal-GNN forecasting
+  literature (e.g. DCRNN/STGCN-style: graph conv per timestep -> temporal
+  model across the resulting sequence), just not yet tried on this
+  pipeline's specific mirror-image (temporal-then-spatial) design. Lets
+  the temporal model see graph-level context at every timestep instead of
+  only after each edge has fully digested its own history alone --
+  a real, scoped experiment (reorder existing stages, not build new
+  machinery), distinct from the more open-ended spatiotemporal-SSM
+  literature scan below.
 - **Explore spatiotemporal state-space models (2026-08-26)**: current
   `dense_edge_mamba` runs one shared Mamba per edge, independently -- time
   (per-edge Mamba) and space (the GNN's message-passing/aggregation step)
