@@ -130,6 +130,7 @@ from Epilepsy.pipelines.cwt_gnn_classifiers import (
     SparseEvidenceGNNClassifier,
     StreamingSparseEvidenceGNNClassifier,
 )
+from Epilepsy.pipelines.continuous_cwt_mamba_classifier import ContinuousCWTMambaClassifier
 from Epilepsy.pipelines.cwt_window_cache import DISABLE_CWT_CACHE, DiskCWTCache, default_cwt_cache_root
 from Epilepsy.pipelines.dense_edge_cache import default_dense_edge_cache_root
 from Epilepsy.pipelines.truong_stft_cnn_classifier import TruongSTFTCNNClassifier, k_of_n_alarm
@@ -387,6 +388,39 @@ PREDICTION_MAMBA_PARAMS: dict[str, object] = dict(
     mamba_dropout=0.0,
     mamba_chunk_size=128,
     mamba_use_cuda_kernel=None,  # None = auto (CUDA + mamba-ssm importable)
+    validation_split=0.2,
+)
+
+# --pipeline=continuous_cwt_mamba -- the continuous-cwt-mamba paradigm's
+# own params (ContinuousCWTMambaClassifier, Epilepsy/pipelines/
+# continuous_cwt_mamba_classifier.py): Mamba's SSM state carried across an
+# ENTIRE recording (reset only between recordings, never between a
+# recording's own classification windows), instead of dense_edge_mamba's
+# per-window reset. label_mode="prediction" only in practice (SPH/SOP
+# window labels are what this dataset's fold construction assumes) --
+# _continuous_cwt_mamba_params below raises on "detection" for now, same
+# spirit as truong_stft_cnn forcing prediction-only.
+#
+# NOT built on _SHARED_ARCH_PARAMS' dense_edge_temporal_mode/mamba_
+# use_cuda_kernel/mamba_chunk_size/channel_subset_k -- see
+# ContinuousCWTMambaClassifier's own __init__, which rejects all of those
+# (row-chunking and the fused CUDA kernel don't apply to the carried-state
+# scan; channel_subset_k's live-edge-subset scatter isn't supported by
+# continuous_dense_edge's chunked CWT). mamba_d_model/d_state/d_conv/
+# expand/n_layers/dropout are otherwise identical to dense_edge_mamba's --
+# same architecture, different temporal-state contract.
+CONTINUOUS_CWT_MAMBA_PARAMS: dict[str, object] = dict(
+    _SHARED_ARCH_PARAMS,
+    batch_size=32,  # unused (one recording at a time -- see classifier docstring); kept for _build_model's sake
+    learning_rate=2e-3,
+    mamba_d_model=16,
+    mamba_d_state=16,
+    mamba_d_conv=4,
+    mamba_expand=2,
+    mamba_n_layers=1,
+    mamba_dropout=0.0,
+    mamba_scan="chunk",
+    t_chunk=128,  # scripts/continuous_cwt_scale_probe.py measured this the safe/fast RTX 3070 Ti default
     validation_split=0.2,
 )
 
@@ -780,26 +814,7 @@ def _build_windowed_dataset(
     negative_to_positive_ratio docstring for the (still very real) OOM
     reason it exists. See the 2026-08-17 session note.
     """
-    discovery = CHBMIT()
-    if label_mode == "prediction":
-        if max_interictal_recordings is None:
-            dataset = CHBMIT()  # no records filter -> every recording for `subjects` (see docstring)
-        else:
-            records = {}
-            for subject in subjects:
-                all_records = discovery.list_records(subject)
-                seizure_files = [r["filename"] for r in all_records if r["seizures"]]
-                interictal_files = [r["filename"] for r in all_records if not r["seizures"]]
-                if len(interictal_files) > max_interictal_recordings:
-                    idx = sorted(
-                        {int(round(i)) for i in np.linspace(0, len(interictal_files) - 1, max_interictal_recordings)}
-                    )
-                    interictal_files = [interictal_files[i] for i in idx]
-                records[subject] = seizure_files + interictal_files
-            dataset = CHBMIT(records=records)
-    else:
-        records = {subject: [r["filename"] for r in discovery.list_seizure_records(subject)] for subject in subjects}
-        dataset = CHBMIT(records=records)
+    dataset = _resolve_chbmit_dataset(subjects, label_mode, max_interictal_recordings)
     paradigm = ContinuousLabelingParadigm(
         window_length=window_length,
         step_size=step_size,
@@ -813,6 +828,70 @@ def _build_windowed_dataset(
     X, y, metadata = paradigm.get_data(dataset, subjects=subjects)
     metadata = pd.DataFrame(metadata)
     return X, y, metadata
+
+
+def _resolve_chbmit_dataset(
+    subjects: list[int], label_mode: str, max_interictal_recordings: int | None
+) -> CHBMIT:
+    """Dataset-selection logic shared by `_build_windowed_dataset` and
+    `_build_continuous_dataset` -- see the former's docstring for the full
+    label_mode="detection" vs. "prediction" rationale (only detection
+    restricts to seizure-containing recordings; prediction also needs
+    seizure-free ones for negative/interictal windows). Split out so the
+    continuous-cwt-mamba paradigm's recording-preserving loader doesn't
+    duplicate this selection logic, only the paradigm.get_*data() call
+    that follows it.
+    """
+    discovery = CHBMIT()
+    if label_mode == "prediction":
+        if max_interictal_recordings is None:
+            return CHBMIT()  # no records filter -> every recording for `subjects`
+        records = {}
+        for subject in subjects:
+            all_records = discovery.list_records(subject)
+            seizure_files = [r["filename"] for r in all_records if r["seizures"]]
+            interictal_files = [r["filename"] for r in all_records if not r["seizures"]]
+            if len(interictal_files) > max_interictal_recordings:
+                idx = sorted(
+                    {int(round(i)) for i in np.linspace(0, len(interictal_files) - 1, max_interictal_recordings)}
+                )
+                interictal_files = [interictal_files[i] for i in idx]
+            records[subject] = seizure_files + interictal_files
+        return CHBMIT(records=records)
+    records = {subject: [r["filename"] for r in discovery.list_seizure_records(subject)] for subject in subjects}
+    return CHBMIT(records=records)
+
+
+def _build_continuous_dataset(
+    subjects: list[int],
+    window_length: float,
+    step_size: float,
+    label_mode: str = "prediction",
+    sph: float = DEFAULT_SPH,
+    sop: float = DEFAULT_SOP,
+    postictal_buffer: float = DEFAULT_POSTICTAL_BUFFER,
+    interictal_buffer: float | None = None,
+    max_interictal_recordings: int | None = None,
+) -> list[dict]:
+    """CHBMIT + ContinuousLabelingParadigm.get_continuous_data() -> a list
+    of recording dicts (see that method's docstring) for `subjects` -- the
+    continuous-cwt-mamba paradigm's recording-preserving counterpart to
+    `_build_windowed_dataset`. Same dataset-selection rules (via
+    `_resolve_chbmit_dataset`), just keeping each recording whole instead
+    of exploding it into independent window rows.
+    """
+    dataset = _resolve_chbmit_dataset(subjects, label_mode, max_interictal_recordings)
+    paradigm = ContinuousLabelingParadigm(
+        window_length=window_length,
+        step_size=step_size,
+        label_event="seizure",
+        label_mode=label_mode,
+        sph=sph,
+        sop=sop,
+        postictal_buffer=postictal_buffer,
+        interictal_buffer=interictal_buffer,
+    )
+    return paradigm.get_continuous_data(dataset, subjects=subjects)
 
 
 def _subsample_negative_windows(
@@ -1315,6 +1394,212 @@ def leave_one_seizure_out_prediction(
     return pd.DataFrame(fold_rows), per_seizure_df
 
 
+def leave_one_seizure_out_continuous_mamba(
+    recordings: list[dict],
+    clf_params: dict,
+    epochs: int,
+    window_length: float,
+    k_of_n_k: int = DEFAULT_TRUONG_K_OF_N_K,
+    k_of_n_n: int = DEFAULT_TRUONG_K_OF_N_N,
+    max_folds: int | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Leave-one-seizure-out CV for the continuous-cwt-mamba paradigm
+    (`ContinuousCWTMambaClassifier`) -- recording-level counterpart to
+    `leave_one_seizure_out_prediction`, built on `recordings` (a
+    `_build_continuous_dataset()` / `ContinuousLabelingParadigm.
+    get_continuous_data()` return value) instead of independent per-window
+    `(X, y, metadata)` rows, since this paradigm's whole point is Mamba
+    state carried across a recording's own windows -- a window-row table
+    has nowhere to represent that continuity, and `leave_one_seizure_out_
+    prediction`'s random-batch training loop is incompatible with it (see
+    `ContinuousCWTMambaClassifier`'s own module docstring).
+
+    Fold unit and train/test split happen at the RECORDING level (not the
+    seizure_id-window level `leave_one_seizure_out_prediction` uses) --
+    the held-out seizure's own recording, plus a round-robin share of the
+    seizure-free recordings (same reasoning as that function's docstring:
+    this dataset's sph+sop+postictal_buffer defaults mean a seizure-
+    containing recording never supplies its own negative windows), forms
+    the test set; every OTHER recording is training. Coarser than window-
+    level exclusion, but the only grain that makes sense for a classifier
+    that can't be fit on part of a recording.
+
+    Same metric set/CSV columns as `leave_one_seizure_out_prediction`
+    (window-level precision/recall/f1/AP/roc_auc, event-level hit/false-
+    alarms-per-hour raw and k-of-n-smoothed, per-seizure log) for direct
+    comparability -- see that function's docstring for what each means.
+    """
+    all_seizures: list[dict] = []
+    seen_seizure_ids: set[str] = set()
+    for rec in recordings:
+        for w in rec["windows"]:
+            sid = w.get("seizure_id")
+            if sid is not None and sid not in seen_seizure_ids:
+                seen_seizure_ids.add(sid)
+                all_seizures.append(
+                    {
+                        "subject": rec["subject"], "run": rec["run"], "seizure_id": sid,
+                        "seizure_onset": w["seizure_onset"], "seizure_offset": w["seizure_offset"],
+                    }
+                )
+    unique_seizures = sorted(all_seizures, key=lambda s: (s["subject"], s["run"], s["seizure_onset"]))
+    if not unique_seizures:
+        raise ValueError(
+            "No positive (preictal) windows survived label_mode='prediction' labeling -- "
+            "nothing to leave-one-seizure-out over."
+        )
+
+    seizure_run_pairs = {(s["subject"], s["run"]) for s in unique_seizures}
+    interictal_only_recordings = [
+        rec for rec in recordings if (rec["subject"], rec["run"]) not in seizure_run_pairs
+    ]
+    n_folds = len(unique_seizures)
+    fold_interictal_recordings = [
+        [rec for j, rec in enumerate(interictal_only_recordings) if j % n_folds == i] for i in range(n_folds)
+    ]
+    if max_folds is not None:
+        unique_seizures = unique_seizures[: max(1, int(max_folds))]
+    if not interictal_only_recordings:
+        print(
+            "  WARNING: no genuinely seizure-free recordings in this dataset -- "
+            "every fold's false_alarms_per_hour will be undefined."
+        )
+
+    recordings_by_key = {(rec["subject"], rec["run"]): rec for rec in recordings}
+
+    fold_rows = []
+    per_seizure_rows = []
+    for fold_i, seizure in enumerate(unique_seizures):
+        subject, run, seizure_id = seizure["subject"], seizure["run"], seizure["seizure_id"]
+        onset, offset = seizure["seizure_onset"], seizure["seizure_offset"]
+
+        seizure_recording = recordings_by_key[(subject, run)]
+        test_recordings = [seizure_recording] + fold_interictal_recordings[fold_i]
+        test_keys = {(r["subject"], r["run"]) for r in test_recordings}
+        train_recordings = [r for r in recordings if (r["subject"], r["run"]) not in test_keys]
+
+        clf = ContinuousCWTMambaClassifier(epochs=epochs, **clf_params)
+        clf.fit(train_recordings)
+        probs_list = clf.predict_proba(test_recordings)  # one [n_windows, 2] array per test recording
+
+        # Flatten across every test recording -- window order within each
+        # recording is preserved (chronological, same order get_continuous_
+        # data built it in), just concatenated recording-major.
+        y_test_parts, y_score_parts, y_pred_parts = [], [], []
+        own_seizure_mask_parts, interictal_mask_parts = [], []
+        per_recording_smoothed: list[np.ndarray] = []
+        for rec, probs in zip(test_recordings, probs_list):
+            labels = np.array([w["label"] for w in rec["windows"]], dtype=np.int64)
+            score = probs[:, 1]
+            pred = clf.classes_[np.argmax(probs, axis=1)]
+            y_test_parts.append(labels)
+            y_score_parts.append(score)
+            y_pred_parts.append(pred)
+            own_seizure_mask_parts.append(
+                np.array([w.get("seizure_id") == seizure_id for w in rec["windows"]])
+            )
+            interictal_mask_parts.append(labels == 0)
+            # k-of-n smoothing (Truong et al. 2018 Section II.D), per
+            # recording, in the SAME chronological order predict_proba
+            # already streamed it in -- no groupby/sort needed, unlike
+            # leave_one_seizure_out_prediction's flat-array version.
+            per_recording_smoothed.append(k_of_n_alarm((pred == 1).astype(np.int64), k=k_of_n_k, n=k_of_n_n))
+
+        y_test = np.concatenate(y_test_parts)
+        y_score = np.concatenate(y_score_parts)
+        y_pred = np.concatenate(y_pred_parts)
+        y_pred_smoothed = np.concatenate(per_recording_smoothed)
+        own_seizure_mask = np.concatenate(own_seizure_mask_parts)
+        interictal_mask = np.concatenate(interictal_mask_parts)
+
+        row = {
+            "subject": subject, "run": run, "seizure_id": seizure_id,
+            "n_train": len(train_recordings), "n_test": int(y_test.shape[0]),
+            "n_test_preictal": int(y_test.sum()),
+            "accuracy": accuracy_score(y_test, y_pred),
+            "precision": precision_score(y_test, y_pred, zero_division=0),
+            "recall": recall_score(y_test, y_pred, zero_division=0),
+            "f1": f1_score(y_test, y_pred, zero_division=0),
+            "average_precision": average_precision_score(y_test, y_score),
+        }
+        try:
+            row["roc_auc"] = roc_auc_score(y_test, y_score)
+        except ValueError:
+            row["roc_auc"] = float("nan")
+
+        n_interictal = int(interictal_mask.sum())
+        interictal_hours = (n_interictal * window_length) / 3600.0
+
+        def _event_metrics(preds: np.ndarray) -> dict[str, object]:
+            n_preictal = int(own_seizure_mask.sum())
+            n_hit = int((preds[own_seizure_mask] == 1).sum()) if n_preictal else 0
+            n_false_alarms = int((preds[interictal_mask] == 1).sum())
+            far = (n_false_alarms / interictal_hours) if interictal_hours > 0 else float("nan")
+            return {
+                "hit": n_hit > 0, "n_preictal_windows_predicted_positive": n_hit,
+                "n_false_alarms": n_false_alarms, "false_alarms_per_hour": far,
+            }
+
+        raw_events = _event_metrics(y_pred)
+        smoothed_events = _event_metrics(y_pred_smoothed)
+        n_preictal = int(own_seizure_mask.sum())
+
+        row["hit"] = raw_events["hit"]
+        row["n_preictal_windows"] = n_preictal
+        row["n_preictal_windows_predicted_positive"] = raw_events["n_preictal_windows_predicted_positive"]
+        row["n_interictal_windows"] = n_interictal
+        row["n_false_alarms"] = raw_events["n_false_alarms"]
+        row["interictal_hours_monitored"] = interictal_hours
+        row["false_alarms_per_hour"] = raw_events["false_alarms_per_hour"]
+        row["hit_smoothed"] = smoothed_events["hit"]
+        row["n_false_alarms_smoothed"] = smoothed_events["n_false_alarms"]
+        row["false_alarms_per_hour_smoothed"] = smoothed_events["false_alarms_per_hour"]
+        fold_rows.append(row)
+
+        mean_preictal_score = float(y_score[own_seizure_mask].mean()) if n_preictal else float("nan")
+        per_seizure_rows.append(
+            {
+                "subject": subject, "run": run, "seizure_id": seizure_id,
+                "seizure_onset_s": onset, "seizure_offset_s": offset,
+                "seizure_duration_s": offset - onset,
+                "run_start_time": seizure_recording.get("run_start_time"),
+                "hit": raw_events["hit"], "hit_smoothed": smoothed_events["hit"],
+                "n_preictal_windows": n_preictal,
+                "n_preictal_windows_predicted_positive": raw_events["n_preictal_windows_predicted_positive"],
+                "mean_preictal_score": mean_preictal_score,
+                "n_interictal_windows": n_interictal,
+                "n_false_alarms": raw_events["n_false_alarms"],
+                "false_alarms_per_hour": raw_events["false_alarms_per_hour"],
+                "false_alarms_per_hour_smoothed": smoothed_events["false_alarms_per_hour"],
+            }
+        )
+
+        print(
+            f"  seizure {seizure_id}: n_test={row['n_test']} preictal={n_preictal}  "
+            f"hit={raw_events['hit']} (smoothed={smoothed_events['hit']})  "
+            f"FAR/h={raw_events['false_alarms_per_hour']:.3f} "
+            f"(smoothed={smoothed_events['false_alarms_per_hour']:.3f})  "
+            f"precision={row['precision']:.3f} recall={row['recall']:.3f} "
+            f"f1={row['f1']:.3f} auc_pr={row['average_precision']:.3f}"
+        )
+
+    per_seizure_df = pd.DataFrame(per_seizure_rows)
+    gaps = []
+    for _, r in per_seizure_df.iterrows():
+        same_run = per_seizure_df[
+            (per_seizure_df["subject"] == r["subject"])
+            & (per_seizure_df["run"] == r["run"])
+            & (per_seizure_df["seizure_id"] != r["seizure_id"])
+        ]
+        gaps.append(
+            float("nan") if same_run.empty
+            else float((same_run["seizure_onset_s"] - r["seizure_onset_s"]).abs().min())
+        )
+    per_seizure_df["gap_to_nearest_seizure_same_recording_s"] = gaps
+
+    return pd.DataFrame(fold_rows), per_seizure_df
+
+
 def leave_one_seizure_out_truong(
     X: np.ndarray,
     y: np.ndarray,
@@ -1756,7 +2041,10 @@ def _build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--subjects", nargs="+", type=int, default=DEFAULT_SUBJECTS)
     parser.add_argument(
         "--pipeline",
-        choices=["dense_edge_gru", "dense_edge", "dense_edge_mamba", "truong_stft_cnn", "dbconformer", "slimseiz"],
+        choices=[
+            "dense_edge_gru", "dense_edge", "dense_edge_mamba", "continuous_cwt_mamba",
+            "truong_stft_cnn", "dbconformer", "slimseiz",
+        ],
         default="dense_edge_gru",
         help=(
             "'dense_edge_gru' (default): SparseEvidenceGNNClassifier with "
@@ -1771,6 +2059,16 @@ def _build_argument_parser() -> argparse.ArgumentParser:
             "starts as an exact copy of DENSE_EDGE_GRU_PARAMS so this is an isolated "
             "temporal-backend ablation, not a separately-tuned model. Requires the "
             "'mambapy' package (see _DenseEdgeMambaTemporal's docstring). "
+            "'continuous_cwt_mamba' (2026-08-26): ContinuousCWTMambaClassifier -- "
+            "Mamba's SSM state carried across an ENTIRE recording, reset only between "
+            "recordings, never between a recording's own classification windows (see "
+            "Epilepsy/pipelines/continuous_cwt_mamba_classifier.py's module docstring; "
+            "dense_edge_mamba's _DenseEdgeMambaTemporal resets every window instead). "
+            "label_mode=prediction ONLY (like truong_stft_cnn, forces --label-mode= "
+            "prediction). Own CLI knobs --continuous-mamba-t-chunk/--continuous-mamba-scan; "
+            "results go under results/continuous_cwt_mamba/prediction/. Does NOT support "
+            "--channel-subset-k, --cwt-encoder, or --mamba-use-cuda-kernel (see that "
+            "classifier's __init__ for why each is rejected). "
             "'truong_stft_cnn': Truong et al. 2018's STFT+CNN architecture replica "
             "(see Epilepsy/pipelines/truong_stft_cnn_classifier.py's module docstring) "
             "-- prediction-mode ONLY, forces --label-mode=prediction regardless of "
@@ -2143,6 +2441,29 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--continuous-mamba-t-chunk", type=int, default=None,
+        help=(
+            "--pipeline=continuous_cwt_mamba only: target output (post-"
+            "dense_edge_time_downsample) steps per streamed chunk -- a memory/TBPTT "
+            "knob (Epilepsy/pipelines/continuous_dense_edge.py), not a training-"
+            "dynamics one. Unset: CONTINUOUS_CWT_MAMBA_PARAMS' own default (128 -- "
+            "see scripts/continuous_cwt_scale_probe.py for measured memory/throughput "
+            "at real 23-channel scale; 512 measured ~8.75GB peak on an 8GB card, unsafe; "
+            "256 measured an anomalous ~20x slowdown, avoid)."
+        ),
+    )
+    parser.add_argument(
+        "--continuous-mamba-scan", choices=["chunk", "step"], default=None,
+        help=(
+            "--pipeline=continuous_cwt_mamba only: _DenseEdgeMambaContinuous's scan "
+            "mode -- 'chunk' (default) is the carried-state pscan; 'step' is the "
+            "original per-timestep Python loop, kept as a parity/ablation path (much "
+            "slower, see Epilepsy/Session_notes/2026_08_25/"
+            "continuous_mamba_chunk_scan_throughput.md). Unset: CONTINUOUS_CWT_MAMBA_"
+            "PARAMS' own default ('chunk')."
+        ),
+    )
+    parser.add_argument(
         "--verbose", type=int, default=None,
         help=(
             "Override clf_params['verbose'] (baked in at 1). 2 turns on "
@@ -2211,9 +2532,9 @@ def main(args: argparse.Namespace) -> None:
             f"{'--no-disable-disk-cache' if args.disable_disk_cache else '--disable-disk-cache'} to override)"
         )
     label_mode = args.label_mode
-    if pipeline == "truong_stft_cnn" and label_mode != "prediction":
+    if pipeline in ("truong_stft_cnn", "continuous_cwt_mamba") and label_mode != "prediction":
         print(
-            f"  note: --pipeline=truong_stft_cnn only supports label_mode=prediction -- "
+            f"  note: --pipeline={pipeline} only supports label_mode=prediction -- "
             f"overriding --label-mode={label_mode}."
         )
         label_mode = "prediction"
@@ -2267,6 +2588,87 @@ def main(args: argparse.Namespace) -> None:
         negative_to_positive_ratio = (
             DEFAULT_TRUONG_NEGATIVE_TO_POSITIVE_RATIO if pipeline == "truong_stft_cnn" else DEFAULT_NEGATIVE_TO_POSITIVE_RATIO
         )
+
+    if pipeline == "continuous_cwt_mamba":
+        # Recording-preserving path -- NOT the windowed (X, y, metadata)
+        # build below, which every other pipeline uses. See
+        # ContinuousCWTMambaClassifier's module docstring for why: this
+        # paradigm's whole point is Mamba state carried across a
+        # recording's own windows, which independent window rows can't
+        # represent. args.max_channels/--shuffle-labels (window-row-shaped
+        # diagnostics) aren't supported here yet -- error clearly rather
+        # than silently ignoring them.
+        if args.max_channels is not None:
+            raise NotImplementedError("--max-channels is not supported with --pipeline=continuous_cwt_mamba yet.")
+        if args.shuffle_labels:
+            raise NotImplementedError("--shuffle-labels is not supported with --pipeline=continuous_cwt_mamba yet.")
+        print(f"Building continuous (recording-preserving) dataset for subjects={subjects} "
+              f"(window_length={window_length}s, step_size={step_size}s)...")
+        recordings = _build_continuous_dataset(
+            subjects, window_length, step_size, label_mode=label_mode,
+            sph=args.sph, sop=args.sop, postictal_buffer=args.postictal_buffer,
+            interictal_buffer=args.interictal_buffer,
+            max_interictal_recordings=max_interictal_recordings,
+        )
+        n_windows_total = sum(len(r["windows"]) for r in recordings)
+        n_preictal_total = sum(1 for r in recordings for w in r["windows"] if w["label"] == 1)
+        print(f"  {len(recordings)} recordings, {n_windows_total} windows total, "
+              f"{n_preictal_total}/{n_windows_total} preictal "
+              f"({100 * n_preictal_total / max(1, n_windows_total):.1f}%)")
+
+        clf_params = dict(CONTINUOUS_CWT_MAMBA_PARAMS)
+        clf_params["seed"] = args.seed
+        clf_params["device"] = args.device
+        if args.verbose is not None:
+            clf_params["verbose"] = args.verbose
+        if args.validation_split is not None:
+            clf_params["validation_split"] = args.validation_split
+        if args.early_stopping_patience is not None:
+            clf_params["early_stopping_patience"] = args.early_stopping_patience
+        if args.continuous_mamba_t_chunk is not None:
+            clf_params["t_chunk"] = args.continuous_mamba_t_chunk
+        if args.continuous_mamba_scan is not None:
+            clf_params["mamba_scan"] = args.continuous_mamba_scan
+
+        run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
+        output_dir = Path(args.output_dir)
+        _write_results_readme(output_dir)
+
+        print(
+            f"Running leave-one-seizure-out prediction (pipeline=continuous_cwt_mamba, "
+            f"epochs={epochs}, sph={args.sph}s, sop={args.sop}s, t_chunk={clf_params['t_chunk']}, "
+            f"mamba_scan={clf_params['mamba_scan']}, "
+            f"validation_split={clf_params['validation_split']}, "
+            f"early_stopping_patience={clf_params['early_stopping_patience']})..."
+        )
+        results, per_seizure = leave_one_seizure_out_continuous_mamba(
+            recordings, clf_params, epochs, window_length,
+            k_of_n_k=args.k_of_n_k, k_of_n_n=args.k_of_n_n,
+            max_folds=args.max_folds,
+        )
+
+        prediction_dir = output_dir / "continuous_cwt_mamba" / "prediction"
+        prediction_dir.mkdir(parents=True, exist_ok=True)
+        results_path = prediction_dir / f"prediction_leave_one_seizure_out_{run_id}.csv"
+        per_seizure_path = prediction_dir / f"prediction_per_seizure_{run_id}.csv"
+        results.to_csv(results_path, index=False)
+        per_seizure.to_csv(per_seizure_path, index=False)
+        print(f"\nWrote per-fold results to {results_path}")
+        print(f"Wrote per-seizure log to {per_seizure_path}")
+
+        numeric_cols = [
+            "accuracy", "precision", "recall", "f1", "average_precision", "roc_auc",
+            "false_alarms_per_hour", "false_alarms_per_hour_smoothed",
+        ]
+        means = results[numeric_cols].mean(numeric_only=True)
+        n_hits = int(results["hit"].sum())
+        n_hits_smoothed = int(results["hit_smoothed"].sum())
+        n_seizures = len(results)
+        print(f"\n=== Mean across folds (pipeline=continuous_cwt_mamba, label_mode=prediction) ===")
+        print(means.to_string())
+        print(f"event-level hit rate (raw):    {n_hits}/{n_seizures} ({100 * n_hits / n_seizures:.1f}%)")
+        print(f"event-level hit rate (k-of-n): {n_hits_smoothed}/{n_seizures} ({100 * n_hits_smoothed / n_seizures:.1f}%)")
+        return
 
     print(f"Building windowed dataset for subjects={subjects} label_mode={label_mode} "
           f"(window_length={window_length}s, step_size={step_size}s)...")

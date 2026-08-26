@@ -391,3 +391,125 @@ class ContinuousLabelingParadigm:
             X = np.empty((0, 0, 0))
         y = np.array(y_parts, dtype=int)
         return X, y, metadata
+
+    def get_continuous_data(
+        self, dataset: BaseDataset, subjects: Optional[List[int]] = None
+    ) -> List[dict]:
+        """Recording-preserving sibling of `get_data()`: instead of cutting
+        each Raw into independent window rows, returns one whole
+        recording's raw signal plus its window BOUNDS (sample-index pairs
+        into that recording's own time axis) and per-window labels -- for
+        the continuous-cwt-mamba paradigm's whole-recording streaming
+        pipeline (see `Epilepsy.pipelines.continuous_dense_edge`), which
+        needs each recording kept intact rather than exploded into rows.
+
+        Reuses this class's exact window/label logic (`_window_starts`,
+        `_label_windows`/`_label_windows_prediction`, `_seizure_spans`)
+        completely unchanged -- window start times and labels for a given
+        recording are identical to what `get_data()` computes for it, just
+        not used to slice/copy `X_parts` here. `get_data()` itself is
+        untouched by this method's existence; every other pipeline keeps
+        working exactly as before.
+
+        Returns
+        -------
+        list of dict, one per recording with at least one surviving
+        window (same "excluded"/"last partial window" skip rules
+        `get_data()` applies), each:
+
+        - ``raw_x``: np.ndarray (n_channels, n_samples) -- the recording's
+          full raw signal, same `dataset.unit_factor` scaling `get_data()`'s
+          X uses.
+        - ``sampling_rate``: float.
+        - ``subject``, ``session``, ``run``, ``run_start_time``: same as
+          `get_data()`'s per-window metadata, recording-level here (one
+          value per recording, not repeated per window).
+        - ``windows``: list of dict, sorted chronologically by
+          ``window_start`` (REQUIRED by continuous_dense_edge's streaming
+          consumer -- cache carries window-to-window in this exact order),
+          each with ``start_sample``/``end_sample`` (half-open, into
+          ``raw_x``'s time axis), ``window_start``/``window_end``
+          (seconds), ``label`` (0/1), and (``label_mode="prediction"``
+          only) ``seizure_id``/``seizure_onset``/``seizure_offset`` (None
+          for negative windows) -- the same fields `get_data()`'s
+          per-window metadata dict carries.
+        """
+        data = dataset.get_data(subjects=subjects)
+        recordings: List[dict] = []
+
+        for subject, sessions in data.items():
+            for session, runs in sessions.items():
+                for run, raw in runs.items():
+                    raw = raw.copy().load_data(verbose="ERROR")
+                    if self.fmin is not None or self.fmax is not None:
+                        raw.filter(self.fmin, self.fmax, verbose="ERROR")
+                    if self.resample is not None:
+                        raw.resample(self.resample, verbose="ERROR")
+
+                    meas_date = raw.info.get("meas_date")
+                    run_start_time = meas_date.isoformat() if meas_date is not None else None
+
+                    sfreq = raw.info["sfreq"]
+                    duration = raw.n_times / sfreq
+                    starts = self._window_starts(duration)
+                    if len(starts) == 0:
+                        continue
+
+                    if self.label_mode == "prediction":
+                        labels, seizure_idx, spans = self._label_windows_prediction(
+                            starts, raw.annotations
+                        )
+                    else:
+                        labels = self._label_windows(starts, raw.annotations)
+                        seizure_idx = None
+                        spans = None
+
+                    n_samples_window = int(round(self.window_length * sfreq))
+                    raw_data = raw.get_data() * dataset.unit_factor
+
+                    windows: List[dict] = []
+                    for i, (start, label) in enumerate(zip(starts, labels)):
+                        if label < 0:
+                            continue  # excluded (prediction mode only) -- same as get_data()
+                        start_sample = int(round(start * sfreq))
+                        end_sample = start_sample + n_samples_window
+                        if end_sample > raw_data.shape[1]:
+                            continue  # last partial window, skip -- same as get_data()
+                        window_meta = {
+                            "start_sample": start_sample,
+                            "end_sample": end_sample,
+                            "window_start": float(start),
+                            "window_end": float(start + self.window_length),
+                            "label": int(label),
+                        }
+                        if self.label_mode == "prediction":
+                            k = int(seizure_idx[i])
+                            if k >= 0:
+                                onset, offset = spans[k]
+                                window_meta["seizure_id"] = f"{subject}_{run}_{k}"
+                                window_meta["seizure_onset"] = float(onset)
+                                window_meta["seizure_offset"] = float(offset)
+                            else:
+                                window_meta["seizure_id"] = None
+                                window_meta["seizure_onset"] = None
+                                window_meta["seizure_offset"] = None
+                        windows.append(window_meta)
+
+                    if not windows:
+                        continue
+                    # Already increasing by construction (starts is
+                    # monotonic) -- explicit sort documents the invariant
+                    # the streaming consumer actually depends on, cheaply.
+                    windows.sort(key=lambda w: w["window_start"])
+                    recordings.append(
+                        {
+                            "raw_x": raw_data,
+                            "sampling_rate": float(sfreq),
+                            "subject": subject,
+                            "session": session,
+                            "run": run,
+                            "run_start_time": run_start_time,
+                            "windows": windows,
+                        }
+                    )
+        return recordings

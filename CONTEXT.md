@@ -9,7 +9,26 @@ Claude/Grok shells that don't share context with each other, and this is
 the one file meant to catch a new shell up without it re-reading
 everything.
 
-**Last updated:** 2026-08-26, by Claude (chb02-04 dense-edge-GRU baseline
+**Last updated:** 2026-08-26, by Claude (wired continuous-cwt-mamba into
+`run_pipelines.py` as `--pipeline continuous_cwt_mamba` -- Open threads'
+items 2+3 below. **WIP, not working yet:** new
+`Epilepsy/pipelines/continuous_dense_edge.py` (whole-recording chunked
+CWT, Phase A) and `ContinuousLabelingParadigm.get_continuous_data()`
+(Phase B) are both built and verified (see `scripts/continuous_cwt_chunk_
+parity.py`, `scripts/continuous_cwt_scale_probe.py`,
+`scripts/continuous_labeling_get_continuous_data_parity.py`, all passing).
+`ContinuousCWTMambaClassifier` (Phase C, `Epilepsy/pipelines/
+continuous_cwt_mamba_classifier.py`) hit and fixed a real training-time
+CUDA OOM (whole-recording-then-one-backward kept every chunk's graph
+alive -- fixed via incremental per-window-group backward+step, see that
+class's `_train_recording_incremental`), but a real `--smoke` run on CUDA
+now hits a SECOND bug, an unresolved "illegal memory access" during
+validation, not yet root-caused -- full writeup and the planned next
+diagnostic step (rerun on `--device cpu` for a clean Python traceback) in
+`Session_notes/2026_08_26/continuous_cwt_mamba_pipeline_wip.md`. Session
+paused here (GPU needed for the user's other work) before that diagnostic
+ran. **Do not trust a real run of this pipeline until that's fixed.**).
+Prior entry, still current: Claude (chb02-04 dense-edge-GRU baseline
 extension + GitHub-release mirror generalized from chb01-only to any
 subject -- separate thread from everything below, on a fresh branch off
 this commit rather than the now-deleted `continuous-cwt-mamba`; see
@@ -526,21 +545,27 @@ read off a continuous timeline). See "Open threads" below.
   the graph (24-in MLP) -- not a clean same-model ablation against the
   encoder-free full-mesh runs. Needs an encoder-free rerun to close that
   comparison out.
-- `continuous-cwt-mamba` paradigm (see "Right now" above) -- component
-  pieces built and verified in isolation, `scan="chunk"` throughput path
-  in place (item 1 below done). Real data pipeline not started.
-  Next concrete steps, in the order they were being approached:
+- `continuous-cwt-mamba` paradigm (see "Right now" above and
+  `Session_notes/2026_08_26/continuous_cwt_mamba_pipeline_wip.md`) --
+  wired into `run_pipelines.py`, WIP/not working yet. Next concrete
+  steps, in the order they were being approached:
   1. ~~Investigate the throughput problem~~ -- done. Default is now
      `scan="chunk"` (carried-state pscan). See the 2026-08-25 session
      note. CUDA 3070 Ti re-measure of the updated probe is optional
      confirmation, not a blocker.
-  2. Design + build the continuous CHB-MIT loading path: whole-recording
-     CWT (not `_build_windowed_dataset`'s fixed windows), TBPTT chunk
-     boundaries, and windowed labels (SPH/SOP-derived) read off the
-     continuous timeline via `pool_continuous_edge_stream_to_windows`.
-  3. A parallel `leave_one_seizure_out_*`-equivalent loop in
-     `run_pipelines.py` for recording-level continuous sequences instead
-     of independent per-window rows -- the existing LOSO functions assume
-     per-window rows in `metadata`/`X` throughout, not a bolt-on.
-  4. Only then: a real GPU LOSO run to compare against the
-     `_DenseEdgeMambaTemporal` (windowed) baseline above.
+  2. ~~Design + build the continuous CHB-MIT loading path~~ -- done.
+     `Epilepsy/pipelines/continuous_dense_edge.py` (chunked whole-
+     recording CWT) + `ContinuousLabelingParadigm.get_continuous_data()`
+     (recording-preserving windows/labels), both verified (parity/probe
+     scripts, all passing -- see the WIP session note for details).
+  3. ~~A parallel `leave_one_seizure_out_*`-equivalent loop~~ -- done.
+     `leave_one_seizure_out_continuous_mamba` + `ContinuousCWTMambaClassifier`
+     (`Epilepsy/pipelines/continuous_cwt_mamba_classifier.py`),
+     `--pipeline continuous_cwt_mamba`. **Not fully working**: fixed one
+     real training-time CUDA OOM (see the WIP note), but a real `--smoke`
+     run on CUDA hits a second, unresolved "illegal memory access" during
+     validation -- next diagnostic step (rerun `--device cpu` for a clean
+     Python traceback) was queued when this session paused for GPU
+     contention. **Pick this up before trusting any real run.**
+  4. A real GPU LOSO run to compare against the `_DenseEdgeMambaTemporal`
+     (windowed) baseline above -- blocked on 3's bug.
