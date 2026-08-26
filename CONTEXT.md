@@ -575,6 +575,48 @@ read off a continuous timeline). See "Open threads" below.
 
 ## Open threads
 
+- **`channel_subset_k` marks dead edges by zeroing, not an explicit
+  liveness bit -- ambiguous in principle (2026-08-26)**:
+  `_compute_live_dense_edge_scattered`/`_scatter_live_dense_edge`
+  (`Epilepsy/pipelines/cwt_gnn_classifiers.py:6934-6937`) compute the real
+  4-channel `[coh, sinφ, cosφ, significance]` stack only for the selected
+  top-k clique's edges, then scatter into a full-`E` zeros tensor -- a
+  dropped edge is `[0,0,0,0]` for every timestep, not flagged by a
+  dedicated 5th "is this edge live" channel. This is implicit, not
+  architecturally guaranteed unique: a genuinely live edge sitting exactly
+  at the fixed coherence threshold (`significance=0`) with `phase=0` would
+  look identical to a masked-out one. Never actually confused in practice
+  as far as anyone's checked, but worth either (a) adding an explicit
+  live/dead channel so the model doesn't have to infer it from an
+  all-zero pattern, or (b) skipping compute for dead edges outright
+  instead of computing zeros for them, per the next bullet.
+- **Given (a), Mamba doesn't need to run on dead edges at all**: if
+  liveness were explicit (or even just passed down as the same boolean
+  mask `_scatter_live_dense_edge` already has as `live`), the per-edge
+  Mamba call in `_DenseEdgeMambaTemporal.forward` could skip the
+  known-dead rows of the `[B*E, T, C_in]` batch entirely instead of
+  scanning all-zero input through the SSM and getting a zero (or
+  near-zero, non-trivial-bias-dependent) output back out. Combined with
+  the fact that edges are already the undirected (i<j) 253-edge topology
+  (not 506 -- see the 2026-08-09 note in `SparseEvidenceGNNCore.__init__`)
+  and `channel_subset_k` typically selecting well under the full channel
+  mesh, this could be a real compute saving proportional to how sparse
+  the selected clique is relative to the full 253-edge mesh -- untested,
+  and would need `mamba_chunk_size`'s row-grouping (see that class's
+  docstring) reworked to skip rows rather than just batch them.
+- **Explore spatiotemporal state-space models (2026-08-26)**: current
+  `dense_edge_mamba` runs one shared Mamba per edge, independently -- time
+  (per-edge Mamba) and space (the GNN's message-passing/aggregation step)
+  are fully separate stages that only talk to each other at the edge->node
+  handoff (see the diagram at `noshore5.github.io/resources/architecture-
+  diagram-mamba.html`). A graph-aware/spatiotemporal SSM would instead bake
+  the channel-graph topology into the scan itself (e.g. state updates that
+  mix across edges sharing a node at every timestep, not just once at the
+  end), closer to recent graph-Mamba/spatiotemporal-SSM literature. Worth a
+  literature scan for an existing, implementable formulation (vs. building
+  one from scratch) and a rough cost estimate before committing -- this is
+  a genuinely different architecture from the current edge-independent
+  design, not a config flag, so scope it before starting.
 - **Significance channel may be redundant in the canonical config, untested
   (2026-08-26)**: `_build_dense_edge_input`'s 4th dense-edge channel is
   `significance = (coh - threshold) / threshold`
