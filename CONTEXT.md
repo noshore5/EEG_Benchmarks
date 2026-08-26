@@ -604,7 +604,7 @@ read off a continuous timeline). See "Open threads" below.
   the selected clique is relative to the full 253-edge mesh -- untested,
   and would need `mamba_chunk_size`'s row-grouping (see that class's
   docstring) reworked to skip rows rather than just batch them.
-- **Aggregate-then-Mamba: IN PROGRESS on branch `graph-state-mamba`
+- **Aggregate-then-Mamba: built + CLI-wired on branch `graph-state-mamba`
   (2026-08-26, not yet merged, not yet pushed)**: turned out this ordering
   already existed, half-built -- `event_mode="temporal_graph"` (2026-08-11)
   is exactly "aggregate every edge's per-timestep message to its
@@ -617,18 +617,28 @@ read off a continuous timeline). See "Open threads" below.
   `_DenseEdgeMambaTemporal` UNCHANGED with the node axis (`n_channels`,
   ~23) in the slot its usual caller puts the edge axis (`E`, 253) in --
   its `[B, C_in, X, T] -> [B, out_channels, X, 1]` contract doesn't care
-  what `X` indexes. Smoke-tested successfully, CPU, both `"gru"` (still
-  bit-identical to before) and `"mamba"` paths fit/predict cleanly; the
-  `event_mode != "temporal_graph"` guard raises as expected. Full writeup:
+  what `X` indexes. Then wired `--pipeline temporal_graph_gru`/
+  `temporal_graph_mamba` into `run_pipelines.py`, reusing the existing
+  dense-family dispatch (`_dense_family_params`/`_dense_family_result_dir`/
+  `leave_one_seizure_out_prediction`/`detection`) rather than a parallel
+  path, since both still just build a classifier from a plain param dict.
+  **Verified twice**: the synthetic smoke test
+  (`scripts/temporal_graph_mamba_smoke.py`) AND real `--pipeline
+  temporal_graph_gru`/`temporal_graph_mamba --smoke --max-folds 1` CLI runs
+  against real chb01 data (CPU, disk-cache-reused CWT/dense-edge features)
+  -- both exit 0, write CSVs to their own `results/temporal_graph_gru/`/
+  `results/temporal_graph_mamba/` subdirectories. One real pre-existing bug
+  caught by that CLI run (not by the earlier code-reading pass alone): a
+  placeholder `dense_edge_temporal_mode="rnn"` value tripped an unrelated
+  validation that rejects "rnn"/"mamba" for any `event_mode != "dense"` --
+  fixed by using `"conv"` as the placeholder instead. Full writeup:
   `Session_notes/2026_08_26/temporal_graph_mamba_aggregate_then_mamba.md`.
-  **Not done**: no `--pipeline` CLI wiring (several `run_pipelines.py`
-  dispatch sites gate on a fixed pipeline-name set -- deliberately not
-  touched yet, to avoid risking working pipelines' dispatch logic without
-  room to verify each site), no real-scale run, no memory/speed
-  characterization at real batch sizes. See that session note's "Next
-  steps" for the concrete order (CLI wiring -> smoke run via CLI -> real
-  chb01 LOSO comparison, gru vs mamba, and separately vs `dense_edge_mamba`
-  itself -- the actual open question this branch exists to answer).
+  **Not done**: no real-scale LOSO run (only tiny synthetic + 1-fold/
+  2-epoch smoke so far), no memory/speed characterization of
+  `temporal_graph_mamba_chunk_size` at real batch sizes or on GPU, not
+  pushed to `origin`. Next: a real chb01 LOSO run, `temporal_graph_mode=
+  "gru"` vs `"mamba"`, and separately vs `dense_edge_mamba`'s own
+  numbers -- the actual open question this branch exists to answer.
 - **Explore spatiotemporal state-space models (2026-08-26)**: current
   `dense_edge_mamba` runs one shared Mamba per edge, independently -- time
   (per-edge Mamba) and space (the GNN's message-passing/aggregation step)

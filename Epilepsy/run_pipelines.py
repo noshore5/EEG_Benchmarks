@@ -367,6 +367,63 @@ DENSE_EDGE_MAMBA_PARAMS: dict[str, object] = dict(
     mamba_use_cuda_kernel=None,  # None = auto (CUDA + mamba-ssm importable)
 )
 
+# 2026-08-26: temporal_graph_gru / temporal_graph_mamba -- event_mode=
+# "temporal_graph" (2026-08-11, this classifier; never wired to a --pipeline
+# flag until now), the "aggregate-then-temporal" mirror image of the
+# dense-family pipelines above (which run their per-edge temporal model
+# FIRST and aggregate once at the end). Here, every edge's per-timestep
+# message is mean-aggregated to its destination node FIRST
+# (temporal_edge_proj + sparse_message_mlp + a per-timestep mean scatter),
+# producing one graph-state sequence per node, and a single shared temporal
+# model (GRU or Mamba, see temporal_graph_mode) then walks forward through
+# THAT sequence -- see _temporal_graph_node_states's docstring in
+# cwt_gnn_classifiers.py. event_mode="temporal_graph" REQUIRES
+# event_aggregation="mean" (enforced in the classifier's own __init__) and
+# has no dense_edge_conv (dense_edge_temporal_mode is therefore inert here,
+# included only because leave_one_seizure_out_prediction/detection's own
+# print statements read clf_params['dense_edge_temporal_mode']
+# unconditionally -- "conv" is the placeholder used, never actually read
+# ("rnn"/"mamba" are rejected outright for event_mode != "dense" by a
+# pre-existing check, discovered the hard way via this pipeline's own
+# --smoke run -- see the 2026-08-26 session note).
+# Copied from DENSE_EDGE_GRU_PARAMS's numbers (batch_size, learning_rate,
+# every _SHARED_ARCH_PARAMS knob) for the same "isolated ablation, not a
+# separately-tuned config" reasoning DENSE_EDGE_MAMBA_PARAMS above uses.
+TEMPORAL_GRAPH_GRU_PARAMS: dict[str, object] = dict(
+    _SHARED_ARCH_PARAMS,
+    batch_size=736,
+    learning_rate=2e-3,
+    # inert placeholder (see comment above) -- MUST be "conv", not "rnn"/
+    # "mamba": SparseEvidenceGNNClassifier.__init__ rejects "rnn"/"mamba"
+    # outright for any event_mode != "dense" (a pre-existing check, unrelated
+    # to temporal_graph_mode), so "conv" is the only value here that passes
+    # validation while genuinely never being read.
+    dense_edge_temporal_mode="conv",
+    event_mode="temporal_graph",
+    event_aggregation="mean",
+    temporal_graph_mode="gru",
+    temporal_graph_edge_dim=8,
+)
+
+# temporal_graph_mamba_* are _DenseEdgeMambaTemporal's own hyperparameters,
+# reused unchanged (see temporal_graph_mode's docstring in
+# cwt_gnn_classifiers.py for why the SAME class works here with the node
+# axis, ~23, in the slot its usual caller puts the edge axis, 253, in) --
+# listed explicitly even though they equal the classifier's own defaults,
+# same "visible/tunable at the params-dict level" precedent
+# DENSE_EDGE_MAMBA_PARAMS sets above.
+TEMPORAL_GRAPH_MAMBA_PARAMS: dict[str, object] = dict(
+    TEMPORAL_GRAPH_GRU_PARAMS,
+    temporal_graph_mode="mamba",
+    temporal_graph_mamba_d_state=16,
+    temporal_graph_mamba_d_conv=4,
+    temporal_graph_mamba_expand=2,
+    temporal_graph_mamba_n_layers=1,
+    temporal_graph_mamba_dropout=0.0,
+    temporal_graph_mamba_chunk_size=128,
+    temporal_graph_mamba_use_cuda_kernel=None,  # None = auto (CUDA + mamba-ssm importable)
+)
+
 # label_mode="prediction" training dynamics -- its OWN block (not a copy
 # reused by reference) so future tuning of one mode can't silently move the
 # other. Currently starts as the same numbers as the detection dicts --
@@ -422,6 +479,22 @@ PREDICTION_MAMBA_PARAMS: dict[str, object] = dict(
     validation_split=0.2,
 )
 
+# 2026-08-26: prediction-mode temporal_graph_gru / temporal_graph_mamba --
+# same "exact copy of the detection dict's numbers, batch_size/
+# validation_split swapped to the prediction convention" reasoning as
+# PREDICTION_MAMBA_PARAMS above.
+PREDICTION_TEMPORAL_GRAPH_GRU_PARAMS: dict[str, object] = dict(
+    TEMPORAL_GRAPH_GRU_PARAMS,
+    batch_size=32,
+    validation_split=0.2,
+)
+
+PREDICTION_TEMPORAL_GRAPH_MAMBA_PARAMS: dict[str, object] = dict(
+    TEMPORAL_GRAPH_MAMBA_PARAMS,
+    batch_size=32,
+    validation_split=0.2,
+)
+
 # --pipeline=continuous_cwt_mamba -- the continuous-cwt-mamba paradigm's
 # own params (ContinuousCWTMambaClassifier, Epilepsy/pipelines/
 # continuous_cwt_mamba_classifier.py): Mamba's SSM state carried across an
@@ -458,14 +531,24 @@ CONTINUOUS_CWT_MAMBA_PARAMS: dict[str, object] = dict(
 
 def _dense_family_params(pipeline: str, label_mode: str) -> dict:
     """Param dict for --pipeline dense_edge / dense_edge_gru / dense_edge_mamba
-    × --label-mode.
+    / temporal_graph_gru / temporal_graph_mamba × --label-mode.
 
     Returns the module-level dict itself (caller must `dict(...)` copy
     before overlaying CLI overrides). Raises on anything that is not one
-    of the dense-family pipelines -- truong_stft_cnn has its own
-    TRUONG_STFT_CNN_PARAMS path in main(). The CWT node encoder is a
-    flag on these dicts (cwt_encoder, default False),
-    not a third pipeline.
+    of these pipelines -- truong_stft_cnn has its own TRUONG_STFT_CNN_PARAMS
+    path in main(), and dbconformer/slimseiz/cg_mambanet have their own
+    _raw_classifier_family_params. The CWT node encoder is a flag on these
+    dicts (cwt_encoder, default False), not a separate pipeline.
+
+    temporal_graph_gru/temporal_graph_mamba (2026-08-26) share this same
+    dispatch function (and therefore the same leave_one_seizure_out_
+    prediction/detection loops and CLI overrides every dense-family
+    pipeline uses below) even though they are not "dense-family" in the
+    event_mode="dense" sense -- both still build a SparseEvidenceGNNClassifier
+    from a plain param dict via **clf_params, which is agnostic to which
+    event_mode that dict sets. Kept in this function (rather than a
+    parallel one) to avoid duplicating that whole call chain for a config
+    that only differs by which dict gets returned here.
     """
     if pipeline == "dense_edge":
         return PREDICTION_DENSE_EDGE_PARAMS if label_mode == "prediction" else DENSE_EDGE_PARAMS
@@ -473,6 +556,16 @@ def _dense_family_params(pipeline: str, label_mode: str) -> dict:
         return PREDICTION_GRU_PARAMS if label_mode == "prediction" else DENSE_EDGE_GRU_PARAMS
     if pipeline == "dense_edge_mamba":
         return PREDICTION_MAMBA_PARAMS if label_mode == "prediction" else DENSE_EDGE_MAMBA_PARAMS
+    if pipeline == "temporal_graph_gru":
+        return (
+            PREDICTION_TEMPORAL_GRAPH_GRU_PARAMS if label_mode == "prediction"
+            else TEMPORAL_GRAPH_GRU_PARAMS
+        )
+    if pipeline == "temporal_graph_mamba":
+        return (
+            PREDICTION_TEMPORAL_GRAPH_MAMBA_PARAMS if label_mode == "prediction"
+            else TEMPORAL_GRAPH_MAMBA_PARAMS
+        )
     raise ValueError(f"not a dense-family pipeline: {pipeline!r}")
 
 
@@ -490,7 +583,11 @@ def _dense_family_result_dir(
     results/dense_edge/ so conv vs GRU cannot be pooled by a glob.
     dense_edge_mamba (2026-08-24) goes under results/dense_edge_mamba/ for
     the same reason -- a third temporal backend's numbers must never land
-    next to conv's or GRU's by accident.
+    next to conv's or GRU's by accident. temporal_graph_gru/
+    temporal_graph_mamba (2026-08-26) go under results/temporal_graph_gru/
+    and results/temporal_graph_mamba/ respectively -- a different event_mode
+    entirely (aggregate-then-temporal, not temporal-then-aggregate), so
+    these numbers must never be mistaken for dense-family results either.
     cwt_encoder=True nests under cwt_encoder/ inside that
     pipeline's root so CWT-node runs cannot be globbed with WCT-only CSVs.
     node_only / zero_node_embed nest one level deeper so those ablations
@@ -502,6 +599,8 @@ def _dense_family_result_dir(
         root = output_dir / "dense_edge_mamba"
     elif pipeline == "dense_edge_gru":
         root = output_dir
+    elif pipeline in ("temporal_graph_gru", "temporal_graph_mamba"):
+        root = output_dir / pipeline
     else:
         raise ValueError(f"not a dense-family pipeline: {pipeline!r}")
     if cwt_encoder:
@@ -2137,6 +2236,7 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         choices=[
             "dense_edge_gru", "dense_edge", "dense_edge_mamba", "continuous_cwt_mamba",
             "truong_stft_cnn", "dbconformer", "slimseiz", "cg_mambanet",
+            "temporal_graph_gru", "temporal_graph_mamba",
         ],
         default="dense_edge_gru",
         help=(
@@ -2152,6 +2252,23 @@ def _build_argument_parser() -> argparse.ArgumentParser:
             "starts as an exact copy of DENSE_EDGE_GRU_PARAMS so this is an isolated "
             "temporal-backend ablation, not a separately-tuned model. Requires the "
             "'mambapy' package (see _DenseEdgeMambaTemporal's docstring). "
+            "'temporal_graph_gru' (2026-08-26): the SAME classifier with "
+            "event_mode='temporal_graph' instead of 'dense' -- the mirror-image "
+            "ordering: mean-aggregate every edge's per-timestep message to its "
+            "destination node FIRST, producing one graph-state sequence per node, "
+            "then walk a per-node nn.GRU forward through THAT sequence (see "
+            "_temporal_graph_node_states's docstring). dense_edge_gru/dense_edge_mamba "
+            "run their per-edge temporal model first and aggregate once at the end; "
+            "this does the opposite. Results go under results/temporal_graph_gru/. "
+            "'temporal_graph_mamba' (2026-08-26): same event_mode='temporal_graph' "
+            "ordering as temporal_graph_gru, but the per-node temporal model is "
+            "_DenseEdgeMambaTemporal (reused unchanged, with the node axis in the "
+            "slot its usual per-edge caller uses) instead of nn.GRU -- the "
+            "aggregate-then-Mamba counterpart to dense_edge_mamba's Mamba-then- "
+            "aggregate. TEMPORAL_GRAPH_MAMBA_PARAMS starts as an exact copy of "
+            "TEMPORAL_GRAPH_GRU_PARAMS's numbers, same isolated-ablation reasoning "
+            "as dense_edge_mamba. Requires 'mambapy'. Results go under "
+            "results/temporal_graph_mamba/. "
             "'continuous_cwt_mamba' (2026-08-26): ContinuousCWTMambaClassifier -- "
             "Mamba's SSM state carried across an ENTIRE recording, reset only between "
             "recordings, never between a recording's own classification windows (see "
@@ -2629,7 +2746,10 @@ def main(args: argparse.Namespace) -> None:
     args.disable_disk_cache = resolve_disable_disk_cache(
         args.device, args.disable_disk_cache,
     )
-    if cache_flag_explicit is None and pipeline in ("dense_edge", "dense_edge_gru", "dense_edge_mamba"):
+    if cache_flag_explicit is None and pipeline in (
+        "dense_edge", "dense_edge_gru", "dense_edge_mamba",
+        "temporal_graph_gru", "temporal_graph_mamba",
+    ):
         print(
             f"  disk cache: {'disabled' if args.disable_disk_cache else 'enabled'} "
             f"(default for device={args.device!r}; "

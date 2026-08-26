@@ -54,42 +54,88 @@ right submodule gets built, the other stays `None`), and checks the
 `temporal_graph_mode="mamba"` combination. **Ran successfully, CPU, this
 session** -- both backends fit/predict cleanly; guard raises as expected.
 
+## CLI wiring (completed, same session, after the above)
+
+Added `--pipeline temporal_graph_gru` / `temporal_graph_mamba` to
+`run_pipelines.py`:
+
+- New param dicts `TEMPORAL_GRAPH_GRU_PARAMS`/`TEMPORAL_GRAPH_MAMBA_PARAMS`
+  (detection) and `PREDICTION_TEMPORAL_GRAPH_GRU_PARAMS`/
+  `PREDICTION_TEMPORAL_GRAPH_MAMBA_PARAMS` (prediction) -- exact copies of
+  `DENSE_EDGE_GRU_PARAMS`'s numbers with `event_mode="temporal_graph"`,
+  `event_aggregation="mean"` (required), `temporal_graph_mode="gru"`/
+  `"mamba"`, same "isolated ablation, not a separately-tuned config"
+  reasoning `DENSE_EDGE_MAMBA_PARAMS` already uses.
+- `_dense_family_params`/`_dense_family_result_dir` extended with branches
+  for both new pipeline names -- despite the name, this was the right place
+  to add them rather than a parallel dispatch path: both still build a
+  `SparseEvidenceGNNClassifier`/`StreamingSparseEvidenceGNNClassifier` from
+  a plain `**clf_params` dict via the SAME `leave_one_seizure_out_
+  prediction`/`leave_one_seizure_out_detection` loops every dense-family
+  pipeline already uses, so reusing that dispatch avoided duplicating the
+  whole call chain for a config that only differs by which dict comes back.
+- Results land under `results/temporal_graph_gru/` and
+  `results/temporal_graph_mamba/` -- own subdirectories, never pooled with
+  dense-family CSVs (different `event_mode` entirely).
+- Added both new names to `--pipeline`'s argparse `choices` + help text,
+  and to the `cache_flag_explicit` print-message pipeline tuple (cosmetic
+  only -- the dense-edge disk cache itself is generic/config-hash-keyed and
+  needed no changes; `event_mode="temporal_graph"` reuses the exact same
+  non-trainable `_build_dense_edge_input` precompute `event_mode="dense"`
+  does, confirmed by the smoke run below: `[dense-edge cache] N/N trials
+  reused from disk`).
+
+**One real bug found and fixed via this session's own `--smoke` run**: the
+first `temporal_graph_*` params dicts used `dense_edge_temporal_mode="rnn"`
+as an "inert, never-read" placeholder (needed only because
+`leave_one_seizure_out_prediction`/`detection`'s print statements read
+`clf_params['dense_edge_temporal_mode']` unconditionally, regardless of
+`event_mode`) -- but a PRE-EXISTING, unrelated validation in
+`SparseEvidenceGNNClassifier.__init__` rejects `dense_edge_temporal_mode`
+in `("rnn", "mamba")` outright for any `event_mode != "dense"`. Fixed by
+using `"conv"` as the placeholder instead (the one value that check does
+not restrict). Caught immediately by actually running `--smoke` rather
+than trusting the code-reading pass alone -- exactly the reason this
+repo's convention is "smoke-test before trusting a new pipeline wire-up."
+
+**Verified, CPU, this session** (`--label-mode prediction --smoke
+--max-folds 1`, real chb01 windows, disk-cache-reused CWT/dense-edge
+features):
+
+- `--pipeline temporal_graph_gru`: exit 0, wrote
+  `results/temporal_graph_gru/prediction/*.csv`.
+- `--pipeline temporal_graph_mamba`: exit 0, wrote
+  `results/temporal_graph_mamba/prediction/*.csv`,
+  `_DenseEdgeMambaTemporal use_cuda_kernel=False (mambapy pure-PyTorch
+  pscan)` printed as expected (no CUDA on this machine).
+
+Both smoke runs' 0/1 hit rate and precision/recall=0 are expected --
+`--smoke` caps epochs at 2 and one fold, verifying wiring only, not model
+quality (same as every other pipeline's `--smoke` mode).
+
 ## What's NOT done yet
 
-- **No `--pipeline` CLI wiring.** `event_mode="temporal_graph"` (with either
-  temporal backend) is usable today only by constructing
-  `SparseEvidenceGNNClassifier` directly, the way this smoke test does --
-  same state it was already in before this session, now just with a second
-  temporal-backend choice available once wired. `run_pipelines.py`'s
-  dense-family helpers (`_dense_family_param_dict`,
-  `_dense_family_result_dir`, the pipeline-name validation list around line
-  2138, the cache-flag check around line 2632) all gate on a fixed set of
-  pipeline-name strings (`"dense_edge"`/`"dense_edge_gru"`/
-  `"dense_edge_mamba"`) -- adding a `temporal_graph`/`temporal_graph_mamba`
-  pipeline needs a new branch in each of those, not just a new params dict,
-  and touches several dispatch points in a ~2600-line file. Deliberately
-  NOT attempted this session to avoid touching working pipelines'
-  dispatch logic without room to verify each site carefully.
-- **No real-scale run.** Only the tiny synthetic smoke test above. No
-  chb01 LOSO run, no comparison against `temporal_graph_mode="gru"` or
-  against `dense_edge_mamba`'s numbers.
-- **No memory/speed characterization.** `temporal_graph_mamba_chunk_size`
-  defaults to 128 (copied from `_DenseEdgeMambaTemporal`'s own default),
-  but the node axis here (`n_channels`, ~23) is far smaller than the edge
-  axis (`E`, 253) that default was tuned for -- chunking is almost
-  certainly unnecessary at this scale, untested at real batch sizes.
+- **No real-scale run.** Only the tiny synthetic smoke test and the
+  1-fold/2-epoch CLI `--smoke` runs above. No real chb01 LOSO run (all
+  seizures, real epoch budget), no comparison against `dense_edge_mamba`'s
+  numbers or between `temporal_graph_mode="gru"` vs `"mamba"` at real scale.
+- **No memory/speed characterization at scale.** `temporal_graph_mamba_
+  chunk_size` defaults to 128 (copied from `_DenseEdgeMambaTemporal`'s own
+  default), but the node axis here (`n_channels`, ~23) is far smaller than
+  the edge axis (`E`, 253) that default was tuned for -- chunking is
+  almost certainly unnecessary at this scale, untested at real batch sizes
+  or on GPU.
+- **Not pushed.** Committed locally on branch `graph-state-mamba` only.
 
 ## Next steps, in order
 
-1. CLI wiring: add `--pipeline temporal_graph_gru`/`temporal_graph_mamba`
-   (or a single `--pipeline temporal_graph` plus a `--temporal-graph-mode`
-   flag, following whichever naming convention reads more consistently
-   with the existing `dense_edge`/`dense_edge_gru`/`dense_edge_mamba`
-   trio) to `run_pipelines.py`, touching every dispatch site listed above.
-2. Smoke run via that CLI path (`--smoke --max-folds 1`) before any real
-   run, same discipline every other pipeline addition in this repo follows.
-3. Real chb01 LOSO run, `temporal_graph_mode="gru"` vs `"mamba"`, to see
-   whether the aggregate-then-Mamba ordering changes anything relative to
-   its GRU counterpart -- and separately, how "aggregate-then-X" (either
-   backend) compares to `dense_edge_mamba`'s "X-then-aggregate" ordering,
-   the actual open question this branch exists to answer.
+1. Real chb01 LOSO run (`--pipeline temporal_graph_gru` then
+   `temporal_graph_mamba`, `--label-mode prediction`, full epoch budget,
+   no `--smoke`/`--max-folds`) to see whether the aggregate-then-Mamba
+   ordering changes anything relative to its GRU counterpart -- and
+   separately, how "aggregate-then-X" (either backend) compares to
+   `dense_edge_mamba`'s "X-then-aggregate" numbers, the actual open
+   question this branch exists to answer.
+2. If that shows anything interesting, revisit `temporal_graph_mamba_
+   chunk_size`/GPU behavior at real batch sizes before trusting wall-clock
+   comparisons against `dense_edge_mamba`.
