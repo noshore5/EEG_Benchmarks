@@ -1,0 +1,327 @@
+[14:19:50.467] Detailed log file: C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\debug_one_epoch_20260822-141950.log
+
+==========================================================================================
+ONE-EPOCH DEBUG RUN
+==========================================================================================
+[14:19:50.467] Started: 2026-08-22T14:19:50.467986
+[14:19:50.467] Repository root: C:\Users\User\Documents\noshore5\EEG_Benchmarks
+[14:19:50.467] Script directory: C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy
+[14:19:50.467] Python executable: C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Scripts\python.exe
+
+==========================================================================================
+TORCH ENVIRONMENT
+==========================================================================================
+[14:19:50.467] torch version: 2.8.0+cu128
+[14:19:50.467] python: 3.11.9
+[14:19:50.482] platform: Windows-10-10.0.26200-SP0
+[14:19:50.482] CPU count: 12
+[14:19:50.482] MPS built: False
+[14:19:50.482] MPS available: False
+[14:19:50.482] CUDA built: True
+[14:19:50.499] CUDA available: True
+[14:19:50.499] torch threads: 6
+[14:19:50.499] torch interop threads: 6
+[14:19:50.500] Could not read process memory: No module named 'resource'
+[14:19:50.500] TORCH CUDA: available
+[14:19:50.500] CUDA allocated: 0.0 MB
+[14:19:50.500] CUDA reserved: 0.0 MB
+
+==========================================================================================
+RESOLVED CONFIGURATION
+==========================================================================================
+[14:19:50.500] pipeline                = truong_stft_cnn
+[14:19:50.500] label_mode              = prediction
+[14:19:50.500] subjects                = [1]
+[14:19:50.500] epochs                  = 1  <-- FORCED
+[14:19:50.500] window_length           = 30.0
+[14:19:50.500] step_size               = 30.0
+[14:19:50.500] sph                     = 300.0
+[14:19:50.500] sop                     = 900.0
+[14:19:50.500] postictal_buffer        = 1800.0
+[14:19:50.500] max_interictal_records  = 5
+[14:19:50.500] negative:positive       = 5.0
+[14:19:50.500] device                  = cuda
+[14:19:50.500] seed                    = 42
+
+==========================================================================================
+DATASET CONSTRUCTION
+==========================================================================================
+[14:19:50.500] START: BUILD WINDOWED DATASET
+[14:19:54.124] END:   BUILD WINDOWED DATASET -- 3.624 sec
+[14:19:54.124] Dataset construction total: 3.624 sec
+[14:19:54.124] X: shape=(773, 23, 7680), dtype=float64, ndim=3, n=136542720
+[14:19:55.819] X: min=-1386.47, max=1666.23, mean=0.193082, std=41.661
+[14:19:56.000] X: nan=0
+[14:19:56.000] X: contiguous=True
+[14:19:56.000] X: approx memory=1041.74 MB
+[14:19:56.000] y: shape=(773,), dtype=int64
+[14:19:56.000]   label=np.int64(0): 600 windows (77.62%)
+[14:19:56.000]   label=np.int64(1): 173 windows (22.38%)
+[14:19:56.000] metadata shape=(773, 9)
+[14:19:56.000] metadata columns=['subject', 'session', 'run', 'window_start', 'window_end', 'run_start_time', 'seizure_id', 'seizure_onset', 'seizure_offset']
+[14:19:56.001]   subject: dtype=int64, unique=1
+[14:19:56.001]   session: dtype=object, unique=1
+[14:19:56.001]   run: dtype=object, unique=11
+[14:19:56.002]   window_start: dtype=float64, unique=120
+[14:19:56.002]   window_end: dtype=float64, unique=120
+[14:19:56.002]   run_start_time: dtype=object, unique=11
+[14:19:56.002]   seizure_id: dtype=object, unique=7
+[14:19:56.002]   seizure_onset: dtype=float64, unique=7
+[14:19:56.002]   seizure_offset: dtype=float64, unique=7
+[14:19:56.002] subjects: [1]
+[14:19:56.003] runs: 11 unique
+[14:19:56.003] seizure IDs: ['1_02_0', '1_03_0', '1_05_0', '1_06_0', '1_07_0', '1_10_0']
+[14:19:56.003] window_start range: 0.0 -> 3570.0
+
+First metadata rows:
+ subject session run  window_start  window_end            run_start_time seizure_id  seizure_onset  seizure_offset
+       1       0  01           0.0        30.0 2076-11-06T11:42:54+00:00       None            NaN             NaN
+       1       0  01          30.0        60.0 2076-11-06T11:42:54+00:00       None            NaN             NaN
+       1       0  01          60.0        90.0 2076-11-06T11:42:54+00:00       None            NaN             NaN
+       1       0  01          90.0       120.0 2076-11-06T11:42:54+00:00       None            NaN             NaN
+       1       0  01         120.0       150.0 2076-11-06T11:42:54+00:00       None            NaN             NaN
+[14:19:56.006] Could not read process memory: No module named 'resource'
+[14:19:56.006] TORCH CUDA: available
+[14:19:56.006] CUDA allocated: 0.0 MB
+[14:19:56.006] CUDA reserved: 0.0 MB
+
+==========================================================================================
+FOLD DISCOVERY
+==========================================================================================
+[14:19:56.009] Found 6 seizures/folds
+[14:19:56.009] fold 0: subject=1 run=02 seizure_id=1_02_0 onset=2996.0 offset=3036.0
+[14:19:56.009] fold 1: subject=1 run=03 seizure_id=1_03_0 onset=1467.0 offset=1494.0
+[14:19:56.009] fold 2: subject=1 run=05 seizure_id=1_05_0 onset=1732.0 offset=1772.0
+[14:19:56.009] fold 3: subject=1 run=06 seizure_id=1_06_0 onset=1015.0 offset=1066.0
+[14:19:56.009] fold 4: subject=1 run=07 seizure_id=1_07_0 onset=1720.0 offset=1810.0
+[14:19:56.009] fold 5: subject=1 run=10 seizure_id=1_10_0 onset=1862.0 offset=1963.0
+[14:19:56.009] DEBUGGING ONLY FOLD 0
+[14:19:56.009] held-out seizure = {'subject': 1, 'run': '02', 'seizure_id': '1_02_0', 'seizure_onset': 2996.0, 'seizure_offset': 3036.0}
+
+==========================================================================================
+TRAIN / TEST SPLIT
+==========================================================================================
+[14:19:56.009] train windows BEFORE subsampling: 623
+[14:19:56.009] test windows: 150
+[14:19:56.280] X_train: shape=(623, 23, 7680), dtype=float64, ndim=3, n=110046720
+[14:19:57.951] X_train: min=-1386.47, max=1666.23, mean=0.190783, std=42.849
+[14:19:58.163] X_train: nan=0
+[14:19:58.164] X_train: contiguous=True
+[14:19:58.164] X_train: approx memory=839.59 MB
+[14:19:58.164] y_train: shape=(623,), dtype=int64
+[14:19:58.164]   label=np.int64(0): 480 windows (77.05%)
+[14:19:58.164]   label=np.int64(1): 143 windows (22.95%)
+[14:19:58.164] X_test: shape=(150, 23, 7680), dtype=float64, ndim=3, n=26496000
+[14:19:58.571] X_test: min=-882.442, max=1037.95, mean=0.202629, std=36.3133
+[14:19:58.612] X_test: nan=0
+[14:19:58.612] X_test: contiguous=True
+[14:19:58.612] X_test: approx memory=202.15 MB
+[14:19:58.612] y_test: shape=(150,), dtype=int64
+[14:19:58.612]   label=np.int64(0): 120 windows (80.00%)
+[14:19:58.612]   label=np.int64(1): 30 windows (20.00%)
+[14:19:58.612] metadata train rows: 623
+[14:19:58.612] metadata test rows:  150
+
+==========================================================================================
+TRAINING NEGATIVE SUBSAMPLING
+==========================================================================================
+[14:19:58.612] START: SUBSAMPLE TRAINING NEGATIVES
+[14:19:58.612] END:   SUBSAMPLE TRAINING NEGATIVES -- 0.000 sec
+[14:19:58.612] Training windows: 623 -> 623
+[14:19:58.612] y_train after subsampling: shape=(623,), dtype=int64
+[14:19:58.612]   label=np.int64(0): 480 windows (77.05%)
+[14:19:58.612]   label=np.int64(1): 143 windows (22.95%)
+[14:19:58.612] X_train after subsampling: shape=(623, 23, 7680), dtype=float64, ndim=3, n=110046720
+[14:20:00.213] X_train after subsampling: min=-1386.47, max=1666.23, mean=0.190783, std=42.849
+[14:20:00.366] X_train after subsampling: nan=0
+[14:20:00.366] X_train after subsampling: contiguous=True
+[14:20:00.366] X_train after subsampling: approx memory=839.59 MB
+[14:20:00.366] Could not read process memory: No module named 'resource'
+[14:20:00.366] TORCH CUDA: available
+[14:20:00.367] CUDA allocated: 0.0 MB
+[14:20:00.367] CUDA reserved: 0.0 MB
+
+==========================================================================================
+CLASSIFIER CONFIGURATION
+==========================================================================================
+[14:20:00.367] classifier class: TruongSTFTCNNClassifier
+[14:20:00.367]   batch_size = 32
+[14:20:00.367]   device = 'cuda'
+[14:20:00.367]   dropout = 0.5
+[14:20:00.367]   fc1_dim = 256
+[14:20:00.367]   grad_clip_norm = None
+[14:20:00.367]   learning_rate = 0.001
+[14:20:00.367]   notch_halfwidth_hz = 3.0
+[14:20:00.367]   powerline_freq = 60.0
+[14:20:00.367]   sampling_rate = 256
+[14:20:00.367]   seed = 42
+[14:20:00.367]   stft_hop_sec = 0.5
+[14:20:00.367]   stft_window_sec = 1.0
+[14:20:00.367]   use_class_weights = True
+[14:20:00.367]   validation_split = 0.2
+[14:20:00.367]   verbose = 2
+[14:20:00.367]   weight_decay = 0.0
+[14:20:00.367] epochs = 1
+[14:20:00.367] START: CLASSIFIER INITIALIZATION
+[14:20:00.367] END:   CLASSIFIER INITIALIZATION -- 0.000 sec
+[14:20:00.369] classifier object: TruongSTFTCNNClassifier(device='cuda', epochs=1, verbose=2)
+
+==========================================================================================
+TRAINING -- EXACTLY ONE EPOCH
+==========================================================================================
+[14:20:00.370] Could not read process memory: No module named 'resource'
+[14:20:00.370] TORCH CUDA: available
+[14:20:00.370] CUDA allocated: 0.0 MB
+[14:20:00.370] CUDA reserved: 0.0 MB
+[14:20:00.370] START: clf.fit(X_train, y_train)
+[Train] validation split: 125/623 samples.
+[Truong-STFT-CNN] Parameter summary
+[Truong-STFT-CNN] bn0.weight: shape=(1,) params=1 trainable=True
+[Truong-STFT-CNN] bn0.bias: shape=(1,) params=1 trainable=True
+[Truong-STFT-CNN] conv1.weight: shape=(16, 1, 23, 5, 5) params=9200 trainable=True
+[Truong-STFT-CNN] conv1.bias: shape=(16,) params=16 trainable=True
+[Truong-STFT-CNN] bn1.weight: shape=(16,) params=16 trainable=True
+[Truong-STFT-CNN] bn1.bias: shape=(16,) params=16 trainable=True
+[Truong-STFT-CNN] conv2.weight: shape=(32, 16, 3, 3) params=4608 trainable=True
+[Truong-STFT-CNN] conv2.bias: shape=(32,) params=32 trainable=True
+[Truong-STFT-CNN] bn2.weight: shape=(32,) params=32 trainable=True
+[Truong-STFT-CNN] bn2.bias: shape=(32,) params=32 trainable=True
+[Truong-STFT-CNN] conv3.weight: shape=(64, 32, 3, 3) params=18432 trainable=True
+[Truong-STFT-CNN] conv3.bias: shape=(64,) params=64 trainable=True
+[Truong-STFT-CNN] fc1.weight: shape=(256, 640) params=163840 trainable=True
+[Truong-STFT-CNN] fc1.bias: shape=(256,) params=256 trainable=True
+[Truong-STFT-CNN] fc2.weight: shape=(2, 256) params=512 trainable=True
+[Truong-STFT-CNN] fc2.bias: shape=(2,) params=2 trainable=True
+[Truong-STFT-CNN] total_params=197060 trainable_params=197060 non_trainable_params=0
+[Truong-STFT-CNN] Parameter hashes algorithm=blake2b-128 precision=1.0e-05
+[Truong-STFT-CNN] bn0.weight: weight_hash=8d929476a7e81591355a3cd514cfaa24
+[Truong-STFT-CNN] bn0.bias: weight_hash=c98ac44495348a69be142c05ab3195ea
+[Truong-STFT-CNN] conv1.weight: weight_hash=bf95ca6387dd026137ad688f512aa3fb
+[Truong-STFT-CNN] conv1.bias: weight_hash=cc8d744471f2f01fd983736233ea1e4b
+[Truong-STFT-CNN] bn1.weight: weight_hash=430efc00a7dfdc142854eec36b51fe4c
+[Truong-STFT-CNN] bn1.bias: weight_hash=5192a6bd383231c65b58adff6d6b027d
+[Truong-STFT-CNN] conv2.weight: weight_hash=3037e6e4278187e85e1e98d3d33476b0
+[Truong-STFT-CNN] conv2.bias: weight_hash=13cb52225beffdad23518450f314d4d0
+[Truong-STFT-CNN] bn2.weight: weight_hash=e4eff6cc05cf634f82586b81e8dfb0b8
+[Truong-STFT-CNN] bn2.bias: weight_hash=c0f3ceac12d3f05e9c140c6ecacb3bb7
+[Truong-STFT-CNN] conv3.weight: weight_hash=fa008c9070ea57b8c1708622ed205a97
+[Truong-STFT-CNN] conv3.bias: weight_hash=4967968be37863d960ada8ecf4570b11
+[Truong-STFT-CNN] fc1.weight: weight_hash=d713fa113dd492a3b9e15bb8cb19de5d
+[Truong-STFT-CNN] fc1.bias: weight_hash=af0074cdbd45e7fd4b0b1a2cdcf329c5
+[Truong-STFT-CNN] fc2.weight: weight_hash=fa75f4163c4b508a0bf718b28941f79f
+[Truong-STFT-CNN] fc2.bias: weight_hash=54b34cdd1e7e25fbe7e99b129ecd8397
+[Truong-STFT-CNN] weight_model_hash=98044e73b16e45b12b28b422b271960e
+[Truong-STFT-CNN] named_model_hash=c8162db7c8685e28d87f553d82069a1d
+[Train] class weights: [0.45783132 1.5421686 ]
+[Train] start epochs=1 batches/epoch=16 batch_size=32 optimizer_step_batch_size=32 optimizer_step_batch_mode=credit device=cuda
+[Train][Epoch 1/1] loss=0.334705 (improve +0.000000) acc=0.8173 (delta +0.0000) roc_auc=0.9300 (delta n/a) optimizer_steps=16 epoch_time=1.13s val_loss=0.126510 val_acc=0.9600 val_roc_auc=0.9993
+[Train] restored best model from epoch 1 (val_loss=0.126510)
+[14:20:06.487] END:   clf.fit(X_train, y_train) -- 6.117 sec
+[14:20:06.488] TOTAL FIT TIME: 6.117 sec
+[14:20:06.489] Could not read process memory: No module named 'resource'
+[14:20:06.489] TORCH CUDA: available
+[14:20:06.489] CUDA allocated: 17.0 MB
+[14:20:06.489] CUDA reserved: 214.0 MB
+
+==========================================================================================
+POST-FIT CLASSIFIER STATE
+==========================================================================================
+[14:20:06.490] classes_: array([0, 1])
+[14:20:06.490] model_: TruongCNNCore(
+  (bn0): BatchNorm3d(1, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+  (conv1): Conv3d(1, 16, kernel_size=(23, 5, 5), stride=(1, 2, 2))
+  (pool1): MaxPool2d(kernel_size=2, stride=2, padding=0, dilation=1, ceil_mode=False)
+  (bn1): BatchNorm2d(16, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+  (conv2): Conv2d(16, 32, kernel_size=(3, 3), stride=(1, 1))
+  (pool2): MaxPool2d(kernel_size=2, stride=2, padding=0, dilation=1, ceil_mode=False)
+  (bn2): BatchNorm2d(32, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+  (conv3): Conv2d(32, 64, kernel_size=(3, 3), stride=(1, 1))
+  (pool3): MaxPool2d(kernel_size=2, stride=2, padding=0, dilation=1, ceil_mode=False)
+  (dropout1): Dropout(p=0.5, inplace=False)
+  (fc1): Linear(in_features=640, out_features=256, bias=True)
+  (dropout2): Dropout(p=0.5, inplace=False)
+  (fc2): Linear(in_features=256, out_features=2, bias=True)
+)
+[14:20:06.490] device: 'cuda'
+[14:20:06.490] epochs: 1
+[14:20:06.490] batch_size: 32
+
+==========================================================================================
+TEST PREDICTION
+==========================================================================================
+[14:20:06.490] Calling predict_proba() ONCE.
+[14:20:06.490] This is intentionally kept separate from predict() so CWT/features
+[14:20:06.490] are not recomputed unnecessarily.
+[14:20:06.490] START: clf.predict_proba(X_test)
+[14:20:07.284] END:   clf.predict_proba(X_test) -- 0.794 sec
+[14:20:07.284] proba: shape=(150, 2), dtype=float32, ndim=2, n=300
+[14:20:07.285] proba: min=0.00713879, max=0.992861, mean=0.5, std=0.404355
+[14:20:07.285] proba: nan=0
+[14:20:07.285] proba: contiguous=True
+[14:20:07.285] proba: approx memory=0.00 MB
+[14:20:07.285] y_pred: shape=(150,), dtype=int64
+[14:20:07.285]   label=np.int64(0): 114 windows (76.00%)
+[14:20:07.285]   label=np.int64(1): 36 windows (24.00%)
+[14:20:07.285] probability class-1 range: 0.007139 -> 0.933410
+[14:20:07.285] probability class-1 mean: 0.292286
+[14:20:07.285] probability class-1 std: 0.346926
+[14:20:07.285] predicted positive count: 36/150
+
+==========================================================================================
+ONE-FOLD METRICS
+==========================================================================================
+[14:20:07.286] accuracy:          0.960000
+[14:20:07.288] precision:         0.833333
+[14:20:07.289] recall:            1.000000
+[14:20:07.290] f1:                0.909091
+[14:20:07.292] average_precision: 0.996078
+[14:20:07.293] roc_auc:           0.998889
+[14:20:07.294] confusion matrix:
+[[114   6]
+ [  0  30]]
+
+==========================================================================================
+TIMING SUMMARY
+==========================================================================================
+[14:20:07.295] dataset construction: 3.624 sec
+[14:20:07.295] training / fit:       6.117 sec
+[14:20:07.295] test prediction:      0.795 sec
+[14:20:07.295] dataset + fit + pred: 10.536 sec
+[14:20:07.295] training windows/sec: 101.848
+[14:20:07.295] test windows/sec: 188.763
+[14:20:07.295] Could not read process memory: No module named 'resource'
+[14:20:07.296] TORCH CUDA: available
+[14:20:07.296] CUDA allocated: 17.0 MB
+[14:20:07.296] CUDA reserved: 214.0 MB
+
+==========================================================================================
+DEBUG SUMMARY
+==========================================================================================
+[14:20:07.303] timestamp: 2026-08-22T14:20:07.296706
+[14:20:07.303] pipeline: truong_stft_cnn
+[14:20:07.303] label_mode: prediction
+[14:20:07.303] subjects: [1]
+[14:20:07.303] fold: 0
+[14:20:07.303] epochs: 1
+[14:20:07.303] window_length: 30.0
+[14:20:07.303] step_size: 30.0
+[14:20:07.303] n_total: 773
+[14:20:07.303] n_train: 623
+[14:20:07.303] n_test: 150
+[14:20:07.303] n_train_positive: 143
+[14:20:07.303] n_test_positive: 30
+[14:20:07.303] fit_seconds: 6.116984899970703
+[14:20:07.303] prediction_seconds: 0.7946481999242678
+[14:20:07.303] dataset_seconds: 3.624377700034529
+[14:20:07.303] accuracy: 0.96
+[14:20:07.303] precision: 0.8333333333333334
+[14:20:07.303] recall: 1.0
+[14:20:07.303] f1: 0.9090909090909091
+[14:20:07.303] average_precision: 0.996078431372549
+[14:20:07.303] roc_auc: 0.9988888888888889
+[14:20:07.303] 
+[14:20:07.303] DEBUG RUN FINISHED SUCCESSFULLY.
+[14:20:07.395] Could not read process memory: No module named 'resource'
+[14:20:07.395] TORCH CUDA: available
+[14:20:07.395] CUDA allocated: 17.0 MB
+[14:20:07.395] CUDA reserved: 214.0 MB

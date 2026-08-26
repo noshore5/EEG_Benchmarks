@@ -1,0 +1,129 @@
+[11:21:06.394] Detailed log file: C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\debug_one_epoch_20260822-112106.log
+
+==========================================================================================
+ONE-EPOCH DEBUG RUN
+==========================================================================================
+[11:21:06.395] Started: 2026-08-22T11:21:06.395001
+[11:21:06.395] Repository root: C:\Users\User\Documents\noshore5\EEG_Benchmarks
+[11:21:06.395] Script directory: C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy
+[11:21:06.396] Python executable: C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Scripts\python.exe
+
+==========================================================================================
+TORCH ENVIRONMENT
+==========================================================================================
+[11:21:06.397] torch version: 2.8.0+cu128
+[11:21:06.397] python: 3.11.9
+[11:21:06.411] platform: Windows-10-10.0.26200-SP0
+[11:21:06.411] CPU count: 12
+[11:21:06.411] MPS built: False
+[11:21:06.411] MPS available: False
+[11:21:06.411] CUDA built: True
+[11:21:06.506] CUDA available: True
+[11:21:06.506] torch threads: 6
+[11:21:06.508] torch interop threads: 6
+[11:21:06.509] Could not read process memory: No module named 'resource'
+[11:21:06.509] TORCH CUDA: available
+[11:21:06.509] CUDA allocated: 0.0 MB
+[11:21:06.510] CUDA reserved: 0.0 MB
+
+==========================================================================================
+RESOLVED CONFIGURATION
+==========================================================================================
+[11:21:06.510] pipeline                = truong_stft_cnn
+[11:21:06.510] label_mode              = prediction
+[11:21:06.510] subjects                = [1]
+[11:21:06.510] epochs                  = 1  <-- FORCED
+[11:21:06.510] window_length           = 30.0
+[11:21:06.510] step_size               = 30.0
+[11:21:06.510] sph                     = 300.0
+[11:21:06.510] sop                     = 900.0
+[11:21:06.511] postictal_buffer        = 1800.0
+[11:21:06.511] max_interictal_records  = 5
+[11:21:06.511] negative:positive       = 5.0
+[11:21:06.511] device                  = cuda
+[11:21:06.511] seed                    = 42
+
+==========================================================================================
+DATASET CONSTRUCTION
+==========================================================================================
+[11:21:06.511] START: BUILD WINDOWED DATASET
+[11:21:12.148] END:   BUILD WINDOWED DATASET -- 5.638 sec
+[11:21:12.149] Dataset construction total: 5.638 sec
+[11:21:12.149] X: shape=(773, 23, 7680), dtype=float64, ndim=3, n=136542720
+[11:21:13.834] X: min=-1386.47, max=1666.23, mean=0.193082, std=41.661
+[11:21:14.013] X: nan=0
+[11:21:14.013] X: contiguous=True
+[11:21:14.013] X: approx memory=1041.74 MB
+[11:21:14.014] y: shape=(773,), dtype=int64
+[11:21:14.014]   label=np.int64(0): 600 windows (77.62%)
+[11:21:14.014]   label=np.int64(1): 173 windows (22.38%)
+[11:21:14.014] metadata shape=(773, 9)
+[11:21:14.015] metadata columns=['subject', 'session', 'run', 'window_start', 'window_end', 'run_start_time', 'seizure_id', 'seizure_onset', 'seizure_offset']
+[11:21:14.018]   subject: dtype=int64, unique=1
+[11:21:14.021]   session: dtype=object, unique=1
+[11:21:14.022]   run: dtype=object, unique=11
+[11:21:14.024]   window_start: dtype=float64, unique=120
+[11:21:14.024]   window_end: dtype=float64, unique=120
+[11:21:14.024]   run_start_time: dtype=object, unique=11
+[11:21:14.025]   seizure_id: dtype=object, unique=7
+[11:21:14.025]   seizure_onset: dtype=float64, unique=7
+[11:21:14.025]   seizure_offset: dtype=float64, unique=7
+[11:21:14.026] subjects: [1]
+[11:21:14.026] runs: 11 unique
+[11:21:14.026] seizure IDs: ['1_02_0', '1_03_0', '1_05_0', '1_06_0', '1_07_0', '1_10_0']
+[11:21:14.026] window_start range: 0.0 -> 3570.0
+
+First metadata rows:
+ subject session run  window_start  window_end            run_start_time seizure_id  seizure_onset  seizure_offset
+       1       0  01           0.0        30.0 2076-11-06T11:42:54+00:00       None            NaN             NaN
+       1       0  01          30.0        60.0 2076-11-06T11:42:54+00:00       None            NaN             NaN
+       1       0  01          60.0        90.0 2076-11-06T11:42:54+00:00       None            NaN             NaN
+       1       0  01          90.0       120.0 2076-11-06T11:42:54+00:00       None            NaN             NaN
+       1       0  01         120.0       150.0 2076-11-06T11:42:54+00:00       None            NaN             NaN
+[11:21:14.030] Could not read process memory: No module named 'resource'
+[11:21:14.030] TORCH CUDA: available
+[11:21:14.030] CUDA allocated: 0.0 MB
+[11:21:14.031] CUDA reserved: 0.0 MB
+
+==========================================================================================
+FOLD DISCOVERY
+==========================================================================================
+[11:21:14.039] Found 6 seizures/folds
+[11:21:14.040] fold 0: subject=1 run=02 seizure_id=1_02_0 onset=2996.0 offset=3036.0
+[11:21:14.040] fold 1: subject=1 run=03 seizure_id=1_03_0 onset=1467.0 offset=1494.0
+[11:21:14.040] fold 2: subject=1 run=05 seizure_id=1_05_0 onset=1732.0 offset=1772.0
+[11:21:14.040] fold 3: subject=1 run=06 seizure_id=1_06_0 onset=1015.0 offset=1066.0
+[11:21:14.040] fold 4: subject=1 run=07 seizure_id=1_07_0 onset=1720.0 offset=1810.0
+[11:21:14.040] fold 5: subject=1 run=10 seizure_id=1_10_0 onset=1862.0 offset=1963.0
+[11:21:14.040] DEBUGGING ONLY FOLD 0
+[11:21:14.040] held-out seizure = {'subject': 1, 'run': '02', 'seizure_id': '1_02_0', 'seizure_onset': 2996.0, 'seizure_offset': 3036.0}
+
+==========================================================================================
+TRAIN / TEST SPLIT
+==========================================================================================
+[11:21:14.041] train windows BEFORE subsampling: 623
+[11:21:14.041] test windows: 150
+[11:21:14.300] X_train: shape=(623, 23, 7680), dtype=float64, ndim=3, n=110046720
+
+==========================================================================================
+INTERRUPTED
+==========================================================================================
+[11:21:15.102] Run interrupted by user.
+Traceback (most recent call last):
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\pipeline_debug.py", line 1086, in main
+    run_debug(args)
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\pipeline_debug.py", line 599, in run_debug
+    describe_array("X_train", X_train)
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\pipeline_debug.py", line 205, in describe_array
+    f"std={np.nanstd(arr):.6g}"
+           ^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\numpy\lib\_nanfunctions_impl.py", line 2019, in nanstd
+    var = nanvar(a, axis=axis, dtype=dtype, out=out, ddof=ddof,
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\numpy\lib\_nanfunctions_impl.py", line 1824, in nanvar
+    arr, mask = _replace_nan(a, 0)
+                ^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\numpy\lib\_nanfunctions_impl.py", line 109, in _replace_nan
+    a = np.array(a, subok=True, copy=True)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+KeyboardInterrupt

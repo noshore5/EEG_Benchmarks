@@ -1,0 +1,373 @@
+[15:27:56.265] Detailed log file: C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\debug_one_epoch_20260822-152756.log
+
+==========================================================================================
+ONE-EPOCH DEBUG RUN
+==========================================================================================
+[15:27:56.265] Started: 2026-08-22T15:27:56.265582
+[15:27:56.265] Repository root: C:\Users\User\Documents\noshore5\EEG_Benchmarks
+[15:27:56.265] Script directory: C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy
+[15:27:56.265] Python executable: C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Scripts\python.exe
+
+==========================================================================================
+TORCH ENVIRONMENT
+==========================================================================================
+[15:27:56.265] torch version: 2.8.0+cu128
+[15:27:56.265] python: 3.11.9
+[15:27:56.279] platform: Windows-10-10.0.26200-SP0
+[15:27:56.279] CPU count: 12
+[15:27:56.279] MPS built: False
+[15:27:56.280] MPS available: False
+[15:27:56.280] CUDA built: True
+[15:27:56.394] CUDA available: True
+[15:27:56.394] torch threads: 6
+[15:27:56.394] torch interop threads: 6
+[15:27:56.395] Could not read process memory: No module named 'resource'
+[15:27:56.395] TORCH CUDA: available
+[15:27:56.395] CUDA allocated: 0.0 MB
+[15:27:56.396] CUDA reserved: 0.0 MB
+
+==========================================================================================
+RESOLVED CONFIGURATION
+==========================================================================================
+[15:27:56.396] pipeline                = dense_edge_gru
+[15:27:56.396] label_mode              = detection
+[15:27:56.396] subjects                = [1]
+[15:27:56.396] epochs                  = 1  <-- FORCED
+[15:27:56.396] window_length           = 4.0
+[15:27:56.396] step_size               = 8.0
+[15:27:56.396] sph                     = 300.0
+[15:27:56.396] sop                     = 900.0
+[15:27:56.396] postictal_buffer        = 1800.0
+[15:27:56.396] max_interictal_records  = None
+[15:27:56.396] negative:positive       = None
+[15:27:56.396] device                  = cuda
+[15:27:56.396] seed                    = 42
+
+==========================================================================================
+DATASET CONSTRUCTION
+==========================================================================================
+[15:27:56.396] START: BUILD WINDOWED DATASET
+[15:28:00.358] END:   BUILD WINDOWED DATASET -- 3.962 sec
+[15:28:00.358] Dataset construction total: 3.963 sec
+[15:28:00.358] X: shape=(2991, 23, 1024), dtype=float64, ndim=3, n=70444032
+[15:28:01.458] X: min=-1884.25, max=1218.07, mean=0.185827, std=43.8424
+[15:28:01.553] X: nan=0
+[15:28:01.553] X: contiguous=True
+[15:28:01.553] X: approx memory=537.45 MB
+[15:28:01.553] y: shape=(2991,), dtype=int64
+[15:28:01.555]   label=np.int64(0): 2933 windows (98.06%)
+[15:28:01.555]   label=np.int64(1): 58 windows (1.94%)
+[15:28:01.555] metadata shape=(2991, 6)
+[15:28:01.555] metadata columns=['subject', 'session', 'run', 'window_start', 'window_end', 'run_start_time']
+[15:28:01.557]   subject: dtype=int64, unique=1
+[15:28:01.560]   session: dtype=object, unique=1
+[15:28:01.560]   run: dtype=object, unique=7
+[15:28:01.563]   window_start: dtype=float64, unique=450
+[15:28:01.563]   window_end: dtype=float64, unique=450
+[15:28:01.563]   run_start_time: dtype=object, unique=7
+[15:28:01.563] subjects: [1]
+[15:28:01.563] runs: 7 unique
+[15:28:01.564] window_start range: 0.0 -> 3592.0
+
+First metadata rows:
+ subject session run  window_start  window_end            run_start_time
+       1       0  01           0.0         4.0 2076-11-06T13:43:04+00:00
+       1       0  01           8.0        12.0 2076-11-06T13:43:04+00:00
+       1       0  01          16.0        20.0 2076-11-06T13:43:04+00:00
+       1       0  01          24.0        28.0 2076-11-06T13:43:04+00:00
+       1       0  01          32.0        36.0 2076-11-06T13:43:04+00:00
+[15:28:01.566] Could not read process memory: No module named 'resource'
+[15:28:01.566] TORCH CUDA: available
+[15:28:01.566] CUDA allocated: 0.0 MB
+[15:28:01.566] CUDA reserved: 0.0 MB
+
+==========================================================================================
+FOLD DISCOVERY
+==========================================================================================
+[15:28:01.567] Found 7 recording folds
+[15:28:01.567] fold 0: subject=1 run=01
+[15:28:01.567] fold 1: subject=1 run=02
+[15:28:01.567] fold 2: subject=1 run=03
+[15:28:01.567] fold 3: subject=1 run=04
+[15:28:01.567] fold 4: subject=1 run=05
+[15:28:01.567] fold 5: subject=1 run=06
+[15:28:01.567] fold 6: subject=1 run=07
+[15:28:01.567] DEBUGGING ONLY FOLD 0
+[15:28:01.567] held-out recording = (1, '01')
+
+==========================================================================================
+TRAIN / TEST SPLIT
+==========================================================================================
+[15:28:01.567] train windows BEFORE subsampling: 2541
+[15:28:01.567] test windows: 450
+[15:28:01.703] X_train: shape=(2541, 23, 1024), dtype=float64, ndim=3, n=59845632
+[15:28:02.472] X_train: min=-1884.25, max=1218.07, mean=0.192839, std=44.0302
+[15:28:02.547] X_train: nan=0
+[15:28:02.547] X_train: contiguous=True
+[15:28:02.547] X_train: approx memory=456.59 MB
+[15:28:02.547] y_train: shape=(2541,), dtype=int64
+[15:28:02.548]   label=np.int64(0): 2488 windows (97.91%)
+[15:28:02.548]   label=np.int64(1): 53 windows (2.09%)
+[15:28:02.548] X_test: shape=(450, 23, 1024), dtype=float64, ndim=3, n=10598400
+[15:28:02.674] X_test: min=-554.237, max=595.263, mean=0.146231, std=42.7664
+[15:28:02.690] X_test: nan=0
+[15:28:02.690] X_test: contiguous=True
+[15:28:02.690] X_test: approx memory=80.86 MB
+[15:28:02.690] y_test: shape=(450,), dtype=int64
+[15:28:02.690]   label=np.int64(0): 445 windows (98.89%)
+[15:28:02.690]   label=np.int64(1): 5 windows (1.11%)
+[15:28:02.690] metadata train rows: 2541
+[15:28:02.690] metadata test rows:  450
+[15:28:02.691] Could not read process memory: No module named 'resource'
+[15:28:02.691] TORCH CUDA: available
+[15:28:02.691] CUDA allocated: 0.0 MB
+[15:28:02.691] CUDA reserved: 0.0 MB
+
+==========================================================================================
+CLASSIFIER CONFIGURATION
+==========================================================================================
+[15:28:02.691] classifier class: SparseEvidenceGNNClassifier
+[15:28:02.691]   batch_size = 736
+[15:28:02.691]   channel_embed_dim = 8
+[15:28:02.691]   channel_encoder_dilation = 5
+[15:28:02.691]   channel_subset = None
+[15:28:02.691]   coherence_threshold = 0.9
+[15:28:02.691]   coherence_threshold_mode = 'fixed'
+[15:28:02.691]   coi_enabled = True
+[15:28:02.691]   compile_dense_edge_helper = False
+[15:28:02.691]   cwt_backend = 'torch'
+[15:28:02.691]   cwt_cache = <Epilepsy.pipelines.cwt_window_cache.DiskCWTCache object at 0x0000027C2C43D290>
+[15:28:02.691]   cwt_resample_n_time = None
+[15:28:02.691]   dense_conv_kernel_size = 5
+[15:28:02.691]   dense_conv_pool_size = 4
+[15:28:02.691]   dense_edge_amp_bf16 = False
+[15:28:02.691]   dense_edge_cache_dir = WindowsPath('C:/Users/User/mne_data/dense_edge_cache')
+[15:28:02.691]   dense_edge_temporal_mode = 'rnn'
+[15:28:02.691]   dense_edge_time_downsample = 16
+[15:28:02.691]   device = 'cuda'
+[15:28:02.691]   event_aggregation = 'concat'
+[15:28:02.691]   event_mode = 'dense'
+[15:28:02.691]   feature_ablation = 'zero_channel_embed'
+[15:28:02.691]   grad_clip_norm = 0.1
+[15:28:02.692]   hidden_dim = 8
+[15:28:02.692]   highest = 40.0
+[15:28:02.692]   learning_rate = 0.002
+[15:28:02.692]   lowest = 8.0
+[15:28:02.692]   nfreqs = 8
+[15:28:02.692]   normalize_input = True
+[15:28:02.692]   phase_threshold_deg = 10.0
+[15:28:02.692]   precompute_chunk_size = 4
+[15:28:02.692]   sampling_rate = 256
+[15:28:02.692]   seed = 42
+[15:28:02.692]   smooth_kernel_size = (5, 3)
+[15:28:02.692]   surrogate_count = 100
+[15:28:02.692]   surrogate_percentile = 99.0
+[15:28:02.692]   surrogate_seed = 42
+[15:28:02.692]   time_averaged_graph = False
+[15:28:02.692]   use_class_weights = True
+[15:28:02.692]   validation_split = 0.0
+[15:28:02.692]   verbose = 2
+[15:28:02.692]   weight_decay = 0.0001
+[15:28:02.692] epochs = 1
+[15:28:02.692] START: CLASSIFIER INITIALIZATION
+[15:28:02.692] END:   CLASSIFIER INITIALIZATION -- 0.000 sec
+[15:28:02.694] classifier object: SparseEvidenceGNNClassifier(batch_size=736, channel_encoder_dilation=5,
+                            coherence_threshold=0.9, cwt_backend='torch',
+                            cwt_cache=<Epilepsy.pipelines.cwt_window_cache.DiskCWTCache object at 0x0000027C2C43D290>,
+                            dense_edge_cache_dir=WindowsPath('C:/Users/User/mne_data/dense_edge_cache'),
+                            dense_edge_temporal_mode='rnn',
+                            dense_edge_time_downsample=16, device='cuda',
+                            epochs=1, event_aggregation='concat',
+                            event_mode='dense', learning_rate=0.002, lowest=8.0,
+                            nfreqs=8, phase_threshold_deg=10.0,
+                            precompute_chunk_size=4, surrogate_percentile=99.0,
+                            surrogate_seed=42, validation_split=0.0, verbose=2)
+
+==========================================================================================
+TRAINING -- EXACTLY ONE EPOCH
+==========================================================================================
+[15:28:02.694] Could not read process memory: No module named 'resource'
+[15:28:02.694] TORCH CUDA: available
+[15:28:02.694] CUDA allocated: 0.0 MB
+[15:28:02.694] CUDA reserved: 0.0 MB
+[15:28:02.694] START: clf.fit(X_train, y_train)
+[Train] validation disabled.
+[CWT cache] 58443/58443 windows*channels reused from cache (100.0%)
+[dense-edge cache] 2541/2541 trials reused from disk (100.0%)
+dense-edges[fixed]: 0chunk [00:00, ?chunk/s]                                            [Sparse-Evidence] Parameter summary
+[Sparse-Evidence] channel_encoder.net.0.weight: shape=(8, 1, 9) params=72 trainable=True
+[Sparse-Evidence] channel_encoder.net.0.bias: shape=(8,) params=8 trainable=True
+[Sparse-Evidence] channel_encoder.net.2.weight: shape=(8, 8, 9) params=576 trainable=True
+[Sparse-Evidence] channel_encoder.net.2.bias: shape=(8,) params=8 trainable=True
+[Sparse-Evidence] sparse_message_mlp.0.weight: shape=(8, 24) params=192 trainable=True
+[Sparse-Evidence] sparse_message_mlp.0.bias: shape=(8,) params=8 trainable=True
+[Sparse-Evidence] sparse_message_mlp.2.weight: shape=(8, 8) params=64 trainable=True
+[Sparse-Evidence] sparse_message_mlp.2.bias: shape=(8,) params=8 trainable=True
+[Sparse-Evidence] sparse_classifier.weight: shape=(2, 4048) params=8096 trainable=True
+[Sparse-Evidence] sparse_classifier.bias: shape=(2,) params=2 trainable=True
+[Sparse-Evidence] hop_message_mlp.0.weight: shape=(8, 16) params=128 trainable=True
+[Sparse-Evidence] hop_message_mlp.0.bias: shape=(8,) params=8 trainable=True
+[Sparse-Evidence] hop_message_mlp.2.weight: shape=(8, 8) params=64 trainable=True
+[Sparse-Evidence] hop_message_mlp.2.bias: shape=(8,) params=8 trainable=True
+[Sparse-Evidence] hop_update.weight_ih: shape=(24, 8) params=192 trainable=True
+[Sparse-Evidence] hop_update.weight_hh: shape=(24, 8) params=192 trainable=True
+[Sparse-Evidence] hop_update.bias_ih: shape=(24,) params=24 trainable=True
+[Sparse-Evidence] hop_update.bias_hh: shape=(24,) params=24 trainable=True
+[Sparse-Evidence] hop_message_mlp_freq.0.weight: shape=(8, 16) params=128 trainable=True
+[Sparse-Evidence] hop_message_mlp_freq.0.bias: shape=(8,) params=8 trainable=True
+[Sparse-Evidence] hop_message_mlp_freq.2.weight: shape=(8, 8) params=64 trainable=True
+[Sparse-Evidence] hop_message_mlp_freq.2.bias: shape=(8,) params=8 trainable=True
+[Sparse-Evidence] hop_update_freq.weight_ih: shape=(24, 8) params=192 trainable=True
+[Sparse-Evidence] hop_update_freq.weight_hh: shape=(24, 8) params=192 trainable=True
+[Sparse-Evidence] hop_update_freq.bias_ih: shape=(24,) params=24 trainable=True
+[Sparse-Evidence] hop_update_freq.bias_hh: shape=(24,) params=24 trainable=True
+[Sparse-Evidence] freq_pool.weight: shape=(1, 8) params=8 trainable=True
+[Sparse-Evidence] freq_pool.bias: shape=(1,) params=1 trainable=True
+[Sparse-Evidence] dense_edge_conv.gru.weight_ih_l0: shape=(24, 32) params=768 trainable=True
+[Sparse-Evidence] dense_edge_conv.gru.weight_hh_l0: shape=(24, 8) params=192 trainable=True
+[Sparse-Evidence] dense_edge_conv.gru.bias_ih_l0: shape=(24,) params=24 trainable=True
+[Sparse-Evidence] dense_edge_conv.gru.bias_hh_l0: shape=(24,) params=24 trainable=True
+[Sparse-Evidence] total_params=11331 trainable_params=11331 non_trainable_params=0
+[Sparse-Evidence] Parameter hashes algorithm=blake2b-128 precision=1.0e-05
+[Sparse-Evidence] channel_encoder.net.0.weight: weight_hash=0ddee87be54edb4c517dc30734f2cdc6
+[Sparse-Evidence] channel_encoder.net.0.bias: weight_hash=31997420112b95517309f32f62cf9591
+[Sparse-Evidence] channel_encoder.net.2.weight: weight_hash=f8b82d6e0849b21a0488002d8a8e913d
+[Sparse-Evidence] channel_encoder.net.2.bias: weight_hash=40e4bb5d24fa9a2b14cdaca13075c824
+[Sparse-Evidence] sparse_message_mlp.0.weight: weight_hash=64d0b0797e6c3ff04f1df1323fa90772
+[Sparse-Evidence] sparse_message_mlp.0.bias: weight_hash=896779563e115f455c785ab1f3247225
+[Sparse-Evidence] sparse_message_mlp.2.weight: weight_hash=37ddb9fd12609c54623c3747503d78f1
+[Sparse-Evidence] sparse_message_mlp.2.bias: weight_hash=6f50e20f91b8bba5e1a6929bf025349e
+[Sparse-Evidence] sparse_classifier.weight: weight_hash=e6943eafd9ff167236369b4c88ae9535
+[Sparse-Evidence] sparse_classifier.bias: weight_hash=e15c0f651d0d51512ce1af7410be92d2
+[Sparse-Evidence] hop_message_mlp.0.weight: weight_hash=3d2d297c09c0d2cf2bbb1e454812d80d
+[Sparse-Evidence] hop_message_mlp.0.bias: weight_hash=f3b89bbcef7fc1e678af03c2514f68b7
+[Sparse-Evidence] hop_message_mlp.2.weight: weight_hash=6c0ef7a1fccd0fd4291f705b12d03e46
+[Sparse-Evidence] hop_message_mlp.2.bias: weight_hash=ed9451c35d610c7c7d55426a24402a9a
+[Sparse-Evidence] hop_update.weight_ih: weight_hash=8352e7d0426f833797cb8f166f982a43
+[Sparse-Evidence] hop_update.weight_hh: weight_hash=d0716fd7f0f8cb550c5339f9090d557a
+[Sparse-Evidence] hop_update.bias_ih: weight_hash=b983fddc5dce68f638a96b444fc4ee5b
+[Sparse-Evidence] hop_update.bias_hh: weight_hash=12af37301feac42ef9158818c553fcf6
+[Sparse-Evidence] hop_message_mlp_freq.0.weight: weight_hash=9c71df9a40b8c6e5d52dc4e024bef8bb
+[Sparse-Evidence] hop_message_mlp_freq.0.bias: weight_hash=0b19ca9d1f7d5dde0eded00c8540a3b0
+[Sparse-Evidence] hop_message_mlp_freq.2.weight: weight_hash=8a567b7f093493debb6a40b8b5085755
+[Sparse-Evidence] hop_message_mlp_freq.2.bias: weight_hash=049dc81ce8d1d305ff2ecf93c8b4b446
+[Sparse-Evidence] hop_update_freq.weight_ih: weight_hash=b9162a515de9749bcbe5e3ee21a46fbb
+[Sparse-Evidence] hop_update_freq.weight_hh: weight_hash=79047ba1aedf9f1e7cd1dd3c1607d5d7
+[Sparse-Evidence] hop_update_freq.bias_ih: weight_hash=3e31b75b322974f423f6f4458e493252
+[Sparse-Evidence] hop_update_freq.bias_hh: weight_hash=861d479f6777b120cfc879e24e16d9cb
+[Sparse-Evidence] freq_pool.weight: weight_hash=ea92227454b46f9622d7aebdb96c9ff2
+[Sparse-Evidence] freq_pool.bias: weight_hash=e4cd3dbbfdd7959bc3f4348111335e29
+[Sparse-Evidence] dense_edge_conv.gru.weight_ih_l0: weight_hash=c6b826c8041fcebd95cd66079e6bdbbd
+[Sparse-Evidence] dense_edge_conv.gru.weight_hh_l0: weight_hash=dec636946c742b7ab201063b9dc463f9
+[Sparse-Evidence] dense_edge_conv.gru.bias_ih_l0: weight_hash=ef44edbcbd62c0c528a58ef968199144
+[Sparse-Evidence] dense_edge_conv.gru.bias_hh_l0: weight_hash=95488f16090822491e1045fa380f9b5e
+[Sparse-Evidence] weight_model_hash=278602a63667e69826e0a179ba2a9ab3
+[Sparse-Evidence] named_model_hash=27f68ea318b031ac175a0eba79073d15
+[Sparse-Evidence] SparseEvidenceGNN config n_channels=23 edges=253 nfreqs=8 hidden_dim=8 channel_embed_dim=8 coherence_threshold=0.9 phase_threshold_rad=0.1745 smooth_kernel_size=(5, 3) scale_adaptive_smoothing=False coi_enabled=True feature_ablation=zero_channel_embed event_aggregation=concat n_hops=1 freq_aware_hops=False event_mode=dense dense_conv_out_channels=8 time_averaged_graph=False dense_edge_temporal_mode=rnn shuffle_time_order=False temporal_graph_edge_dim=8 dense_edge_time_downsample=16
+[Sparse-Evidence] SparseEvidenceGNN dimensions B=736 T=1024 dtype=torch.float32 n_samples=2541
+[Train] class weights: [0.04171586 1.9582841 ]
+[Train] start epochs=1 batches/epoch=4 batch_size=736 optimizer_step_batch_size=736 optimizer_step_batch_mode=credit device=cuda
+[15:30:16.933] FAIL:  clf.fit(X_train, y_train) -- 134.228 sec
+
+==========================================================================================
+TRAINING FAILED
+==========================================================================================
+[15:30:17.529] Training failed after 134.835 sec
+[15:30:17.529] 
+[15:30:17.529] FULL TRACEBACK:
+Traceback (most recent call last):
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\pipeline_debug.py", line 717, in run_debug
+    clf.fit(X_train, y_train)
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\pipelines\common.py", line 1669, in fit
+    self._train_loop(
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\pipelines\common.py", line 1889, in _train_loop
+    logits, aux_value = self._model_forward(tuple(batch_inputs))
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\pipelines\common.py", line 1524, in _model_forward
+    output = self.model_(*batch_inputs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\nn\modules\module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\nn\modules\module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\pipelines\cwt_gnn_classifiers.py", line 4153, in forward
+    self._dense_edge_features(dense_edge_raw.to(raw_x.dtype))
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\pipelines\cwt_gnn_classifiers.py", line 3999, in _dense_edge_features
+    conv_out = self.dense_edge_conv(conv_in)  # [B, dense_conv_out_channels, E, 1]
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\nn\modules\module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\nn\modules\module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\pipelines\cwt_gnn_classifiers.py", line 1739, in forward
+    _, h_n = self.gru(seq)  # h_n: [1, B*E, out_channels]
+             ^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\nn\modules\module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\nn\modules\module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\nn\modules\rnn.py", line 1391, in forward
+    result = _VF.gru(
+             ^^^^^^^^
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.10 GiB. GPU 0 has a total capacity of 12.00 GiB of which 0 bytes is free. Of the allocated memory 17.75 GiB is allocated by PyTorch, and 768.69 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+[15:30:18.233] Could not read process memory: No module named 'resource'
+[15:30:18.245] TORCH CUDA: available
+[15:30:18.666] CUDA allocated: 5957.6 MB
+[15:30:19.359] CUDA reserved: 18948.0 MB
+
+==========================================================================================
+UNHANDLED FAILURE
+==========================================================================================
+Traceback (most recent call last):
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\pipeline_debug.py", line 1159, in main
+    run_debug(args)
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\pipeline_debug.py", line 717, in run_debug
+    clf.fit(X_train, y_train)
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\pipelines\common.py", line 1669, in fit
+    self._train_loop(
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\pipelines\common.py", line 1889, in _train_loop
+    logits, aux_value = self._model_forward(tuple(batch_inputs))
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\pipelines\common.py", line 1524, in _model_forward
+    output = self.model_(*batch_inputs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\nn\modules\module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\nn\modules\module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\pipelines\cwt_gnn_classifiers.py", line 4153, in forward
+    self._dense_edge_features(dense_edge_raw.to(raw_x.dtype))
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\pipelines\cwt_gnn_classifiers.py", line 3999, in _dense_edge_features
+    conv_out = self.dense_edge_conv(conv_in)  # [B, dense_conv_out_channels, E, 1]
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\nn\modules\module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\nn\modules\module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\pipelines\cwt_gnn_classifiers.py", line 1739, in forward
+    _, h_n = self.gru(seq)  # h_n: [1, B*E, out_channels]
+             ^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\nn\modules\module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\nn\modules\module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\nn\modules\rnn.py", line 1391, in forward
+    result = _VF.gru(
+             ^^^^^^^^
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.10 GiB. GPU 0 has a total capacity of 12.00 GiB of which 0 bytes is free. Of the allocated memory 17.75 GiB is allocated by PyTorch, and 768.69 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+[15:30:19.362] Could not read process memory: No module named 'resource'
+[15:30:19.362] TORCH CUDA: available
+[15:30:19.362] CUDA allocated: 5957.6 MB
+[15:30:19.362] CUDA reserved: 18948.0 MB

@@ -1,0 +1,1471 @@
+[11:10:18.671] Detailed log file: C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\debug_one_epoch_20260822-111018.log
+
+==========================================================================================
+ONE-EPOCH DEBUG RUN
+==========================================================================================
+[11:10:18.672] Started: 2026-08-22T11:10:18.672907
+[11:10:18.672] Repository root: C:\Users\User\Documents\noshore5\EEG_Benchmarks
+[11:10:18.672] Script directory: C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy
+[11:10:18.672] Python executable: C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Scripts\python.exe
+
+==========================================================================================
+TORCH ENVIRONMENT
+==========================================================================================
+[11:10:18.673] torch version: 2.8.0+cu128
+[11:10:18.673] python: 3.11.9
+[11:10:18.688] platform: Windows-10-10.0.26200-SP0
+[11:10:18.688] CPU count: 12
+[11:10:18.688] MPS built: False
+[11:10:18.689] MPS available: False
+[11:10:18.689] CUDA built: True
+[11:10:18.705] CUDA available: True
+[11:10:18.705] torch threads: 6
+[11:10:18.705] torch interop threads: 6
+[11:10:18.706] Could not read process memory: No module named 'resource'
+[11:10:18.706] TORCH CUDA: available
+[11:10:18.706] CUDA allocated: 0.0 MB
+[11:10:18.706] CUDA reserved: 0.0 MB
+
+==========================================================================================
+RESOLVED CONFIGURATION
+==========================================================================================
+[11:10:18.707] pipeline                = dense_edge_gru
+[11:10:18.707] label_mode              = prediction
+[11:10:18.707] subjects                = [1]
+[11:10:18.707] epochs                  = 1  <-- FORCED
+[11:10:18.707] window_length           = 30.0
+[11:10:18.707] step_size               = 30.0
+[11:10:18.707] sph                     = 300.0
+[11:10:18.708] sop                     = 900.0
+[11:10:18.708] postictal_buffer        = 1800.0
+[11:10:18.708] max_interictal_records  = 5
+[11:10:18.708] negative:positive       = 5.0
+[11:10:18.708] device                  = cuda
+[11:10:18.708] seed                    = 42
+
+==========================================================================================
+DATASET CONSTRUCTION
+==========================================================================================
+[11:10:18.708] START: BUILD WINDOWED DATASET
+[11:10:22.529] END:   BUILD WINDOWED DATASET -- 3.820 sec
+[11:10:22.529] Dataset construction total: 3.821 sec
+[11:10:22.529] X: shape=(773, 23, 7680), dtype=float64, ndim=3, n=136542720
+[11:10:24.318] X: min=-1386.47, max=1666.23, mean=0.193082, std=41.661
+[11:10:24.536] X: nan=0
+[11:10:24.537] X: contiguous=True
+[11:10:24.537] X: approx memory=1041.74 MB
+[11:10:24.537] y: shape=(773,), dtype=int64
+[11:10:24.538]   label=np.int64(0): 600 windows (77.62%)
+[11:10:24.538]   label=np.int64(1): 173 windows (22.38%)
+[11:10:24.538] metadata shape=(773, 9)
+[11:10:24.538] metadata columns=['subject', 'session', 'run', 'window_start', 'window_end', 'run_start_time', 'seizure_id', 'seizure_onset', 'seizure_offset']
+[11:10:24.539]   subject: dtype=int64, unique=1
+[11:10:24.539]   session: dtype=object, unique=1
+[11:10:24.540]   run: dtype=object, unique=11
+[11:10:24.540]   window_start: dtype=float64, unique=120
+[11:10:24.540]   window_end: dtype=float64, unique=120
+[11:10:24.541]   run_start_time: dtype=object, unique=11
+[11:10:24.541]   seizure_id: dtype=object, unique=7
+[11:10:24.542]   seizure_onset: dtype=float64, unique=7
+[11:10:24.542]   seizure_offset: dtype=float64, unique=7
+[11:10:24.543] subjects: [1]
+[11:10:24.543] runs: 11 unique
+[11:10:24.544] seizure IDs: ['1_02_0', '1_03_0', '1_05_0', '1_06_0', '1_07_0', '1_10_0']
+[11:10:24.544] window_start range: 0.0 -> 3570.0
+
+First metadata rows:
+ subject session run  window_start  window_end            run_start_time seizure_id  seizure_onset  seizure_offset
+       1       0  01           0.0        30.0 2076-11-06T11:42:54+00:00       None            NaN             NaN
+       1       0  01          30.0        60.0 2076-11-06T11:42:54+00:00       None            NaN             NaN
+       1       0  01          60.0        90.0 2076-11-06T11:42:54+00:00       None            NaN             NaN
+       1       0  01          90.0       120.0 2076-11-06T11:42:54+00:00       None            NaN             NaN
+       1       0  01         120.0       150.0 2076-11-06T11:42:54+00:00       None            NaN             NaN
+[11:10:24.549] Could not read process memory: No module named 'resource'
+[11:10:24.549] TORCH CUDA: available
+[11:10:24.549] CUDA allocated: 0.0 MB
+[11:10:24.550] CUDA reserved: 0.0 MB
+
+==========================================================================================
+FOLD DISCOVERY
+==========================================================================================
+[11:10:24.554] Found 6 seizures/folds
+[11:10:24.554] fold 0: subject=1 run=02 seizure_id=1_02_0 onset=2996.0 offset=3036.0
+[11:10:24.554] fold 1: subject=1 run=03 seizure_id=1_03_0 onset=1467.0 offset=1494.0
+[11:10:24.554] fold 2: subject=1 run=05 seizure_id=1_05_0 onset=1732.0 offset=1772.0
+[11:10:24.554] fold 3: subject=1 run=06 seizure_id=1_06_0 onset=1015.0 offset=1066.0
+[11:10:24.554] fold 4: subject=1 run=07 seizure_id=1_07_0 onset=1720.0 offset=1810.0
+[11:10:24.554] fold 5: subject=1 run=10 seizure_id=1_10_0 onset=1862.0 offset=1963.0
+[11:10:24.554] DEBUGGING ONLY FOLD 0
+[11:10:24.554] held-out seizure = {'subject': 1, 'run': '02', 'seizure_id': '1_02_0', 'seizure_onset': 2996.0, 'seizure_offset': 3036.0}
+
+==========================================================================================
+TRAIN / TEST SPLIT
+==========================================================================================
+[11:10:24.555] train windows BEFORE subsampling: 623
+[11:10:24.555] test windows: 150
+[11:10:24.818] X_train: shape=(623, 23, 7680), dtype=float64, ndim=3, n=110046720
+[11:10:26.216] X_train: min=-1386.47, max=1666.23, mean=0.190783, std=42.849
+[11:10:26.387] X_train: nan=0
+[11:10:26.387] X_train: contiguous=True
+[11:10:26.387] X_train: approx memory=839.59 MB
+[11:10:26.388] y_train: shape=(623,), dtype=int64
+[11:10:26.388]   label=np.int64(0): 480 windows (77.05%)
+[11:10:26.388]   label=np.int64(1): 143 windows (22.95%)
+[11:10:26.388] X_test: shape=(150, 23, 7680), dtype=float64, ndim=3, n=26496000
+[11:10:26.713] X_test: min=-882.442, max=1037.95, mean=0.202629, std=36.3133
+[11:10:26.746] X_test: nan=0
+[11:10:26.747] X_test: contiguous=True
+[11:10:26.747] X_test: approx memory=202.15 MB
+[11:10:26.747] y_test: shape=(150,), dtype=int64
+[11:10:26.747]   label=np.int64(0): 120 windows (80.00%)
+[11:10:26.748]   label=np.int64(1): 30 windows (20.00%)
+[11:10:26.748] metadata train rows: 623
+[11:10:26.748] metadata test rows:  150
+
+==========================================================================================
+TRAINING NEGATIVE SUBSAMPLING
+==========================================================================================
+[11:10:26.748] START: SUBSAMPLE TRAINING NEGATIVES
+[11:10:26.749] END:   SUBSAMPLE TRAINING NEGATIVES -- 0.000 sec
+[11:10:26.749] Training windows: 623 -> 623
+[11:10:26.749] y_train after subsampling: shape=(623,), dtype=int64
+[11:10:26.749]   label=np.int64(0): 480 windows (77.05%)
+[11:10:26.749]   label=np.int64(1): 143 windows (22.95%)
+[11:10:26.750] X_train after subsampling: shape=(623, 23, 7680), dtype=float64, ndim=3, n=110046720
+[11:10:28.112] X_train after subsampling: min=-1386.47, max=1666.23, mean=0.190783, std=42.849
+[11:10:28.257] X_train after subsampling: nan=0
+[11:10:28.257] X_train after subsampling: contiguous=True
+[11:10:28.257] X_train after subsampling: approx memory=839.59 MB
+[11:10:28.258] Could not read process memory: No module named 'resource'
+[11:10:28.259] TORCH CUDA: available
+[11:10:28.259] CUDA allocated: 0.0 MB
+[11:10:28.259] CUDA reserved: 0.0 MB
+
+==========================================================================================
+CLASSIFIER CONFIGURATION
+==========================================================================================
+[11:10:28.259] classifier class: StreamingSparseEvidenceGNNClassifier
+[11:10:28.259]   batch_size = 32
+[11:10:28.259]   channel_embed_dim = 8
+[11:10:28.259]   channel_encoder_dilation = 5
+[11:10:28.260]   channel_subset = None
+[11:10:28.260]   coherence_threshold = 0.9
+[11:10:28.260]   coherence_threshold_mode = 'fixed'
+[11:10:28.260]   coi_enabled = True
+[11:10:28.260]   cwt_backend = 'torch'
+[11:10:28.260]   cwt_resample_n_time = None
+[11:10:28.260]   dense_conv_kernel_size = 5
+[11:10:28.260]   dense_conv_pool_size = 4
+[11:10:28.260]   dense_edge_temporal_mode = 'rnn'
+[11:10:28.260]   dense_edge_time_downsample = 16
+[11:10:28.260]   device = 'cuda'
+[11:10:28.260]   event_aggregation = 'concat'
+[11:10:28.261]   event_mode = 'dense'
+[11:10:28.261]   feature_ablation = 'zero_channel_embed'
+[11:10:28.261]   grad_clip_norm = 0.1
+[11:10:28.261]   hidden_dim = 8
+[11:10:28.261]   highest = 40.0
+[11:10:28.261]   learning_rate = 0.002
+[11:10:28.261]   lowest = 8.0
+[11:10:28.261]   nfreqs = 8
+[11:10:28.261]   normalize_input = True
+[11:10:28.261]   phase_threshold_deg = 10.0
+[11:10:28.262]   precompute_chunk_size = None
+[11:10:28.262]   sampling_rate = 256
+[11:10:28.262]   seed = 42
+[11:10:28.262]   smooth_kernel_size = (5, 3)
+[11:10:28.262]   surrogate_count = 100
+[11:10:28.262]   surrogate_percentile = 99.0
+[11:10:28.262]   surrogate_seed = 42
+[11:10:28.262]   time_averaged_graph = False
+[11:10:28.262]   use_class_weights = True
+[11:10:28.263]   validation_split = 0.0
+[11:10:28.263]   verbose = 1
+[11:10:28.263]   weight_decay = 0.0001
+[11:10:28.263] epochs = 1
+[11:10:28.263] START: CLASSIFIER INITIALIZATION
+[11:10:28.263] END:   CLASSIFIER INITIALIZATION -- 0.000 sec
+[11:10:28.265] classifier object: StreamingSparseEvidenceGNNClassifier(batch_size=32, channel_encoder_dilation=5,
+                                     coherence_threshold=0.9,
+                                     cwt_backend='torch',
+                                     dense_edge_temporal_mode='rnn',
+                                     dense_edge_time_downsample=16,
+                                     device='cuda', epochs=1,
+                                     event_aggregation='concat',
+                                     event_mode='dense', learning_rate=0.002,
+                                     lowest=8.0, nfreqs=8,
+                                     phase_threshold_deg=10.0,
+                                     surrogate_percentile=99.0,
+                                     surrogate_seed=42, validation_split=0.0,
+                                     verbose=1)
+
+==========================================================================================
+TRAINING -- EXACTLY ONE EPOCH
+==========================================================================================
+[11:10:28.266] Could not read process memory: No module named 'resource'
+[11:10:28.266] TORCH CUDA: available
+[11:10:28.266] CUDA allocated: 0.0 MB
+[11:10:28.266] CUDA reserved: 0.0 MB
+[11:10:28.266] START: clf.fit(X_train, y_train)
+[Train] validation disabled.
+
+CWT(batched):   0%|                                                                        | 0/46 [00:00<?, ?it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 2/2 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/1 [00:00<?, ?chunk/s]
+dense-edges[fixed]: 100%|########################################################| 1/1 [00:01<00:00,  1.20s/chunk]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 648.11it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 594.94it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:01<00:00, 592.61it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.08chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  4.86chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.09chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.22chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.42chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.53chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.62chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.68chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 823.14it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 804.88it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:00<00:00, 757.87it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  5.41chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  5.68chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.74chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.77chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.77chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.74chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.71chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.76chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 703.30it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 753.20it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:00<00:00, 768.98it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  5.35chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  5.59chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.53chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.65chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.69chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.74chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.73chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.74chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 885.81it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 828.41it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:00<00:00, 801.34it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.65chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  5.24chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.50chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.61chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.66chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.58chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.66chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.69chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 844.88it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 816.35it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:00<00:00, 809.34it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.76chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  5.23chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.40chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.56chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.65chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.67chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.66chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.57chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 666.66it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 695.42it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:01<00:00, 731.11it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.63chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  5.26chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.49chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.45chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.59chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.66chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.70chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.74chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 842.11it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 832.44it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:00<00:00, 799.81it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.35chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  5.12chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.40chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.56chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.65chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.67chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.61chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.66chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 664.93it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 677.36it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:01<00:00, 718.50it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.57chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  5.10chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.35chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.54chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.62chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.38chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.50chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.35chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 622.87it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 618.45it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:01<00:00, 643.44it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  3.92chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  4.80chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:01,  4.79chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  4.92chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:01<00:00,  5.13chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  4.97chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.20chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.23chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 644.84it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 665.54it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:01<00:00, 665.18it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.57chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  5.19chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.15chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.35chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.51chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.60chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.67chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.71chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 844.88it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 802.74it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:00<00:00, 776.89it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.57chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  5.23chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.48chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.57chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.60chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.53chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.63chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.69chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 651.40it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 697.33it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:01<00:00, 745.75it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.46chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  4.99chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.33chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.53chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.63chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.67chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.61chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.67chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 879.71it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 807.87it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:00<00:00, 791.27it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.67chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  5.28chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.51chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.48chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.60chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.68chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.73chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.76chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 668.33it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 701.84it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:01<00:00, 734.16it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.52chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  5.24chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.48chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.60chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.64chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.55chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.63chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.70chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 867.80it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 811.19it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:00<00:00, 816.37it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.57chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  5.21chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.31chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.50chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.62chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.70chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.72chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.68chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 671.91it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 704.55it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:01<00:00, 732.81it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.63chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  5.28chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.51chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.55chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.58chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.67chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.71chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.74chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 820.51it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 812.85it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:00<00:00, 795.21it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.37chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  5.12chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.41chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.56chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.66chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.71chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.61chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.68chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 686.32it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 707.53it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:01<00:00, 739.80it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.50chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  5.19chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.29chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.48chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.61chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.69chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.71chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.72chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 864.86it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 835.00it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:00<00:00, 788.03it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.61chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  5.26chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.52chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.63chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.63chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.61chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.69chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.71chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/345 [00:00<?, ?it/s]
+CWT(batched):  74%|############################################5               | 256/345 [00:00<00:00, 658.10it/s]
+CWT(batched): 100%|############################################################| 345/345 [00:00<00:00, 580.14it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 15/15 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/4 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 1/4 [00:00<00:00,  5.59chunk/s]
+dense-edges[fixed]:  50%|############################                            | 2/4 [00:00<00:00,  5.74chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 3/4 [00:00<00:00,  5.77chunk/s]
+dense-edges[fixed]: 100%|########################################################| 4/4 [00:00<00:00,  6.40chunk/s]
+                                                                                                                  
+[Train] class weights: [0.459069 1.540931]
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 859.07it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 821.75it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:00<00:00, 801.31it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.12chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  5.00chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.34chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.53chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.60chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.54chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.64chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.70chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 731.42it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 754.24it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:00<00:00, 768.48it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  5.26chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  5.54chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.50chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.62chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.68chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.64chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.67chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.61chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 686.26it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 736.27it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:00<00:00, 750.10it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.55chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  5.23chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.48chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.58chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.54chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.63chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.69chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.73chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 847.68it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 812.85it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:00<00:00, 804.89it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.42chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  5.16chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.47chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.59chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.69chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.72chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.61chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.68chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 673.68it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 732.66it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:00<00:00, 758.61it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.50chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  5.18chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.30chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.48chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.61chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.69chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.73chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.73chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 836.49it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 817.76it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:00<00:00, 807.66it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.59chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  5.22chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.49chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.61chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.66chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.59chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.67chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.71chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 670.16it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 748.54it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:00<00:00, 767.28it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.46chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  4.99chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.35chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.53chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.63chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.70chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.72chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.63chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 867.80it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 825.02it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:00<00:00, 804.26it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.61chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  5.26chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.43chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.53chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.53chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.63chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.71chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.74chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 664.93it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 750.99it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:00<00:00, 765.42it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.35chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  5.09chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.41chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.56chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.65chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.66chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.63chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.68chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 853.33it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 816.51it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:00<00:00, 810.67it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.57chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  5.23chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.23chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.45chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.54chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.63chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.70chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.75chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 695.65it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 754.77it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:01<00:00, 701.47it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.10chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  4.89chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.23chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.41chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.41chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.51chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.60chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.61chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 797.50it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 788.76it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:00<00:00, 793.54it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.27chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  4.97chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.33chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.52chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.62chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.69chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.59chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.64chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 707.18it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 745.97it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:00<00:00, 763.51it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.48chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  5.10chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.22chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.41chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.56chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.42chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.37chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.46chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 646.46it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 674.52it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:01<00:00, 677.19it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  3.75chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  4.70chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.16chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.19chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:01<00:00,  5.00chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.06chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.17chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.35chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 680.85it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 681.92it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:01<00:00, 717.54it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.48chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  5.06chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.35chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.51chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.43chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.54chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.56chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.62chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 831.18it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 780.43it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:00<00:00, 771.39it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.41chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  4.96chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.25chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.30chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.26chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.42chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.35chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.34chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 693.77it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 741.02it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:00<00:00, 757.24it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.44chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  5.18chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.32chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.50chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.62chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.70chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.72chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.72chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 853.32it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 805.86it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:00<00:00, 787.86it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.59chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  5.27chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.53chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.64chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.66chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.65chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.69chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.74chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 695.65it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 701.26it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:01<00:00, 737.89it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.50chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  5.05chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.36chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.51chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.64chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.70chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.54chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.51chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/345 [00:00<?, ?it/s]
+CWT(batched):  74%|############################################5               | 256/345 [00:00<00:00, 778.11it/s]
+CWT(batched): 100%|############################################################| 345/345 [00:00<00:00, 652.08it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 15/15 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/4 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 1/4 [00:00<00:00,  5.49chunk/s]
+dense-edges[fixed]:  50%|############################                            | 2/4 [00:00<00:00,  5.57chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 3/4 [00:00<00:00,  5.44chunk/s]
+dense-edges[fixed]: 100%|########################################################| 4/4 [00:00<00:00,  5.97chunk/s]
+                                                                                                                  
+[Train] start epochs=1 batches/epoch=20 batch_size=32 optimizer_step_batch_size=32 optimizer_step_batch_mode=credit device=cuda
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 815.28it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 809.22it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:00<00:00, 796.79it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  3.98chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  4.75chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.10chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.35chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.43chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.47chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.53chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.54chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 664.94it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 721.13it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:01<00:00, 740.92it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.27chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  4.99chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.33chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.49chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.60chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.64chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.59chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.66chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 833.99it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 798.72it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:00<00:00, 795.60it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.50chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  5.02chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.38chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.53chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.63chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.69chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.71chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.61chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 867.79it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 802.21it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:00<00:00, 798.85it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.57chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  5.21chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.44chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.44chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.58chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.65chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.70chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.73chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 882.64it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 819.61it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:00<00:00, 805.00it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.63chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  5.26chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.49chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.57chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.54chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.63chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.69chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.71chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 882.64it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 827.40it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:00<00:00, 810.51it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.46chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  5.17chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.41chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.57chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.66chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.57chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.65chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.70chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 839.35it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 836.11it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:00<00:00, 802.98it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.39chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  4.96chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.33chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.50chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.60chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.66chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.68chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.61chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 864.87it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 811.64it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:00<00:00, 777.02it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.55chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  5.15chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.19chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.38chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.51chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.55chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.57chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.57chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 879.72it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 820.05it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:00<00:00, 815.14it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.52chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  5.17chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.39chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.40chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.54chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.63chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.67chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.70chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 755.17it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 779.51it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:00<00:00, 773.08it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.61chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  5.23chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.47chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.55chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.53chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.61chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.68chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.70chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 746.35it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 772.86it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:00<00:00, 776.08it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.63chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  5.24chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.50chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.61chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.65chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.58chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.65chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.70chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 717.08it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 766.33it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:00<00:00, 777.95it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.39chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  5.14chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.40chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.53chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.62chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.65chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.60chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.67chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 699.46it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 759.25it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:00<00:00, 777.14it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.52chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  5.06chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.37chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.54chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.63chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.67chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.60chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.60chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 690.03it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 717.32it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:01<00:00, 707.94it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.61chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  5.05chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.37chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.52chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.61chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.67chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.69chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.63chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 721.13it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 703.64it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:01<00:00, 739.41it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.52chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  5.19chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.34chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.50chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.60chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.67chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.70chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.62chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 679.04it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 684.39it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:01<00:00, 730.04it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.41chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  5.03chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.15chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.38chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.50chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.59chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.66chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.64chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 795.03it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 730.94it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:00<00:00, 752.21it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.44chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  5.16chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.40chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.44chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.58chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.66chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.71chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.74chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 828.48it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 805.48it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:00<00:00, 785.25it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.65chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  5.29chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.53chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.56chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.54chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.65chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.67chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.66chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/736 [00:00<?, ?it/s]
+CWT(batched):  35%|####################8                                       | 256/736 [00:00<00:00, 742.02it/s]
+CWT(batched):  70%|#########################################7                  | 512/736 [00:00<00:00, 769.53it/s]
+CWT(batched): 100%|############################################################| 736/736 [00:00<00:00, 744.73it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/8 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  12%|#######                                                 | 1/8 [00:00<00:01,  4.67chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 2/8 [00:00<00:01,  5.30chunk/s]
+dense-edges[fixed]:  38%|#####################                                   | 3/8 [00:00<00:00,  5.52chunk/s]
+dense-edges[fixed]:  50%|############################                            | 4/8 [00:00<00:00,  5.62chunk/s]
+dense-edges[fixed]:  62%|###################################                     | 5/8 [00:00<00:00,  5.65chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 6/8 [00:01<00:00,  5.62chunk/s]
+dense-edges[fixed]:  88%|#################################################       | 7/8 [00:01<00:00,  5.68chunk/s]
+dense-edges[fixed]: 100%|########################################################| 8/8 [00:01<00:00,  5.69chunk/s]
+                                                                                                                  
+
+CWT(batched):   0%|                                                                       | 0/345 [00:00<?, ?it/s]
+CWT(batched):  74%|############################################5               | 256/345 [00:00<00:00, 721.13it/s]
+CWT(batched): 100%|############################################################| 345/345 [00:00<00:00, 651.68it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 15/15 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                                | 0/4 [00:00<?, ?chunk/s]
+dense-edges[fixed]:  25%|##############                                          | 1/4 [00:00<00:00,  5.81chunk/s]
+dense-edges[fixed]:  50%|############################                            | 2/4 [00:00<00:00,  5.81chunk/s]
+dense-edges[fixed]:  75%|##########################################              | 3/4 [00:00<00:00,  5.77chunk/s]
+dense-edges[fixed]: 100%|########################################################| 4/4 [00:00<00:00,  6.26chunk/s]
+                                                                                                                  
+[Train][Epoch 1/1] loss=0.698161 (improve +0.000000) acc=0.5072 (delta +0.0000) roc_auc=0.5899 (delta n/a) optimizer_steps=20 epoch_time=55.58s
+[11:13:11.391] END:   clf.fit(X_train, y_train) -- 163.125 sec
+[11:13:11.392] TOTAL FIT TIME: 163.126 sec
+[11:13:11.393] Could not read process memory: No module named 'resource'
+[11:13:11.393] TORCH CUDA: available
+[11:13:11.396] CUDA allocated: 16.6 MB
+[11:13:11.397] CUDA reserved: 10558.0 MB
+
+==========================================================================================
+POST-FIT CLASSIFIER STATE
+==========================================================================================
+[11:13:11.398] classes_: array([0, 1])
+[11:13:11.398] model_: SparseEvidenceGNNCore(
+  (channel_encoder): ChannelSignalEncoder(
+    (net): Sequential(
+      (0): Conv1d(1, 8, kernel_size=(9,), stride=(1,), padding=(20,), dilation=(5,))
+      (1): GELU(approximate='none')
+      (2): Conv1d(8, 8, kernel_size=(9,), stride=(1,), padding=(20,), dilation=(5,))
+      (3): GELU(approximate='none')
+      (4): AdaptiveAvgPool1d(output_size=1)
+    )
+  )
+  (sparse_message_mlp): Sequential(
+    (0): Linear(in_features=24, out_features=8, bias=True)
+    (1): GELU(approximate='none')
+    (2): Linear(in_features=8, out_features=8, bias=True)
+  )
+  (sparse_classifier): Linear(in_features=4048, out_features=2, bias=True)
+  (hop_message_mlp): Sequential(
+    (0): Linear(in_features=16, out_features=8, bias=True)
+    (1): GELU(approximate='none')
+    (2): Linear(in_features=8, out_features=8, bias=True)
+  )
+  (hop_update): GRUCell(8, 8)
+  (hop_message_mlp_freq): Sequential(
+    (0): Linear(in_features=16, out_features=8, bias=True)
+    (1): GELU(approximate='none')
+    (2): Linear(in_features=8, out_features=8, bias=True)
+  )
+  (hop_update_freq): GRUCell(8, 8)
+  (freq_pool): Linear(in_features=8, out_features=1, bias=True)
+  (dense_edge_conv): _DenseEdgeGRUTemporal(
+    (gru): GRU(32, 8, batch_first=True)
+  )
+)
+[11:13:11.398] device: 'cuda'
+[11:13:11.398] epochs: 1
+[11:13:11.399] batch_size: 32
+
+==========================================================================================
+TEST PREDICTION
+==========================================================================================
+[11:13:11.399] Calling predict_proba() ONCE.
+[11:13:11.399] This is intentionally kept separate from predict() so CWT/features
+[11:13:11.399] are not recomputed unnecessarily.
+[11:13:11.400] START: clf.predict_proba(X_test)
+
+CWT(batched):   0%|                                                                      | 0/3450 [00:00<?, ?it/s]
+CWT(batched):   7%|####3                                                      | 256/3450 [00:00<00:03, 853.33it/s]
+CWT(batched):  15%|########7                                                  | 512/3450 [00:00<00:03, 797.07it/s]
+CWT(batched):  22%|#############1                                             | 768/3450 [00:00<00:03, 807.60it/s]
+CWT(batched):  30%|#################2                                        | 1024/3450 [00:01<00:03, 800.61it/s]
+CWT(batched):  37%|#####################5                                    | 1280/3450 [00:01<00:02, 787.08it/s]
+CWT(batched):  45%|#########################8                                | 1536/3450 [00:01<00:02, 779.14it/s]
+CWT(batched):  52%|##############################1                           | 1792/3450 [00:02<00:02, 781.14it/s]
+CWT(batched):  59%|##################################4                       | 2048/3450 [00:02<00:01, 777.16it/s]
+CWT(batched):  67%|######################################7                   | 2304/3450 [00:02<00:01, 787.17it/s]
+CWT(batched):  74%|###########################################               | 2560/3450 [00:03<00:01, 794.12it/s]
+CWT(batched):  82%|###############################################3          | 2816/3450 [00:03<00:00, 791.39it/s]
+CWT(batched):  89%|###################################################6      | 3072/3450 [00:03<00:00, 792.49it/s]
+CWT(batched):  96%|#######################################################9  | 3328/3450 [00:04<00:00, 788.08it/s]
+CWT(batched): 100%|##########################################################| 3450/3450 [00:04<00:00, 756.99it/s]
+                                                                                                                  
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 150/150 trial(s) need compute, chunk_size=4...
+
+dense-edges[fixed]:   0%|                                                               | 0/38 [00:00<?, ?chunk/s]
+dense-edges[fixed]:   3%|#4                                                     | 1/38 [00:00<00:06,  5.52chunk/s]
+dense-edges[fixed]:   5%|##8                                                    | 2/38 [00:00<00:06,  5.63chunk/s]
+dense-edges[fixed]:   8%|####3                                                  | 3/38 [00:00<00:06,  5.73chunk/s]
+dense-edges[fixed]:  11%|#####7                                                 | 4/38 [00:00<00:05,  5.78chunk/s]
+dense-edges[fixed]:  13%|#######2                                               | 5/38 [00:00<00:05,  5.79chunk/s]
+dense-edges[fixed]:  16%|########6                                              | 6/38 [00:01<00:05,  5.66chunk/s]
+dense-edges[fixed]:  18%|##########1                                            | 7/38 [00:01<00:05,  5.71chunk/s]
+dense-edges[fixed]:  21%|###########5                                           | 8/38 [00:01<00:05,  5.74chunk/s]
+dense-edges[fixed]:  24%|#############                                          | 9/38 [00:01<00:05,  5.76chunk/s]
+dense-edges[fixed]:  26%|##############2                                       | 10/38 [00:01<00:04,  5.78chunk/s]
+dense-edges[fixed]:  29%|###############6                                      | 11/38 [00:01<00:04,  5.75chunk/s]
+dense-edges[fixed]:  32%|#################                                     | 12/38 [00:02<00:04,  5.68chunk/s]
+dense-edges[fixed]:  34%|##################4                                   | 13/38 [00:02<00:04,  5.73chunk/s]
+dense-edges[fixed]:  37%|###################8                                  | 14/38 [00:02<00:04,  5.73chunk/s]
+dense-edges[fixed]:  39%|#####################3                                | 15/38 [00:02<00:04,  5.71chunk/s]
+dense-edges[fixed]:  42%|######################7                               | 16/38 [00:02<00:03,  5.68chunk/s]
+dense-edges[fixed]:  45%|########################1                             | 17/38 [00:02<00:03,  5.58chunk/s]
+dense-edges[fixed]:  47%|#########################5                            | 18/38 [00:03<00:03,  5.58chunk/s]
+dense-edges[fixed]:  50%|###########################                           | 19/38 [00:03<00:03,  5.57chunk/s]
+dense-edges[fixed]:  53%|############################4                         | 20/38 [00:03<00:03,  5.58chunk/s]
+dense-edges[fixed]:  55%|#############################8                        | 21/38 [00:03<00:03,  5.56chunk/s]
+dense-edges[fixed]:  58%|###############################2                      | 22/38 [00:03<00:02,  5.55chunk/s]
+dense-edges[fixed]:  61%|################################6                     | 23/38 [00:04<00:02,  5.44chunk/s]
+dense-edges[fixed]:  63%|##################################1                   | 24/38 [00:04<00:02,  5.48chunk/s]
+dense-edges[fixed]:  66%|###################################5                  | 25/38 [00:04<00:02,  5.51chunk/s]
+dense-edges[fixed]:  68%|####################################9                 | 26/38 [00:04<00:02,  5.55chunk/s]
+dense-edges[fixed]:  71%|######################################3               | 27/38 [00:04<00:01,  5.54chunk/s]
+dense-edges[fixed]:  74%|#######################################7              | 28/38 [00:04<00:01,  5.46chunk/s]
+dense-edges[fixed]:  76%|#########################################2            | 29/38 [00:05<00:01,  5.47chunk/s]
+dense-edges[fixed]:  79%|##########################################6           | 30/38 [00:05<00:01,  5.49chunk/s]
+dense-edges[fixed]:  82%|############################################          | 31/38 [00:05<00:01,  5.52chunk/s]
+dense-edges[fixed]:  84%|#############################################4        | 32/38 [00:05<00:01,  5.52chunk/s]
+dense-edges[fixed]:  87%|##############################################8       | 33/38 [00:05<00:00,  5.50chunk/s]
+dense-edges[fixed]:  89%|################################################3     | 34/38 [00:06<00:00,  5.42chunk/s]
+dense-edges[fixed]:  92%|#################################################7    | 35/38 [00:06<00:00,  5.46chunk/s]
+dense-edges[fixed]:  95%|###################################################1  | 36/38 [00:06<00:00,  5.48chunk/s]
+dense-edges[fixed]:  97%|####################################################5 | 37/38 [00:06<00:00,  5.51chunk/s]
+                                                                                                                  
+[11:13:25.170] END:   clf.predict_proba(X_test) -- 13.771 sec
+[11:13:25.173] proba: shape=(150, 2), dtype=float32, ndim=2, n=300
+[11:13:25.177] proba: min=0.220867, max=0.779133, mean=0.5, std=0.170442
+[11:13:25.178] proba: nan=0
+[11:13:25.178] proba: contiguous=True
+[11:13:25.179] proba: approx memory=0.00 MB
+[11:13:25.180] y_pred: shape=(150,), dtype=int64
+[11:13:25.182]   label=np.int64(0): 2 windows (1.33%)
+[11:13:25.182]   label=np.int64(1): 148 windows (98.67%)
+[11:13:25.182] probability class-1 range: 0.476332 -> 0.779133
+[11:13:25.183] probability class-1 mean: 0.649329
+[11:13:25.183] probability class-1 std: 0.082166
+[11:13:25.184] predicted positive count: 148/150
+
+==========================================================================================
+ONE-FOLD METRICS
+==========================================================================================
+[11:13:25.187] accuracy:          0.213333
+[11:13:25.192] precision:         0.202703
+[11:13:25.193] recall:            1.000000
+[11:13:25.195] f1:                0.337079
+[11:13:25.197] average_precision: 0.728264
+[11:13:25.201] roc_auc:           0.950833
+[11:13:25.201] confusion matrix:
+[[  2 118]
+ [  0  30]]
+
+==========================================================================================
+TIMING SUMMARY
+==========================================================================================
+[11:13:25.206] dataset construction: 3.821 sec
+[11:13:25.206] training / fit:       163.126 sec
+[11:13:25.206] test prediction:      13.771 sec
+[11:13:25.206] dataset + fit + pred: 180.717 sec
+[11:13:25.206] training windows/sec: 3.819
+[11:13:25.206] test windows/sec: 10.892
+[11:13:25.207] Could not read process memory: No module named 'resource'
+[11:13:25.207] TORCH CUDA: available
+[11:13:25.207] CUDA allocated: 16.6 MB
+[11:13:25.208] CUDA reserved: 10558.0 MB
+
+==========================================================================================
+DEBUG SUMMARY
+==========================================================================================
+[11:13:25.215] timestamp: 2026-08-22T11:13:25.208906
+[11:13:25.215] pipeline: dense_edge_gru
+[11:13:25.215] label_mode: prediction
+[11:13:25.215] subjects: [1]
+[11:13:25.215] fold: 0
+[11:13:25.215] epochs: 1
+[11:13:25.216] window_length: 30.0
+[11:13:25.216] step_size: 30.0
+[11:13:25.216] n_total: 773
+[11:13:25.216] n_train: 623
+[11:13:25.216] n_test: 150
+[11:13:25.216] n_train_positive: 143
+[11:13:25.216] n_test_positive: 30
+[11:13:25.216] fit_seconds: 163.1255084000295
+[11:13:25.216] prediction_seconds: 13.771062900021207
+[11:13:25.216] dataset_seconds: 3.8209154999931343
+[11:13:25.216] accuracy: 0.21333333333333335
+[11:13:25.217] precision: 0.20270270270270271
+[11:13:25.217] recall: 1.0
+[11:13:25.217] f1: 0.33707865168539325
+[11:13:25.217] average_precision: 0.7282637705259187
+[11:13:25.217] roc_auc: 0.9508333333333333
+[11:13:25.217] 
+[11:13:25.217] DEBUG RUN FINISHED SUCCESSFULLY.
+[11:13:25.463] Could not read process memory: No module named 'resource'
+[11:13:25.464] TORCH CUDA: available
+[11:13:25.464] CUDA allocated: 16.6 MB
+[11:13:25.464] CUDA reserved: 10558.0 MB

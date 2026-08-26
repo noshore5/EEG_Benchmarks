@@ -1,0 +1,487 @@
+[14:35:36.746] Detailed log file: C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\debug_one_epoch_20260822-143536.log
+
+==========================================================================================
+ONE-EPOCH DEBUG RUN
+==========================================================================================
+[14:35:36.746] Started: 2026-08-22T14:35:36.746804
+[14:35:36.746] Repository root: C:\Users\User\Documents\noshore5\EEG_Benchmarks
+[14:35:36.746] Script directory: C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy
+[14:35:36.746] Python executable: C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Scripts\python.exe
+
+==========================================================================================
+TORCH ENVIRONMENT
+==========================================================================================
+[14:35:36.747] torch version: 2.8.0+cu128
+[14:35:36.747] python: 3.11.9
+[14:35:36.761] platform: Windows-10-10.0.26200-SP0
+[14:35:36.761] CPU count: 12
+[14:35:36.761] MPS built: False
+[14:35:36.761] MPS available: False
+[14:35:36.761] CUDA built: True
+[14:35:36.777] CUDA available: True
+[14:35:36.777] torch threads: 6
+[14:35:36.777] torch interop threads: 6
+[14:35:36.777] Could not read process memory: No module named 'resource'
+[14:35:36.777] TORCH CUDA: available
+[14:35:36.777] CUDA allocated: 0.0 MB
+[14:35:36.777] CUDA reserved: 0.0 MB
+
+==========================================================================================
+RESOLVED CONFIGURATION
+==========================================================================================
+[14:35:36.777] pipeline                = dense_edge_gru
+[14:35:36.777] label_mode              = prediction
+[14:35:36.777] subjects                = [1]
+[14:35:36.777] epochs                  = 1  <-- FORCED
+[14:35:36.777] window_length           = 30.0
+[14:35:36.777] step_size               = 30.0
+[14:35:36.777] sph                     = 300.0
+[14:35:36.777] sop                     = 900.0
+[14:35:36.777] postictal_buffer        = 1800.0
+[14:35:36.777] max_interictal_records  = 5
+[14:35:36.777] negative:positive       = 5.0
+[14:35:36.777] device                  = cuda
+[14:35:36.777] seed                    = 42
+
+==========================================================================================
+DATASET CONSTRUCTION
+==========================================================================================
+[14:35:36.777] START: BUILD WINDOWED DATASET
+[14:35:40.582] END:   BUILD WINDOWED DATASET -- 3.803 sec
+[14:35:40.582] Dataset construction total: 3.803 sec
+[14:35:40.582] X: shape=(773, 23, 7680), dtype=float64, ndim=3, n=136542720
+[14:35:42.466] X: min=-1386.47, max=1666.23, mean=0.193082, std=41.661
+[14:35:42.668] X: nan=0
+[14:35:42.668] X: contiguous=True
+[14:35:42.668] X: approx memory=1041.74 MB
+[14:35:42.669] y: shape=(773,), dtype=int64
+[14:35:42.669]   label=np.int64(0): 600 windows (77.62%)
+[14:35:42.669]   label=np.int64(1): 173 windows (22.38%)
+[14:35:42.669] metadata shape=(773, 9)
+[14:35:42.669] metadata columns=['subject', 'session', 'run', 'window_start', 'window_end', 'run_start_time', 'seizure_id', 'seizure_onset', 'seizure_offset']
+[14:35:42.669]   subject: dtype=int64, unique=1
+[14:35:42.669]   session: dtype=object, unique=1
+[14:35:42.669]   run: dtype=object, unique=11
+[14:35:42.669]   window_start: dtype=float64, unique=120
+[14:35:42.669]   window_end: dtype=float64, unique=120
+[14:35:42.669]   run_start_time: dtype=object, unique=11
+[14:35:42.670]   seizure_id: dtype=object, unique=7
+[14:35:42.670]   seizure_onset: dtype=float64, unique=7
+[14:35:42.670]   seizure_offset: dtype=float64, unique=7
+[14:35:42.670] subjects: [1]
+[14:35:42.670] runs: 11 unique
+[14:35:42.670] seizure IDs: ['1_02_0', '1_03_0', '1_05_0', '1_06_0', '1_07_0', '1_10_0']
+[14:35:42.670] window_start range: 0.0 -> 3570.0
+
+First metadata rows:
+ subject session run  window_start  window_end            run_start_time seizure_id  seizure_onset  seizure_offset
+       1       0  01           0.0        30.0 2076-11-06T11:42:54+00:00       None            NaN             NaN
+       1       0  01          30.0        60.0 2076-11-06T11:42:54+00:00       None            NaN             NaN
+       1       0  01          60.0        90.0 2076-11-06T11:42:54+00:00       None            NaN             NaN
+       1       0  01          90.0       120.0 2076-11-06T11:42:54+00:00       None            NaN             NaN
+       1       0  01         120.0       150.0 2076-11-06T11:42:54+00:00       None            NaN             NaN
+[14:35:42.673] Could not read process memory: No module named 'resource'
+[14:35:42.673] TORCH CUDA: available
+[14:35:42.673] CUDA allocated: 0.0 MB
+[14:35:42.673] CUDA reserved: 0.0 MB
+
+==========================================================================================
+FOLD DISCOVERY
+==========================================================================================
+[14:35:42.676] Found 6 seizures/folds
+[14:35:42.676] fold 0: subject=1 run=02 seizure_id=1_02_0 onset=2996.0 offset=3036.0
+[14:35:42.676] fold 1: subject=1 run=03 seizure_id=1_03_0 onset=1467.0 offset=1494.0
+[14:35:42.676] fold 2: subject=1 run=05 seizure_id=1_05_0 onset=1732.0 offset=1772.0
+[14:35:42.676] fold 3: subject=1 run=06 seizure_id=1_06_0 onset=1015.0 offset=1066.0
+[14:35:42.676] fold 4: subject=1 run=07 seizure_id=1_07_0 onset=1720.0 offset=1810.0
+[14:35:42.676] fold 5: subject=1 run=10 seizure_id=1_10_0 onset=1862.0 offset=1963.0
+[14:35:42.676] DEBUGGING ONLY FOLD 0
+[14:35:42.676] held-out seizure = {'subject': 1, 'run': '02', 'seizure_id': '1_02_0', 'seizure_onset': 2996.0, 'seizure_offset': 3036.0}
+
+==========================================================================================
+TRAIN / TEST SPLIT
+==========================================================================================
+[14:35:42.676] train windows BEFORE subsampling: 623
+[14:35:42.676] test windows: 150
+[14:35:42.966] X_train: shape=(623, 23, 7680), dtype=float64, ndim=3, n=110046720
+[14:35:44.658] X_train: min=-1386.47, max=1666.23, mean=0.190783, std=42.849
+[14:35:44.845] X_train: nan=0
+[14:35:44.846] X_train: contiguous=True
+[14:35:44.846] X_train: approx memory=839.59 MB
+[14:35:44.846] y_train: shape=(623,), dtype=int64
+[14:35:44.846]   label=np.int64(0): 480 windows (77.05%)
+[14:35:44.846]   label=np.int64(1): 143 windows (22.95%)
+[14:35:44.847] X_test: shape=(150, 23, 7680), dtype=float64, ndim=3, n=26496000
+[14:35:45.211] X_test: min=-882.442, max=1037.95, mean=0.202629, std=36.3133
+[14:35:45.253] X_test: nan=0
+[14:35:45.253] X_test: contiguous=True
+[14:35:45.253] X_test: approx memory=202.15 MB
+[14:35:45.253] y_test: shape=(150,), dtype=int64
+[14:35:45.253]   label=np.int64(0): 120 windows (80.00%)
+[14:35:45.253]   label=np.int64(1): 30 windows (20.00%)
+[14:35:45.253] metadata train rows: 623
+[14:35:45.253] metadata test rows:  150
+
+==========================================================================================
+TRAINING NEGATIVE SUBSAMPLING
+==========================================================================================
+[14:35:45.253] START: SUBSAMPLE TRAINING NEGATIVES
+[14:35:45.253] END:   SUBSAMPLE TRAINING NEGATIVES -- 0.000 sec
+[14:35:45.253] Training windows: 623 -> 623
+[14:35:45.253] y_train after subsampling: shape=(623,), dtype=int64
+[14:35:45.254]   label=np.int64(0): 480 windows (77.05%)
+[14:35:45.254]   label=np.int64(1): 143 windows (22.95%)
+[14:35:45.254] X_train after subsampling: shape=(623, 23, 7680), dtype=float64, ndim=3, n=110046720
+[14:35:46.914] X_train after subsampling: min=-1386.47, max=1666.23, mean=0.190783, std=42.849
+[14:35:47.112] X_train after subsampling: nan=0
+[14:35:47.112] X_train after subsampling: contiguous=True
+[14:35:47.112] X_train after subsampling: approx memory=839.59 MB
+[14:35:47.113] Could not read process memory: No module named 'resource'
+[14:35:47.113] TORCH CUDA: available
+[14:35:47.114] CUDA allocated: 0.0 MB
+[14:35:47.114] CUDA reserved: 0.0 MB
+
+==========================================================================================
+CLASSIFIER CONFIGURATION
+==========================================================================================
+[14:35:47.114] classifier class: StreamingSparseEvidenceGNNClassifier
+[14:35:47.114]   batch_size = 32
+[14:35:47.114]   channel_embed_dim = 8
+[14:35:47.114]   channel_encoder_dilation = 5
+[14:35:47.114]   channel_subset = None
+[14:35:47.114]   coherence_threshold = 0.9
+[14:35:47.114]   coherence_threshold_mode = 'fixed'
+[14:35:47.114]   coi_enabled = True
+[14:35:47.114]   compile_dense_edge_helper = True
+[14:35:47.114]   cwt_backend = 'torch'
+[14:35:47.114]   cwt_resample_n_time = None
+[14:35:47.114]   dense_conv_kernel_size = 5
+[14:35:47.114]   dense_conv_pool_size = 4
+[14:35:47.114]   dense_edge_temporal_mode = 'rnn'
+[14:35:47.114]   dense_edge_time_downsample = 16
+[14:35:47.114]   device = 'cuda'
+[14:35:47.114]   event_aggregation = 'concat'
+[14:35:47.114]   event_mode = 'dense'
+[14:35:47.114]   feature_ablation = 'zero_channel_embed'
+[14:35:47.114]   grad_clip_norm = 0.1
+[14:35:47.114]   hidden_dim = 8
+[14:35:47.114]   highest = 40.0
+[14:35:47.114]   learning_rate = 0.002
+[14:35:47.114]   lowest = 8.0
+[14:35:47.114]   nfreqs = 8
+[14:35:47.114]   normalize_input = True
+[14:35:47.114]   phase_threshold_deg = 10.0
+[14:35:47.114]   precompute_chunk_size = 4
+[14:35:47.114]   sampling_rate = 256
+[14:35:47.114]   seed = 42
+[14:35:47.114]   smooth_kernel_size = (5, 3)
+[14:35:47.114]   surrogate_count = 100
+[14:35:47.114]   surrogate_percentile = 99.0
+[14:35:47.114]   surrogate_seed = 42
+[14:35:47.114]   time_averaged_graph = False
+[14:35:47.114]   use_class_weights = True
+[14:35:47.114]   validation_split = 0.0
+[14:35:47.114]   verbose = 2
+[14:35:47.115]   weight_decay = 0.0001
+[14:35:47.115] epochs = 1
+[14:35:47.115] START: CLASSIFIER INITIALIZATION
+[14:35:47.115] END:   CLASSIFIER INITIALIZATION -- 0.000 sec
+[14:35:47.116] classifier object: StreamingSparseEvidenceGNNClassifier(batch_size=32, channel_encoder_dilation=5,
+                                     coherence_threshold=0.9,
+                                     compile_dense_edge_helper=True,
+                                     cwt_backend='torch',
+                                     dense_edge_temporal_mode='rnn',
+                                     dense_edge_time_downsample=16,
+                                     device='cuda', epochs=1,
+                                     event_aggregation='concat',
+                                     event_mode='dense', learning_rate=0.002,
+                                     lowest=8.0, nfreqs=8,
+                                     phase_threshold_deg=10.0,
+                                     precompute_chunk_size=4,
+                                     surrogate_percentile=99.0,
+                                     surrogate_seed=42, validation_split=0.0,
+                                     verbose=2)
+
+==========================================================================================
+TRAINING -- EXACTLY ONE EPOCH
+==========================================================================================
+[14:35:47.117] Could not read process memory: No module named 'resource'
+[14:35:47.117] TORCH CUDA: available
+[14:35:47.117] CUDA allocated: 0.0 MB
+[14:35:47.117] CUDA reserved: 0.0 MB
+[14:35:47.117] START: clf.fit(X_train, y_train)
+[Train] validation disabled.
+CWT(batched,gpu-resident):   0%|          | 0/46 [00:00<?, ?it/s]                                                                 [SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 2/2 trial(s) need compute, chunk_size=4...
+dense-edges[fixed]:   0%|          | 0/1 [00:00<?, ?chunk/s]dense-edges[fixed]: 100%|##########| 1/1 [00:01<00:00,  1.85s/chunk]                                                                    [SparseEvidenceGNN] dense-edges[fixed] phase timing over 1 chunk(s) of <= 4 trial(s) (device=cuda): threshold=0.000s transfer=0.001s compute=1.845s copy_back=0.000s total=1.846s (1846.04ms/chunk, 923.02ms/trial)
+[Sparse-Evidence] Parameter summary
+[Sparse-Evidence] channel_encoder.net.0.weight: shape=(8, 1, 9) params=72 trainable=True
+[Sparse-Evidence] channel_encoder.net.0.bias: shape=(8,) params=8 trainable=True
+[Sparse-Evidence] channel_encoder.net.2.weight: shape=(8, 8, 9) params=576 trainable=True
+[Sparse-Evidence] channel_encoder.net.2.bias: shape=(8,) params=8 trainable=True
+[Sparse-Evidence] sparse_message_mlp.0.weight: shape=(8, 24) params=192 trainable=True
+[Sparse-Evidence] sparse_message_mlp.0.bias: shape=(8,) params=8 trainable=True
+[Sparse-Evidence] sparse_message_mlp.2.weight: shape=(8, 8) params=64 trainable=True
+[Sparse-Evidence] sparse_message_mlp.2.bias: shape=(8,) params=8 trainable=True
+[Sparse-Evidence] sparse_classifier.weight: shape=(2, 4048) params=8096 trainable=True
+[Sparse-Evidence] sparse_classifier.bias: shape=(2,) params=2 trainable=True
+[Sparse-Evidence] hop_message_mlp.0.weight: shape=(8, 16) params=128 trainable=True
+[Sparse-Evidence] hop_message_mlp.0.bias: shape=(8,) params=8 trainable=True
+[Sparse-Evidence] hop_message_mlp.2.weight: shape=(8, 8) params=64 trainable=True
+[Sparse-Evidence] hop_message_mlp.2.bias: shape=(8,) params=8 trainable=True
+[Sparse-Evidence] hop_update.weight_ih: shape=(24, 8) params=192 trainable=True
+[Sparse-Evidence] hop_update.weight_hh: shape=(24, 8) params=192 trainable=True
+[Sparse-Evidence] hop_update.bias_ih: shape=(24,) params=24 trainable=True
+[Sparse-Evidence] hop_update.bias_hh: shape=(24,) params=24 trainable=True
+[Sparse-Evidence] hop_message_mlp_freq.0.weight: shape=(8, 16) params=128 trainable=True
+[Sparse-Evidence] hop_message_mlp_freq.0.bias: shape=(8,) params=8 trainable=True
+[Sparse-Evidence] hop_message_mlp_freq.2.weight: shape=(8, 8) params=64 trainable=True
+[Sparse-Evidence] hop_message_mlp_freq.2.bias: shape=(8,) params=8 trainable=True
+[Sparse-Evidence] hop_update_freq.weight_ih: shape=(24, 8) params=192 trainable=True
+[Sparse-Evidence] hop_update_freq.weight_hh: shape=(24, 8) params=192 trainable=True
+[Sparse-Evidence] hop_update_freq.bias_ih: shape=(24,) params=24 trainable=True
+[Sparse-Evidence] hop_update_freq.bias_hh: shape=(24,) params=24 trainable=True
+[Sparse-Evidence] freq_pool.weight: shape=(1, 8) params=8 trainable=True
+[Sparse-Evidence] freq_pool.bias: shape=(1,) params=1 trainable=True
+[Sparse-Evidence] dense_edge_conv.gru.weight_ih_l0: shape=(24, 32) params=768 trainable=True
+[Sparse-Evidence] dense_edge_conv.gru.weight_hh_l0: shape=(24, 8) params=192 trainable=True
+[Sparse-Evidence] dense_edge_conv.gru.bias_ih_l0: shape=(24,) params=24 trainable=True
+[Sparse-Evidence] dense_edge_conv.gru.bias_hh_l0: shape=(24,) params=24 trainable=True
+[Sparse-Evidence] total_params=11331 trainable_params=11331 non_trainable_params=0
+[Sparse-Evidence] Parameter hashes algorithm=blake2b-128 precision=1.0e-05
+[Sparse-Evidence] channel_encoder.net.0.weight: weight_hash=0ddee87be54edb4c517dc30734f2cdc6
+[Sparse-Evidence] channel_encoder.net.0.bias: weight_hash=31997420112b95517309f32f62cf9591
+[Sparse-Evidence] channel_encoder.net.2.weight: weight_hash=f8b82d6e0849b21a0488002d8a8e913d
+[Sparse-Evidence] channel_encoder.net.2.bias: weight_hash=40e4bb5d24fa9a2b14cdaca13075c824
+[Sparse-Evidence] sparse_message_mlp.0.weight: weight_hash=64d0b0797e6c3ff04f1df1323fa90772
+[Sparse-Evidence] sparse_message_mlp.0.bias: weight_hash=896779563e115f455c785ab1f3247225
+[Sparse-Evidence] sparse_message_mlp.2.weight: weight_hash=37ddb9fd12609c54623c3747503d78f1
+[Sparse-Evidence] sparse_message_mlp.2.bias: weight_hash=6f50e20f91b8bba5e1a6929bf025349e
+[Sparse-Evidence] sparse_classifier.weight: weight_hash=e6943eafd9ff167236369b4c88ae9535
+[Sparse-Evidence] sparse_classifier.bias: weight_hash=e15c0f651d0d51512ce1af7410be92d2
+[Sparse-Evidence] hop_message_mlp.0.weight: weight_hash=3d2d297c09c0d2cf2bbb1e454812d80d
+[Sparse-Evidence] hop_message_mlp.0.bias: weight_hash=f3b89bbcef7fc1e678af03c2514f68b7
+[Sparse-Evidence] hop_message_mlp.2.weight: weight_hash=6c0ef7a1fccd0fd4291f705b12d03e46
+[Sparse-Evidence] hop_message_mlp.2.bias: weight_hash=ed9451c35d610c7c7d55426a24402a9a
+[Sparse-Evidence] hop_update.weight_ih: weight_hash=8352e7d0426f833797cb8f166f982a43
+[Sparse-Evidence] hop_update.weight_hh: weight_hash=d0716fd7f0f8cb550c5339f9090d557a
+[Sparse-Evidence] hop_update.bias_ih: weight_hash=b983fddc5dce68f638a96b444fc4ee5b
+[Sparse-Evidence] hop_update.bias_hh: weight_hash=12af37301feac42ef9158818c553fcf6
+[Sparse-Evidence] hop_message_mlp_freq.0.weight: weight_hash=9c71df9a40b8c6e5d52dc4e024bef8bb
+[Sparse-Evidence] hop_message_mlp_freq.0.bias: weight_hash=0b19ca9d1f7d5dde0eded00c8540a3b0
+[Sparse-Evidence] hop_message_mlp_freq.2.weight: weight_hash=8a567b7f093493debb6a40b8b5085755
+[Sparse-Evidence] hop_message_mlp_freq.2.bias: weight_hash=049dc81ce8d1d305ff2ecf93c8b4b446
+[Sparse-Evidence] hop_update_freq.weight_ih: weight_hash=b9162a515de9749bcbe5e3ee21a46fbb
+[Sparse-Evidence] hop_update_freq.weight_hh: weight_hash=79047ba1aedf9f1e7cd1dd3c1607d5d7
+[Sparse-Evidence] hop_update_freq.bias_ih: weight_hash=3e31b75b322974f423f6f4458e493252
+[Sparse-Evidence] hop_update_freq.bias_hh: weight_hash=861d479f6777b120cfc879e24e16d9cb
+[Sparse-Evidence] freq_pool.weight: weight_hash=ea92227454b46f9622d7aebdb96c9ff2
+[Sparse-Evidence] freq_pool.bias: weight_hash=e4cd3dbbfdd7959bc3f4348111335e29
+[Sparse-Evidence] dense_edge_conv.gru.weight_ih_l0: weight_hash=c6b826c8041fcebd95cd66079e6bdbbd
+[Sparse-Evidence] dense_edge_conv.gru.weight_hh_l0: weight_hash=dec636946c742b7ab201063b9dc463f9
+[Sparse-Evidence] dense_edge_conv.gru.bias_ih_l0: weight_hash=ef44edbcbd62c0c528a58ef968199144
+[Sparse-Evidence] dense_edge_conv.gru.bias_hh_l0: weight_hash=95488f16090822491e1045fa380f9b5e
+[Sparse-Evidence] weight_model_hash=278602a63667e69826e0a179ba2a9ab3
+[Sparse-Evidence] named_model_hash=27f68ea318b031ac175a0eba79073d15
+[Sparse-Evidence] SparseEvidenceGNN config n_channels=23 edges=253 nfreqs=8 hidden_dim=8 channel_embed_dim=8 coherence_threshold=0.9 phase_threshold_rad=0.1745 smooth_kernel_size=(5, 3) scale_adaptive_smoothing=False coi_enabled=True feature_ablation=zero_channel_embed event_aggregation=concat n_hops=1 freq_aware_hops=False event_mode=dense dense_conv_out_channels=8 time_averaged_graph=False dense_edge_temporal_mode=rnn shuffle_time_order=False temporal_graph_edge_dim=8 dense_edge_time_downsample=16
+[Sparse-Evidence] SparseEvidenceGNN dimensions B=32 T=7680 dtype=torch.float32 n_samples=2
+[Train] class weights: [0.459069 1.540931]
+[Train] start epochs=1 batches/epoch=20 batch_size=32 optimizer_step_batch_size=32 optimizer_step_batch_mode=credit device=cuda
+CWT(batched,gpu-resident):   0%|          | 0/736 [00:00<?, ?it/s]                                                                  [SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+dense-edges[fixed]:   0%|          | 0/8 [00:00<?, ?chunk/s]dense-edges[fixed]:  12%|#2        | 1/8 [00:01<00:07,  1.06s/chunk]dense-edges[fixed]:  25%|##5       | 2/8 [00:01<00:03,  1.82chunk/s]C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\_inductor\cudagraph_trees.py:2450: UserWarning: Unable to hit fast path of CUDAGraphs because of pending, uninvoked backwards. Consider running with torch.no_grad() or using torch.compiler.cudagraph_mark_step_begin() before each model invocation
+  warnings.warn(
+dense-edges[fixed]:  38%|###7      | 3/8 [00:01<00:01,  2.64chunk/s]dense-edges[fixed]:  50%|#####     | 4/8 [00:01<00:01,  3.27chunk/s]dense-edges[fixed]:  62%|######2   | 5/8 [00:01<00:00,  3.79chunk/s]dense-edges[fixed]:  75%|#######5  | 6/8 [00:01<00:00,  4.40chunk/s]dense-edges[fixed]:  88%|########7 | 7/8 [00:02<00:00,  4.59chunk/s]dense-edges[fixed]: 100%|##########| 8/8 [00:02<00:00,  4.81chunk/s]                                                                    [SparseEvidenceGNN] dense-edges[fixed] phase timing over 8 chunk(s) of <= 4 trial(s) (device=cuda): threshold=0.001s transfer=0.006s compute=2.344s copy_back=0.000s total=2.350s (293.78ms/chunk, 73.44ms/trial)
+CWT(batched,gpu-resident):   0%|          | 0/736 [00:00<?, ?it/s]                                                                  [SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+dense-edges[fixed]:   0%|          | 0/8 [00:00<?, ?chunk/s]dense-edges[fixed]:  12%|#2        | 1/8 [00:00<00:01,  5.48chunk/s]dense-edges[fixed]:  25%|##5       | 2/8 [00:00<00:01,  5.20chunk/s]dense-edges[fixed]:  38%|###7      | 3/8 [00:00<00:00,  5.16chunk/s]dense-edges[fixed]:  50%|#####     | 4/8 [00:00<00:00,  5.31chunk/s]dense-edges[fixed]:  62%|######2   | 5/8 [00:00<00:00,  5.24chunk/s]dense-edges[fixed]:  75%|#######5  | 6/8 [00:01<00:00,  5.12chunk/s]dense-edges[fixed]:  88%|########7 | 7/8 [00:01<00:00,  5.02chunk/s]dense-edges[fixed]: 100%|##########| 8/8 [00:01<00:00,  4.99chunk/s]                                                                    [SparseEvidenceGNN] dense-edges[fixed] phase timing over 8 chunk(s) of <= 4 trial(s) (device=cuda): threshold=0.001s transfer=0.007s compute=1.556s copy_back=0.000s total=1.564s (195.47ms/chunk, 48.87ms/trial)
+CWT(batched,gpu-resident):   0%|          | 0/736 [00:00<?, ?it/s]                                                                  [SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+dense-edges[fixed]:   0%|          | 0/8 [00:00<?, ?chunk/s]dense-edges[fixed]:  12%|#2        | 1/8 [00:00<00:01,  6.50chunk/s]dense-edges[fixed]:  25%|##5       | 2/8 [00:00<00:00,  6.62chunk/s]dense-edges[fixed]:  38%|###7      | 3/8 [00:00<00:00,  5.74chunk/s]dense-edges[fixed]:  50%|#####     | 4/8 [00:00<00:00,  6.05chunk/s]dense-edges[fixed]:  62%|######2   | 5/8 [00:00<00:00,  6.06chunk/s]dense-edges[fixed]:  75%|#######5  | 6/8 [00:00<00:00,  5.97chunk/s]dense-edges[fixed]:  88%|########7 | 7/8 [00:01<00:00,  5.99chunk/s]dense-edges[fixed]: 100%|##########| 8/8 [00:01<00:00,  6.17chunk/s]                                                                    [SparseEvidenceGNN] dense-edges[fixed] phase timing over 8 chunk(s) of <= 4 trial(s) (device=cuda): threshold=0.001s transfer=0.005s compute=1.303s copy_back=0.000s total=1.309s (163.60ms/chunk, 40.90ms/trial)
+CWT(batched,gpu-resident):   0%|          | 0/736 [00:00<?, ?it/s]                                                                  [SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+dense-edges[fixed]:   0%|          | 0/8 [00:00<?, ?chunk/s]dense-edges[fixed]:  12%|#2        | 1/8 [00:00<00:01,  6.69chunk/s]dense-edges[fixed]:  25%|##5       | 2/8 [00:00<00:01,  5.83chunk/s]dense-edges[fixed]:  38%|###7      | 3/8 [00:00<00:00,  5.77chunk/s]dense-edges[fixed]:  50%|#####     | 4/8 [00:00<00:00,  6.07chunk/s]dense-edges[fixed]:  62%|######2   | 5/8 [00:00<00:00,  6.10chunk/s]dense-edges[fixed]:  75%|#######5  | 6/8 [00:00<00:00,  6.28chunk/s]dense-edges[fixed]:  88%|########7 | 7/8 [00:01<00:00,  6.41chunk/s]dense-edges[fixed]: 100%|##########| 8/8 [00:01<00:00,  6.50chunk/s]                                                                    [SparseEvidenceGNN] dense-edges[fixed] phase timing over 8 chunk(s) of <= 4 trial(s) (device=cuda): threshold=0.001s transfer=0.005s compute=1.268s copy_back=0.000s total=1.273s (159.17ms/chunk, 39.79ms/trial)
+CWT(batched,gpu-resident):   0%|          | 0/736 [00:00<?, ?it/s]                                                                  [SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+dense-edges[fixed]:   0%|          | 0/8 [00:00<?, ?chunk/s]dense-edges[fixed]:  12%|#2        | 1/8 [00:00<00:06,  1.08chunk/s]dense-edges[fixed]:  25%|##5       | 2/8 [00:01<00:03,  1.78chunk/s]dense-edges[fixed]:  38%|###7      | 3/8 [00:01<00:02,  2.22chunk/s]dense-edges[fixed]:  50%|#####     | 4/8 [00:01<00:01,  2.52chunk/s]dense-edges[fixed]:  62%|######2   | 5/8 [00:02<00:01,  2.82chunk/s]dense-edges[fixed]:  75%|#######5  | 6/8 [00:02<00:00,  3.05chunk/s]dense-edges[fixed]:  88%|########7 | 7/8 [00:02<00:00,  3.19chunk/s]dense-edges[fixed]: 100%|##########| 8/8 [00:03<00:00,  3.19chunk/s]                                                                    [SparseEvidenceGNN] dense-edges[fixed] phase timing over 8 chunk(s) of <= 4 trial(s) (device=cuda): threshold=0.000s transfer=0.005s compute=3.012s copy_back=0.000s total=3.017s (377.14ms/chunk, 94.29ms/trial)
+CWT(batched,gpu-resident):   0%|          | 0/736 [00:00<?, ?it/s]                                                                  [SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+dense-edges[fixed]:   0%|          | 0/8 [00:00<?, ?chunk/s]dense-edges[fixed]:  12%|#2        | 1/8 [00:00<00:01,  6.71chunk/s]dense-edges[fixed]:  25%|##5       | 2/8 [00:00<00:00,  6.37chunk/s]dense-edges[fixed]:  38%|###7      | 3/8 [00:00<00:00,  6.04chunk/s]dense-edges[fixed]:  50%|#####     | 4/8 [00:00<00:00,  5.56chunk/s]dense-edges[fixed]:  62%|######2   | 5/8 [00:00<00:00,  5.79chunk/s]dense-edges[fixed]:  75%|#######5  | 6/8 [00:01<00:00,  6.02chunk/s]dense-edges[fixed]:  88%|########7 | 7/8 [00:01<00:00,  6.03chunk/s]dense-edges[fixed]: 100%|##########| 8/8 [00:01<00:00,  5.95chunk/s]                                                                    [SparseEvidenceGNN] dense-edges[fixed] phase timing over 8 chunk(s) of <= 4 trial(s) (device=cuda): threshold=0.001s transfer=0.005s compute=1.333s copy_back=0.000s total=1.339s (167.38ms/chunk, 41.85ms/trial)
+CWT(batched,gpu-resident):   0%|          | 0/736 [00:00<?, ?it/s]                                                                  [SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+dense-edges[fixed]:   0%|          | 0/8 [00:00<?, ?chunk/s]dense-edges[fixed]:  12%|#2        | 1/8 [00:00<00:01,  5.36chunk/s]dense-edges[fixed]:  25%|##5       | 2/8 [00:00<00:01,  5.40chunk/s]dense-edges[fixed]:  38%|###7      | 3/8 [00:00<00:00,  5.77chunk/s]dense-edges[fixed]:  50%|#####     | 4/8 [00:00<00:00,  5.86chunk/s]dense-edges[fixed]:  62%|######2   | 5/8 [00:00<00:00,  6.15chunk/s]dense-edges[fixed]:  75%|#######5  | 6/8 [00:01<00:00,  6.12chunk/s]dense-edges[fixed]:  88%|########7 | 7/8 [00:01<00:00,  6.33chunk/s]dense-edges[fixed]: 100%|##########| 8/8 [00:01<00:00,  6.45chunk/s]                                                                    [SparseEvidenceGNN] dense-edges[fixed] phase timing over 8 chunk(s) of <= 4 trial(s) (device=cuda): threshold=0.001s transfer=0.005s compute=1.298s copy_back=0.000s total=1.303s (162.94ms/chunk, 40.73ms/trial)
+CWT(batched,gpu-resident):   0%|          | 0/736 [00:00<?, ?it/s]                                                                  [SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+dense-edges[fixed]:   0%|          | 0/8 [00:00<?, ?chunk/s]dense-edges[fixed]:  12%|#2        | 1/8 [00:00<00:01,  6.68chunk/s]dense-edges[fixed]:  25%|##5       | 2/8 [00:00<00:00,  6.72chunk/s]dense-edges[fixed]:  38%|###7      | 3/8 [00:00<00:00,  6.71chunk/s]dense-edges[fixed]:  50%|#####     | 4/8 [00:00<00:00,  6.71chunk/s]dense-edges[fixed]:  62%|######2   | 5/8 [00:00<00:00,  6.71chunk/s]dense-edges[fixed]:  75%|#######5  | 6/8 [00:00<00:00,  6.70chunk/s]dense-edges[fixed]:  88%|########7 | 7/8 [00:01<00:00,  6.56chunk/s]dense-edges[fixed]: 100%|##########| 8/8 [00:01<00:00,  6.59chunk/s]                                                                    [SparseEvidenceGNN] dense-edges[fixed] phase timing over 8 chunk(s) of <= 4 trial(s) (device=cuda): threshold=0.001s transfer=0.005s compute=1.197s copy_back=0.000s total=1.202s (150.26ms/chunk, 37.56ms/trial)
+CWT(batched,gpu-resident):   0%|          | 0/736 [00:00<?, ?it/s]                                                                  [SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+dense-edges[fixed]:   0%|          | 0/8 [00:00<?, ?chunk/s]dense-edges[fixed]:  12%|#2        | 1/8 [00:00<00:01,  6.15chunk/s]dense-edges[fixed]:  25%|##5       | 2/8 [00:00<00:01,  5.63chunk/s]dense-edges[fixed]:  38%|###7      | 3/8 [00:00<00:00,  5.81chunk/s]dense-edges[fixed]:  50%|#####     | 4/8 [00:00<00:00,  5.99chunk/s]dense-edges[fixed]:  62%|######2   | 5/8 [00:00<00:00,  6.22chunk/s]dense-edges[fixed]:  75%|#######5  | 6/8 [00:00<00:00,  6.29chunk/s]dense-edges[fixed]:  88%|########7 | 7/8 [00:01<00:00,  6.14chunk/s]dense-edges[fixed]: 100%|##########| 8/8 [00:01<00:00,  6.05chunk/s]                                                                    [SparseEvidenceGNN] dense-edges[fixed] phase timing over 8 chunk(s) of <= 4 trial(s) (device=cuda): threshold=0.001s transfer=0.005s compute=1.314s copy_back=0.000s total=1.320s (165.03ms/chunk, 41.26ms/trial)
+CWT(batched,gpu-resident):   0%|          | 0/736 [00:00<?, ?it/s]                                                                  [SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+dense-edges[fixed]:   0%|          | 0/8 [00:00<?, ?chunk/s]dense-edges[fixed]:  12%|#2        | 1/8 [00:00<00:01,  5.44chunk/s]dense-edges[fixed]:  25%|##5       | 2/8 [00:00<00:01,  5.26chunk/s]dense-edges[fixed]:  38%|###7      | 3/8 [00:00<00:00,  5.28chunk/s]dense-edges[fixed]:  50%|#####     | 4/8 [00:00<00:00,  5.32chunk/s]dense-edges[fixed]:  62%|######2   | 5/8 [00:00<00:00,  5.72chunk/s]dense-edges[fixed]:  75%|#######5  | 6/8 [00:01<00:00,  5.75chunk/s]dense-edges[fixed]:  88%|########7 | 7/8 [00:01<00:00,  5.75chunk/s]dense-edges[fixed]: 100%|##########| 8/8 [00:01<00:00,  5.75chunk/s]                                                                    [SparseEvidenceGNN] dense-edges[fixed] phase timing over 8 chunk(s) of <= 4 trial(s) (device=cuda): threshold=0.001s transfer=0.005s compute=1.416s copy_back=0.000s total=1.422s (177.71ms/chunk, 44.43ms/trial)
+CWT(batched,gpu-resident):   0%|          | 0/736 [00:00<?, ?it/s]                                                                  [SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+dense-edges[fixed]:   0%|          | 0/8 [00:00<?, ?chunk/s]dense-edges[fixed]:  12%|#2        | 1/8 [00:00<00:01,  6.78chunk/s]dense-edges[fixed]:  25%|##5       | 2/8 [00:00<00:00,  6.68chunk/s]dense-edges[fixed]:  38%|###7      | 3/8 [00:00<00:00,  6.67chunk/s]dense-edges[fixed]:  50%|#####     | 4/8 [00:00<00:00,  6.70chunk/s]dense-edges[fixed]:  62%|######2   | 5/8 [00:01<00:01,  2.47chunk/s]dense-edges[fixed]:  75%|#######5  | 6/8 [00:01<00:00,  3.14chunk/s]dense-edges[fixed]:  88%|########7 | 7/8 [00:01<00:00,  3.80chunk/s]dense-edges[fixed]: 100%|##########| 8/8 [00:01<00:00,  4.40chunk/s]                                                                    [SparseEvidenceGNN] dense-edges[fixed] phase timing over 8 chunk(s) of <= 4 trial(s) (device=cuda): threshold=0.001s transfer=0.006s compute=1.189s copy_back=0.000s total=1.196s (149.44ms/chunk, 37.36ms/trial)
+CWT(batched,gpu-resident):   0%|          | 0/736 [00:00<?, ?it/s]                                                                  [SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+dense-edges[fixed]:   0%|          | 0/8 [00:00<?, ?chunk/s]dense-edges[fixed]:  12%|#2        | 1/8 [00:00<00:01,  6.28chunk/s]dense-edges[fixed]:  25%|##5       | 2/8 [00:00<00:00,  6.03chunk/s]dense-edges[fixed]:  38%|###7      | 3/8 [00:00<00:00,  5.99chunk/s]dense-edges[fixed]:  50%|#####     | 4/8 [00:00<00:00,  6.00chunk/s]dense-edges[fixed]:  62%|######2   | 5/8 [00:00<00:00,  6.12chunk/s]dense-edges[fixed]:  75%|#######5  | 6/8 [00:00<00:00,  6.25chunk/s]dense-edges[fixed]:  88%|########7 | 7/8 [00:01<00:00,  6.24chunk/s]dense-edges[fixed]: 100%|##########| 8/8 [00:01<00:00,  6.16chunk/s]                                                                    [SparseEvidenceGNN] dense-edges[fixed] phase timing over 8 chunk(s) of <= 4 trial(s) (device=cuda): threshold=0.001s transfer=0.006s compute=1.294s copy_back=0.000s total=1.300s (162.53ms/chunk, 40.63ms/trial)
+CWT(batched,gpu-resident):   0%|          | 0/736 [00:00<?, ?it/s]                                                                  [SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+dense-edges[fixed]:   0%|          | 0/8 [00:00<?, ?chunk/s]dense-edges[fixed]:  12%|#2        | 1/8 [00:00<00:01,  6.53chunk/s]dense-edges[fixed]:  25%|##5       | 2/8 [00:00<00:00,  6.53chunk/s]dense-edges[fixed]:  38%|###7      | 3/8 [00:00<00:00,  6.54chunk/s]dense-edges[fixed]:  50%|#####     | 4/8 [00:00<00:00,  6.50chunk/s]dense-edges[fixed]:  62%|######2   | 5/8 [00:00<00:00,  6.46chunk/s]dense-edges[fixed]:  75%|#######5  | 6/8 [00:00<00:00,  6.47chunk/s]dense-edges[fixed]:  88%|########7 | 7/8 [00:01<00:00,  6.46chunk/s]dense-edges[fixed]: 100%|##########| 8/8 [00:01<00:00,  6.27chunk/s]                                                                    [SparseEvidenceGNN] dense-edges[fixed] phase timing over 8 chunk(s) of <= 4 trial(s) (device=cuda): threshold=0.001s transfer=0.005s compute=1.241s copy_back=0.000s total=1.247s (155.89ms/chunk, 38.97ms/trial)
+CWT(batched,gpu-resident):   0%|          | 0/736 [00:00<?, ?it/s]                                                                  [SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+dense-edges[fixed]:   0%|          | 0/8 [00:00<?, ?chunk/s]dense-edges[fixed]:  12%|#2        | 1/8 [00:00<00:01,  6.54chunk/s]dense-edges[fixed]:  25%|##5       | 2/8 [00:00<00:00,  6.63chunk/s]dense-edges[fixed]:  38%|###7      | 3/8 [00:00<00:00,  6.67chunk/s]dense-edges[fixed]:  50%|#####     | 4/8 [00:00<00:00,  6.33chunk/s]dense-edges[fixed]:  62%|######2   | 5/8 [00:00<00:00,  5.94chunk/s]dense-edges[fixed]:  75%|#######5  | 6/8 [00:00<00:00,  6.14chunk/s]dense-edges[fixed]:  88%|########7 | 7/8 [00:01<00:00,  6.31chunk/s]dense-edges[fixed]: 100%|##########| 8/8 [00:01<00:00,  6.43chunk/s]                                                                    [SparseEvidenceGNN] dense-edges[fixed] phase timing over 8 chunk(s) of <= 4 trial(s) (device=cuda): threshold=0.001s transfer=0.005s compute=1.250s copy_back=0.000s total=1.256s (157.05ms/chunk, 39.26ms/trial)
+CWT(batched,gpu-resident):   0%|          | 0/736 [00:00<?, ?it/s]                                                                  [SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+dense-edges[fixed]:   0%|          | 0/8 [00:00<?, ?chunk/s]dense-edges[fixed]:  12%|#2        | 1/8 [00:00<00:01,  6.77chunk/s]dense-edges[fixed]:  25%|##5       | 2/8 [00:00<00:00,  6.73chunk/s]dense-edges[fixed]:  38%|###7      | 3/8 [00:00<00:00,  6.74chunk/s]dense-edges[fixed]:  50%|#####     | 4/8 [00:00<00:00,  6.74chunk/s]dense-edges[fixed]:  62%|######2   | 5/8 [00:00<00:00,  6.74chunk/s]dense-edges[fixed]:  75%|#######5  | 6/8 [00:00<00:00,  6.75chunk/s]dense-edges[fixed]:  88%|########7 | 7/8 [00:01<00:00,  6.42chunk/s]dense-edges[fixed]: 100%|##########| 8/8 [00:01<00:00,  5.97chunk/s]                                                                    [SparseEvidenceGNN] dense-edges[fixed] phase timing over 8 chunk(s) of <= 4 trial(s) (device=cuda): threshold=0.001s transfer=0.005s compute=1.246s copy_back=0.000s total=1.252s (156.47ms/chunk, 39.12ms/trial)
+CWT(batched,gpu-resident):   0%|          | 0/736 [00:00<?, ?it/s]                                                                  [SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+dense-edges[fixed]:   0%|          | 0/8 [00:00<?, ?chunk/s]dense-edges[fixed]:  12%|#2        | 1/8 [00:00<00:01,  6.77chunk/s]dense-edges[fixed]:  25%|##5       | 2/8 [00:00<00:00,  6.77chunk/s]dense-edges[fixed]:  38%|###7      | 3/8 [00:00<00:00,  6.75chunk/s]dense-edges[fixed]:  50%|#####     | 4/8 [00:00<00:00,  6.76chunk/s]dense-edges[fixed]:  62%|######2   | 5/8 [00:00<00:00,  6.75chunk/s]dense-edges[fixed]:  75%|#######5  | 6/8 [00:00<00:00,  6.75chunk/s]dense-edges[fixed]:  88%|########7 | 7/8 [00:01<00:00,  6.75chunk/s]dense-edges[fixed]: 100%|##########| 8/8 [00:01<00:00,  6.76chunk/s]                                                                    [SparseEvidenceGNN] dense-edges[fixed] phase timing over 8 chunk(s) of <= 4 trial(s) (device=cuda): threshold=0.001s transfer=0.005s compute=1.178s copy_back=0.000s total=1.184s (147.98ms/chunk, 36.99ms/trial)
+CWT(batched,gpu-resident):   0%|          | 0/736 [00:00<?, ?it/s]                                                                  [SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+dense-edges[fixed]:   0%|          | 0/8 [00:00<?, ?chunk/s]dense-edges[fixed]:  12%|#2        | 1/8 [00:00<00:01,  6.80chunk/s]dense-edges[fixed]:  25%|##5       | 2/8 [00:00<00:00,  6.72chunk/s]dense-edges[fixed]:  38%|###7      | 3/8 [00:00<00:00,  6.73chunk/s]dense-edges[fixed]:  50%|#####     | 4/8 [00:00<00:00,  6.73chunk/s]dense-edges[fixed]:  62%|######2   | 5/8 [00:00<00:00,  6.73chunk/s]dense-edges[fixed]:  75%|#######5  | 6/8 [00:00<00:00,  6.73chunk/s]dense-edges[fixed]:  88%|########7 | 7/8 [00:01<00:00,  6.73chunk/s]dense-edges[fixed]: 100%|##########| 8/8 [00:01<00:00,  6.74chunk/s]                                                                    [SparseEvidenceGNN] dense-edges[fixed] phase timing over 8 chunk(s) of <= 4 trial(s) (device=cuda): threshold=0.001s transfer=0.005s compute=1.181s copy_back=0.000s total=1.187s (148.35ms/chunk, 37.09ms/trial)
+CWT(batched,gpu-resident):   0%|          | 0/736 [00:00<?, ?it/s]                                                                  [SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+dense-edges[fixed]:   0%|          | 0/8 [00:00<?, ?chunk/s]dense-edges[fixed]:  12%|#2        | 1/8 [00:00<00:01,  6.78chunk/s]dense-edges[fixed]:  25%|##5       | 2/8 [00:00<00:00,  6.79chunk/s]dense-edges[fixed]:  38%|###7      | 3/8 [00:00<00:00,  6.76chunk/s]dense-edges[fixed]:  50%|#####     | 4/8 [00:00<00:00,  6.74chunk/s]dense-edges[fixed]:  62%|######2   | 5/8 [00:00<00:00,  6.74chunk/s]dense-edges[fixed]:  75%|#######5  | 6/8 [00:00<00:00,  6.74chunk/s]dense-edges[fixed]:  88%|########7 | 7/8 [00:01<00:00,  6.73chunk/s]dense-edges[fixed]: 100%|##########| 8/8 [00:01<00:00,  6.73chunk/s]                                                                    [SparseEvidenceGNN] dense-edges[fixed] phase timing over 8 chunk(s) of <= 4 trial(s) (device=cuda): threshold=0.001s transfer=0.005s compute=1.180s copy_back=0.000s total=1.185s (148.15ms/chunk, 37.04ms/trial)
+CWT(batched,gpu-resident):   0%|          | 0/736 [00:00<?, ?it/s]                                                                  [SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 32/32 trial(s) need compute, chunk_size=4...
+dense-edges[fixed]:   0%|          | 0/8 [00:00<?, ?chunk/s]dense-edges[fixed]:  12%|#2        | 1/8 [00:00<00:01,  6.75chunk/s]dense-edges[fixed]:  25%|##5       | 2/8 [00:00<00:00,  6.75chunk/s]dense-edges[fixed]:  38%|###7      | 3/8 [00:00<00:00,  6.73chunk/s]dense-edges[fixed]:  50%|#####     | 4/8 [00:00<00:00,  6.75chunk/s]dense-edges[fixed]:  62%|######2   | 5/8 [00:00<00:00,  6.74chunk/s]dense-edges[fixed]:  75%|#######5  | 6/8 [00:00<00:00,  6.75chunk/s]dense-edges[fixed]:  88%|########7 | 7/8 [00:01<00:00,  6.17chunk/s]dense-edges[fixed]: 100%|##########| 8/8 [00:01<00:00,  6.19chunk/s]                                                                    [SparseEvidenceGNN] dense-edges[fixed] phase timing over 8 chunk(s) of <= 4 trial(s) (device=cuda): threshold=0.001s transfer=0.005s compute=1.233s copy_back=0.000s total=1.239s (154.82ms/chunk, 38.70ms/trial)
+CWT(batched,gpu-resident):   0%|          | 0/345 [00:00<?, ?it/s]                                                                  [SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 15/15 trial(s) need compute, chunk_size=4...
+dense-edges[fixed]:   0%|          | 0/4 [00:00<?, ?chunk/s]dense-edges[fixed]:  25%|##5       | 1/4 [00:00<00:00,  5.67chunk/s]dense-edges[fixed]:  50%|#####     | 2/4 [00:00<00:00,  5.79chunk/s]dense-edges[fixed]:  75%|#######5  | 3/4 [00:00<00:00,  5.64chunk/s]                                                                    [14:36:38.536] FAIL:  clf.fit(X_train, y_train) -- 51.419 sec
+
+==========================================================================================
+TRAINING FAILED
+==========================================================================================
+[14:36:38.536] Training failed after 51.419 sec
+[14:36:38.536] 
+[14:36:38.536] FULL TRACEBACK:
+Traceback (most recent call last):
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\pipeline_debug.py", line 709, in run_debug
+    clf.fit(X_train, y_train)
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\pipelines\cwt_gnn_classifiers.py", line 5940, in fit
+    self._train_loop(
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\pipelines\common.py", line 1865, in _train_loop
+    for batch in train_loader:
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\utils\data\dataloader.py", line 734, in __next__
+    data = self._next_data()
+           ^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\utils\data\dataloader.py", line 790, in _next_data
+    data = self._dataset_fetcher.fetch(index)  # may raise StopIteration
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\utils\data\_utils\fetch.py", line 54, in fetch
+    data = self.dataset[possibly_batched_index]
+           ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\pipelines\cwt_gnn_classifiers.py", line 5806, in __getitem__
+    raw_x, dense_edge_raw = self.classifier._prepare_features(
+                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\pipelines\cwt_gnn_classifiers.py", line 4779, in _prepare_features
+    dense_edge_raw = self._precompute_dense_edge_inputs(
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\pipelines\cwt_gnn_classifiers.py", line 5602, in _precompute_dense_edge_inputs
+    dense = compute_dense_edge_input_fn(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\_dynamo\eval_frame.py", line 736, in compile_wrapper
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\pipelines\cwt_gnn_classifiers.py", line 3511, in compute_dense_edge_input
+    def compute_dense_edge_input(self, w_real, w_imag, freqs, coherence_threshold_override=None):
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\_dynamo\eval_frame.py", line 929, in _fn
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\_functorch\aot_autograd.py", line 1241, in forward
+    return compiled_fn(full_args)
+           ^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\_functorch\_aot_autograd\runtime_wrappers.py", line 384, in runtime_wrapper
+    all_outs = call_func_at_runtime_with_args(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\_functorch\_aot_autograd\utils.py", line 126, in call_func_at_runtime_with_args
+    out = normalize_as_list(f(args))
+                            ^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\_functorch\_aot_autograd\runtime_wrappers.py", line 750, in inner_fn
+    outs = compiled_fn(args)
+           ^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\_functorch\_aot_autograd\runtime_wrappers.py", line 556, in wrapper
+    return compiled_fn(runtime_args)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\_inductor\cudagraph_trees.py", line 387, in deferred_cudagraphify
+    return fn(inputs)
+           ^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\_inductor\utils.py", line 2716, in run
+    out = model(new_inputs)
+          ^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\_inductor\cudagraph_trees.py", line 2012, in run
+    out = self._run(new_inputs, function_id)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\_inductor\cudagraph_trees.py", line 2131, in _run
+    return self.execute_node(child, new_inputs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\_inductor\cudagraph_trees.py", line 2247, in execute_node
+    return node.run(new_inputs)
+           ^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\_inductor\cudagraph_trees.py", line 1107, in run
+    self._copy_inputs_and_remove_from_src(self.reconstructed_inputs, new_inputs)
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\_inductor\cudagraph_trees.py", line 1070, in _copy_inputs_and_remove_from_src
+    torch._foreach_copy_(dst_tensors, src_tensors)
+RuntimeError: The size of tensor a (4) must match the size of tensor b (3) at non-singleton dimension 0
+[14:36:38.539] Could not read process memory: No module named 'resource'
+[14:36:38.539] TORCH CUDA: available
+[14:36:38.539] CUDA allocated: 747.8 MB
+[14:36:38.539] CUDA reserved: 13410.0 MB
+
+==========================================================================================
+UNHANDLED FAILURE
+==========================================================================================
+Traceback (most recent call last):
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\pipeline_debug.py", line 1116, in main
+    run_debug(args)
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\pipeline_debug.py", line 709, in run_debug
+    clf.fit(X_train, y_train)
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\pipelines\cwt_gnn_classifiers.py", line 5940, in fit
+    self._train_loop(
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\pipelines\common.py", line 1865, in _train_loop
+    for batch in train_loader:
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\utils\data\dataloader.py", line 734, in __next__
+    data = self._next_data()
+           ^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\utils\data\dataloader.py", line 790, in _next_data
+    data = self._dataset_fetcher.fetch(index)  # may raise StopIteration
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\utils\data\_utils\fetch.py", line 54, in fetch
+    data = self.dataset[possibly_batched_index]
+           ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\pipelines\cwt_gnn_classifiers.py", line 5806, in __getitem__
+    raw_x, dense_edge_raw = self.classifier._prepare_features(
+                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\pipelines\cwt_gnn_classifiers.py", line 4779, in _prepare_features
+    dense_edge_raw = self._precompute_dense_edge_inputs(
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\pipelines\cwt_gnn_classifiers.py", line 5602, in _precompute_dense_edge_inputs
+    dense = compute_dense_edge_input_fn(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\_dynamo\eval_frame.py", line 736, in compile_wrapper
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\pipelines\cwt_gnn_classifiers.py", line 3511, in compute_dense_edge_input
+    def compute_dense_edge_input(self, w_real, w_imag, freqs, coherence_threshold_override=None):
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\_dynamo\eval_frame.py", line 929, in _fn
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\_functorch\aot_autograd.py", line 1241, in forward
+    return compiled_fn(full_args)
+           ^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\_functorch\_aot_autograd\runtime_wrappers.py", line 384, in runtime_wrapper
+    all_outs = call_func_at_runtime_with_args(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\_functorch\_aot_autograd\utils.py", line 126, in call_func_at_runtime_with_args
+    out = normalize_as_list(f(args))
+                            ^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\_functorch\_aot_autograd\runtime_wrappers.py", line 750, in inner_fn
+    outs = compiled_fn(args)
+           ^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\_functorch\_aot_autograd\runtime_wrappers.py", line 556, in wrapper
+    return compiled_fn(runtime_args)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\_inductor\cudagraph_trees.py", line 387, in deferred_cudagraphify
+    return fn(inputs)
+           ^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\_inductor\utils.py", line 2716, in run
+    out = model(new_inputs)
+          ^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\_inductor\cudagraph_trees.py", line 2012, in run
+    out = self._run(new_inputs, function_id)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\_inductor\cudagraph_trees.py", line 2131, in _run
+    return self.execute_node(child, new_inputs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\_inductor\cudagraph_trees.py", line 2247, in execute_node
+    return node.run(new_inputs)
+           ^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\_inductor\cudagraph_trees.py", line 1107, in run
+    self._copy_inputs_and_remove_from_src(self.reconstructed_inputs, new_inputs)
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\_inductor\cudagraph_trees.py", line 1070, in _copy_inputs_and_remove_from_src
+    torch._foreach_copy_(dst_tensors, src_tensors)
+RuntimeError: The size of tensor a (4) must match the size of tensor b (3) at non-singleton dimension 0
+[14:36:38.541] Could not read process memory: No module named 'resource'
+[14:36:38.541] TORCH CUDA: available
+[14:36:38.542] CUDA allocated: 747.8 MB
+[14:36:38.542] CUDA reserved: 13410.0 MB

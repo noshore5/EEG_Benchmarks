@@ -1,0 +1,375 @@
+[15:21:28.125] Detailed log file: C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\debug_one_epoch_20260822-152128.log
+
+==========================================================================================
+ONE-EPOCH DEBUG RUN
+==========================================================================================
+[15:21:28.125] Started: 2026-08-22T15:21:28.125093
+[15:21:28.125] Repository root: C:\Users\User\Documents\noshore5\EEG_Benchmarks
+[15:21:28.125] Script directory: C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy
+[15:21:28.125] Python executable: C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Scripts\python.exe
+
+==========================================================================================
+TORCH ENVIRONMENT
+==========================================================================================
+[15:21:28.133] torch version: 2.8.0+cu128
+[15:21:28.133] python: 3.11.9
+[15:21:28.153] platform: Windows-10-10.0.26200-SP0
+[15:21:28.153] CPU count: 12
+[15:21:28.153] MPS built: False
+[15:21:28.153] MPS available: False
+[15:21:28.153] CUDA built: True
+[15:21:28.175] CUDA available: True
+[15:21:28.176] torch threads: 6
+[15:21:28.176] torch interop threads: 6
+[15:21:28.176] Could not read process memory: No module named 'resource'
+[15:21:28.176] TORCH CUDA: available
+[15:21:28.176] CUDA allocated: 0.0 MB
+[15:21:28.176] CUDA reserved: 0.0 MB
+
+==========================================================================================
+RESOLVED CONFIGURATION
+==========================================================================================
+[15:21:28.176] pipeline                = dense_edge_gru
+[15:21:28.176] label_mode              = detection
+[15:21:28.176] subjects                = [1]
+[15:21:28.176] epochs                  = 1  <-- FORCED
+[15:21:28.177] window_length           = 4.0
+[15:21:28.177] step_size               = 8.0
+[15:21:28.177] sph                     = 300.0
+[15:21:28.177] sop                     = 900.0
+[15:21:28.177] postictal_buffer        = 1800.0
+[15:21:28.177] max_interictal_records  = None
+[15:21:28.177] negative:positive       = None
+[15:21:28.177] device                  = cuda
+[15:21:28.177] seed                    = 42
+
+==========================================================================================
+DATASET CONSTRUCTION
+==========================================================================================
+[15:21:28.177] START: BUILD WINDOWED DATASET
+[15:21:30.968] END:   BUILD WINDOWED DATASET -- 2.792 sec
+[15:21:30.968] Dataset construction total: 2.792 sec
+[15:21:30.968] X: shape=(2991, 23, 1024), dtype=float64, ndim=3, n=70444032
+[15:21:31.868] X: min=-1884.25, max=1218.07, mean=0.185827, std=43.8424
+[15:21:31.963] X: nan=0
+[15:21:31.963] X: contiguous=True
+[15:21:31.963] X: approx memory=537.45 MB
+[15:21:31.963] y: shape=(2991,), dtype=int64
+[15:21:31.963]   label=np.int64(0): 2933 windows (98.06%)
+[15:21:31.963]   label=np.int64(1): 58 windows (1.94%)
+[15:21:31.963] metadata shape=(2991, 6)
+[15:21:31.963] metadata columns=['subject', 'session', 'run', 'window_start', 'window_end', 'run_start_time']
+[15:21:31.964]   subject: dtype=int64, unique=1
+[15:21:31.964]   session: dtype=object, unique=1
+[15:21:31.964]   run: dtype=object, unique=7
+[15:21:31.964]   window_start: dtype=float64, unique=450
+[15:21:31.964]   window_end: dtype=float64, unique=450
+[15:21:31.965]   run_start_time: dtype=object, unique=7
+[15:21:31.965] subjects: [1]
+[15:21:31.965] runs: 7 unique
+[15:21:31.965] window_start range: 0.0 -> 3592.0
+
+First metadata rows:
+ subject session run  window_start  window_end            run_start_time
+       1       0  01           0.0         4.0 2076-11-06T13:43:04+00:00
+       1       0  01           8.0        12.0 2076-11-06T13:43:04+00:00
+       1       0  01          16.0        20.0 2076-11-06T13:43:04+00:00
+       1       0  01          24.0        28.0 2076-11-06T13:43:04+00:00
+       1       0  01          32.0        36.0 2076-11-06T13:43:04+00:00
+[15:21:31.967] Could not read process memory: No module named 'resource'
+[15:21:31.968] TORCH CUDA: available
+[15:21:31.968] CUDA allocated: 0.0 MB
+[15:21:31.968] CUDA reserved: 0.0 MB
+
+==========================================================================================
+FOLD DISCOVERY
+==========================================================================================
+[15:21:31.968] Found 7 recording folds
+[15:21:31.968] fold 0: subject=1 run=01
+[15:21:31.968] fold 1: subject=1 run=02
+[15:21:31.968] fold 2: subject=1 run=03
+[15:21:31.968] fold 3: subject=1 run=04
+[15:21:31.968] fold 4: subject=1 run=05
+[15:21:31.968] fold 5: subject=1 run=06
+[15:21:31.968] fold 6: subject=1 run=07
+[15:21:31.968] DEBUGGING ONLY FOLD 0
+[15:21:31.968] held-out recording = (1, '01')
+
+==========================================================================================
+TRAIN / TEST SPLIT
+==========================================================================================
+[15:21:31.968] train windows BEFORE subsampling: 2541
+[15:21:31.968] test windows: 450
+[15:21:32.115] X_train: shape=(2541, 23, 1024), dtype=float64, ndim=3, n=59845632
+[15:21:32.906] X_train: min=-1884.25, max=1218.07, mean=0.192839, std=44.0302
+[15:21:32.995] X_train: nan=0
+[15:21:32.996] X_train: contiguous=True
+[15:21:32.996] X_train: approx memory=456.59 MB
+[15:21:32.996] y_train: shape=(2541,), dtype=int64
+[15:21:32.996]   label=np.int64(0): 2488 windows (97.91%)
+[15:21:32.996]   label=np.int64(1): 53 windows (2.09%)
+[15:21:32.996] X_test: shape=(450, 23, 1024), dtype=float64, ndim=3, n=10598400
+[15:21:33.129] X_test: min=-554.237, max=595.263, mean=0.146231, std=42.7664
+[15:21:33.141] X_test: nan=0
+[15:21:33.141] X_test: contiguous=True
+[15:21:33.141] X_test: approx memory=80.86 MB
+[15:21:33.141] y_test: shape=(450,), dtype=int64
+[15:21:33.141]   label=np.int64(0): 445 windows (98.89%)
+[15:21:33.141]   label=np.int64(1): 5 windows (1.11%)
+[15:21:33.141] metadata train rows: 2541
+[15:21:33.141] metadata test rows:  450
+[15:21:33.142] Could not read process memory: No module named 'resource'
+[15:21:33.142] TORCH CUDA: available
+[15:21:33.142] CUDA allocated: 0.0 MB
+[15:21:33.143] CUDA reserved: 0.0 MB
+
+==========================================================================================
+CLASSIFIER CONFIGURATION
+==========================================================================================
+[15:21:33.143] classifier class: SparseEvidenceGNNClassifier
+[15:21:33.143]   batch_size = 736
+[15:21:33.143]   channel_embed_dim = 8
+[15:21:33.143]   channel_encoder_dilation = 5
+[15:21:33.143]   channel_subset = None
+[15:21:33.143]   coherence_threshold = 0.9
+[15:21:33.143]   coherence_threshold_mode = 'fixed'
+[15:21:33.143]   coi_enabled = True
+[15:21:33.143]   compile_dense_edge_helper = False
+[15:21:33.143]   cwt_backend = 'torch'
+[15:21:33.143]   cwt_cache = <Epilepsy.pipelines.cwt_window_cache.DiskCWTCache object at 0x000001FFF7891250>
+[15:21:33.143]   cwt_resample_n_time = None
+[15:21:33.143]   dense_conv_kernel_size = 5
+[15:21:33.143]   dense_conv_pool_size = 4
+[15:21:33.143]   dense_edge_amp_bf16 = False
+[15:21:33.143]   dense_edge_cache_dir = WindowsPath('C:/Users/User/mne_data/dense_edge_cache')
+[15:21:33.143]   dense_edge_temporal_mode = 'rnn'
+[15:21:33.143]   dense_edge_time_downsample = 16
+[15:21:33.143]   device = 'cuda'
+[15:21:33.143]   event_aggregation = 'concat'
+[15:21:33.143]   event_mode = 'dense'
+[15:21:33.143]   feature_ablation = 'zero_channel_embed'
+[15:21:33.143]   grad_clip_norm = 0.1
+[15:21:33.143]   hidden_dim = 8
+[15:21:33.143]   highest = 40.0
+[15:21:33.143]   learning_rate = 0.002
+[15:21:33.143]   lowest = 8.0
+[15:21:33.143]   nfreqs = 8
+[15:21:33.143]   normalize_input = True
+[15:21:33.143]   phase_threshold_deg = 10.0
+[15:21:33.143]   precompute_chunk_size = 4
+[15:21:33.143]   sampling_rate = 256
+[15:21:33.143]   seed = 42
+[15:21:33.143]   smooth_kernel_size = (5, 3)
+[15:21:33.143]   surrogate_count = 100
+[15:21:33.143]   surrogate_percentile = 99.0
+[15:21:33.143]   surrogate_seed = 42
+[15:21:33.143]   time_averaged_graph = False
+[15:21:33.143]   use_class_weights = True
+[15:21:33.143]   validation_split = 0.0
+[15:21:33.143]   verbose = 2
+[15:21:33.144]   weight_decay = 0.0001
+[15:21:33.144] epochs = 1
+[15:21:33.144] START: CLASSIFIER INITIALIZATION
+[15:21:33.144] END:   CLASSIFIER INITIALIZATION -- 0.000 sec
+[15:21:33.146] classifier object: SparseEvidenceGNNClassifier(batch_size=736, channel_encoder_dilation=5,
+                            coherence_threshold=0.9, cwt_backend='torch',
+                            cwt_cache=<Epilepsy.pipelines.cwt_window_cache.DiskCWTCache object at 0x000001FFF7891250>,
+                            dense_edge_cache_dir=WindowsPath('C:/Users/User/mne_data/dense_edge_cache'),
+                            dense_edge_temporal_mode='rnn',
+                            dense_edge_time_downsample=16, device='cuda',
+                            epochs=1, event_aggregation='concat',
+                            event_mode='dense', learning_rate=0.002, lowest=8.0,
+                            nfreqs=8, phase_threshold_deg=10.0,
+                            precompute_chunk_size=4, surrogate_percentile=99.0,
+                            surrogate_seed=42, validation_split=0.0, verbose=2)
+
+==========================================================================================
+TRAINING -- EXACTLY ONE EPOCH
+==========================================================================================
+[15:21:33.146] Could not read process memory: No module named 'resource'
+[15:21:33.146] TORCH CUDA: available
+[15:21:33.146] CUDA allocated: 0.0 MB
+[15:21:33.146] CUDA reserved: 0.0 MB
+[15:21:33.146] START: clf.fit(X_train, y_train)
+[Train] validation disabled.
+CWT(cached,batched):   0%|          | 0/58443 [00:00<?, ?it/s]CWT(cached,batched):   0%|          | 256/58443 [00:01<04:12, 230.64it/s]CWT(cached,batched):   1%|          | 512/58443 [00:01<03:39, 264.22it/s]CWT(cached,batched):   1%|1         | 768/58443 [00:02<03:31, 273.28it/s]CWT(cached,batched):   2%|1         | 1024/58443 [00:03<03:10, 301.42it/s]CWT(cached,batched):   2%|2         | 1280/58443 [00:04<03:00, 316.67it/s]CWT(cached,batched):   3%|2         | 1536/58443 [00:05<02:56, 322.61it/s]CWT(cached,batched):   3%|3         | 1792/58443 [00:06<03:28, 272.27it/s]CWT(cached,batched):   4%|3         | 2048/58443 [00:07<03:16, 286.52it/s]CWT(cached,batched):   4%|3         | 2304/58443 [00:07<03:13, 289.47it/s]CWT(cached,batched):   4%|4         | 2560/58443 [00:09<03:21, 276.76it/s]CWT(cached,batched):   5%|4         | 2816/58443 [00:10<03:35, 257.80it/s]CWT(cached,batched):   5%|5         | 3072/58443 [00:10<03:01, 305.64it/s]CWT(cached,batched):   6%|5         | 3328/58443 [00:11<02:54, 315.46it/s]CWT(cached,batched):   6%|6         | 3584/58443 [00:12<03:36, 253.38it/s]CWT(cached,batched):   7%|6         | 3840/58443 [00:13<03:01, 300.31it/s]CWT(cached,batched):   7%|7         | 4096/58443 [00:14<03:43, 243.14it/s]CWT(cached,batched):   7%|7         | 4352/58443 [00:17<04:55, 183.00it/s]CWT(cached,batched):   8%|7         | 4608/58443 [00:18<05:27, 164.34it/s]CWT(cached,batched):   8%|8         | 4864/58443 [00:20<05:10, 172.52it/s]CWT(cached,batched):   9%|8         | 5120/58443 [00:21<04:51, 183.06it/s]CWT(cached,batched):   9%|9         | 5376/58443 [00:22<04:16, 206.55it/s]CWT(cached,batched):  10%|9         | 5632/58443 [00:24<05:31, 159.15it/s]CWT(cached,batched):  10%|#         | 5888/58443 [00:27<06:32, 133.81it/s]CWT(cached,batched):  11%|#         | 6144/58443 [00:27<05:02, 172.77it/s]CWT(cached,batched):  11%|#         | 6400/58443 [00:28<04:29, 193.42it/s]CWT(cached,batched):  11%|#1        | 6656/58443 [00:29<03:27, 249.03it/s]CWT(cached,batched):  12%|#1        | 6912/58443 [00:29<02:48, 306.36it/s]CWT(cached,batched):  12%|#2        | 7168/58443 [00:30<02:23, 358.11it/s]CWT(cached,batched):  13%|#2        | 7424/58443 [00:30<01:59, 425.67it/s]CWT(cached,batched):  13%|#3        | 7680/58443 [00:32<03:02, 278.31it/s]CWT(cached,batched):  14%|#3        | 7936/58443 [00:32<02:34, 326.90it/s]CWT(cached,batched):  14%|#4        | 8192/58443 [00:33<02:39, 315.63it/s]CWT(cached,batched):  14%|#4        | 8448/58443 [00:33<02:23, 348.95it/s]CWT(cached,batched):  15%|#4        | 8704/58443 [00:34<02:10, 381.41it/s]CWT(cached,batched):  15%|#5        | 8960/58443 [00:34<01:52, 439.37it/s]CWT(cached,batched):  16%|#5        | 9216/58443 [00:35<01:38, 498.10it/s]CWT(cached,batched):  16%|#6        | 9472/58443 [00:35<01:46, 461.57it/s]CWT(cached,batched):  17%|#6        | 9728/58443 [00:36<01:38, 492.97it/s]CWT(cached,batched):  17%|#7        | 9984/58443 [00:36<01:42, 471.28it/s]CWT(cached,batched):  18%|#7        | 10240/58443 [00:37<01:37, 492.00it/s]CWT(cached,batched):  18%|#7        | 10496/58443 [00:37<01:32, 516.45it/s]CWT(cached,batched):  18%|#8        | 10752/58443 [00:38<01:33, 511.74it/s]CWT(cached,batched):  19%|#8        | 11008/58443 [00:38<01:25, 555.00it/s]CWT(cached,batched):  19%|#9        | 11264/58443 [00:39<01:19, 591.55it/s]CWT(cached,batched):  20%|#9        | 11520/58443 [00:39<01:13, 636.55it/s]CWT(cached,batched):  20%|##        | 11776/58443 [00:39<01:24, 553.89it/s]CWT(cached,batched):  21%|##        | 12032/58443 [00:40<01:18, 593.69it/s]CWT(cached,batched):  21%|##1       | 12288/58443 [00:40<01:13, 630.99it/s]CWT(cached,batched):  21%|##1       | 12544/58443 [00:41<01:19, 575.90it/s]CWT(cached,batched):  22%|##1       | 12800/58443 [00:41<01:14, 611.03it/s]CWT(cached,batched):  22%|##2       | 13056/58443 [00:42<01:20, 562.15it/s]CWT(cached,batched):  23%|##2       | 13312/58443 [00:42<01:27, 518.19it/s]CWT(cached,batched):  23%|##3       | 13568/58443 [00:43<01:21, 548.84it/s]CWT(cached,batched):  24%|##3       | 13824/58443 [00:43<01:14, 601.49it/s]CWT(cached,batched):  24%|##4       | 14080/58443 [00:44<01:30, 489.49it/s]CWT(cached,batched):  25%|##4       | 14336/58443 [00:44<01:25, 518.05it/s]CWT(cached,batched):  25%|##4       | 14592/58443 [00:44<01:17, 567.33it/s]CWT(cached,batched):  25%|##5       | 14848/58443 [00:45<01:20, 540.41it/s]CWT(cached,batched):  26%|##5       | 15104/58443 [00:46<01:48, 401.15it/s]CWT(cached,batched):  26%|##6       | 15360/58443 [00:46<01:35, 450.25it/s]CWT(cached,batched):  27%|##6       | 15616/58443 [00:47<01:41, 421.93it/s]CWT(cached,batched):  27%|##7       | 15872/58443 [00:48<02:06, 336.61it/s]CWT(cached,batched):  28%|##7       | 16128/58443 [00:49<01:49, 386.70it/s]CWT(cached,batched):  28%|##8       | 16384/58443 [00:49<01:47, 391.17it/s]CWT(cached,batched):  28%|##8       | 16640/58443 [00:50<01:31, 457.88it/s]CWT(cached,batched):  29%|##8       | 16896/58443 [00:51<02:21, 294.51it/s]CWT(cached,batched):  29%|##9       | 17152/58443 [00:52<01:54, 361.00it/s]CWT(cached,batched):  30%|##9       | 17408/58443 [00:52<01:36, 427.21it/s]CWT(cached,batched):  30%|###       | 17664/58443 [00:53<01:42, 399.29it/s]CWT(cached,batched):  31%|###       | 17920/58443 [00:53<01:31, 441.21it/s]CWT(cached,batched):  31%|###1      | 18176/58443 [00:54<01:24, 478.86it/s]CWT(cached,batched):  32%|###1      | 18432/58443 [00:54<01:26, 464.70it/s]CWT(cached,batched):  32%|###1      | 18688/58443 [00:54<01:16, 517.21it/s]CWT(cached,batched):  32%|###2      | 18944/58443 [00:55<01:09, 567.53it/s]CWT(cached,batched):  33%|###2      | 19200/58443 [00:55<01:15, 522.18it/s]CWT(cached,batched):  33%|###3      | 19456/58443 [00:56<01:08, 565.49it/s]CWT(cached,batched):  34%|###3      | 19712/58443 [00:56<01:03, 612.82it/s]CWT(cached,batched):  34%|###4      | 19968/58443 [00:57<01:02, 618.14it/s]CWT(cached,batched):  35%|###4      | 20224/58443 [00:59<02:18, 275.48it/s]CWT(cached,batched):  35%|###5      | 20480/58443 [00:59<01:54, 332.70it/s]CWT(cached,batched):  35%|###5      | 20736/58443 [00:59<01:35, 396.59it/s]CWT(cached,batched):  36%|###5      | 20992/58443 [01:00<01:28, 422.40it/s]CWT(cached,batched):  36%|###6      | 21248/58443 [01:00<01:21, 453.69it/s]CWT(cached,batched):  37%|###6      | 21504/58443 [01:01<01:15, 488.58it/s]CWT(cached,batched):  37%|###7      | 21760/58443 [01:01<01:16, 480.78it/s]CWT(cached,batched):  38%|###7      | 22016/58443 [01:02<01:09, 524.45it/s]CWT(cached,batched):  38%|###8      | 22272/58443 [01:02<01:07, 535.23it/s]CWT(cached,batched):  39%|###8      | 22528/58443 [01:03<01:13, 491.87it/s]CWT(cached,batched):  39%|###8      | 22784/58443 [01:03<01:07, 525.85it/s]CWT(cached,batched):  39%|###9      | 23040/58443 [01:04<01:06, 533.23it/s]CWT(cached,batched):  40%|###9      | 23296/58443 [01:04<01:12, 483.23it/s]CWT(cached,batched):  40%|####      | 23552/58443 [01:05<01:06, 521.10it/s]CWT(cached,batched):  41%|####      | 23808/58443 [01:05<01:05, 530.47it/s]CWT(cached,batched):  41%|####1     | 24064/58443 [01:06<01:06, 520.44it/s]CWT(cached,batched):  42%|####1     | 24320/58443 [01:06<01:02, 544.92it/s]CWT(cached,batched):  42%|####2     | 24576/58443 [01:07<01:05, 513.85it/s]CWT(cached,batched):  42%|####2     | 24832/58443 [01:07<01:03, 533.31it/s]CWT(cached,batched):  43%|####2     | 25088/58443 [01:08<01:01, 542.88it/s]CWT(cached,batched):  43%|####3     | 25344/58443 [01:08<01:11, 464.37it/s]CWT(cached,batched):  44%|####3     | 25600/58443 [01:09<01:05, 499.96it/s]CWT(cached,batched):  44%|####4     | 25856/58443 [01:10<01:43, 314.85it/s]CWT(cached,batched):  45%|####4     | 26112/58443 [01:11<01:29, 359.74it/s]CWT(cached,batched):  45%|####5     | 26368/58443 [01:11<01:26, 369.33it/s]CWT(cached,batched):  46%|####5     | 26624/58443 [01:12<01:15, 421.58it/s]CWT(cached,batched):  46%|####5     | 26880/58443 [01:14<02:04, 254.31it/s]CWT(cached,batched):  46%|####6     | 27136/58443 [01:14<01:40, 311.45it/s]CWT(cached,batched):  47%|####6     | 27392/58443 [01:16<02:05, 247.86it/s]CWT(cached,batched):  47%|####7     | 27648/58443 [01:16<01:42, 299.29it/s]CWT(cached,batched):  48%|####7     | 27904/58443 [01:18<02:02, 248.36it/s]CWT(cached,batched):  48%|####8     | 28160/58443 [01:18<01:38, 308.61it/s]CWT(cached,batched):  49%|####8     | 28416/58443 [01:18<01:20, 371.98it/s]CWT(cached,batched):  49%|####9     | 28672/58443 [01:19<01:08, 433.46it/s]CWT(cached,batched):  49%|####9     | 28928/58443 [01:20<01:25, 344.55it/s]CWT(cached,batched):  50%|####9     | 29184/58443 [01:20<01:12, 403.75it/s]CWT(cached,batched):  50%|#####     | 29440/58443 [01:20<01:02, 466.50it/s]CWT(cached,batched):  51%|#####     | 29696/58443 [01:21<00:55, 519.56it/s]CWT(cached,batched):  51%|#####1    | 29952/58443 [01:22<01:11, 399.99it/s]CWT(cached,batched):  52%|#####1    | 30208/58443 [01:22<01:08, 413.02it/s]CWT(cached,batched):  52%|#####2    | 30464/58443 [01:23<00:59, 473.83it/s]CWT(cached,batched):  53%|#####2    | 30720/58443 [01:23<00:55, 501.02it/s]CWT(cached,batched):  53%|#####3    | 30976/58443 [01:25<01:50, 247.88it/s]CWT(cached,batched):  53%|#####3    | 31232/58443 [01:26<01:30, 301.97it/s]CWT(cached,batched):  54%|#####3    | 31488/58443 [01:26<01:23, 321.05it/s]CWT(cached,batched):  54%|#####4    | 31744/58443 [01:27<01:13, 361.47it/s]CWT(cached,batched):  55%|#####4    | 32000/58443 [01:28<01:11, 370.56it/s]CWT(cached,batched):  55%|#####5    | 32256/58443 [01:28<01:01, 425.75it/s]CWT(cached,batched):  56%|#####5    | 32512/58443 [01:29<00:58, 443.18it/s]CWT(cached,batched):  56%|#####6    | 32768/58443 [01:29<00:54, 468.46it/s]CWT(cached,batched):  57%|#####6    | 33024/58443 [01:29<00:48, 528.20it/s]CWT(cached,batched):  57%|#####6    | 33280/58443 [01:30<00:44, 561.61it/s]CWT(cached,batched):  57%|#####7    | 33536/58443 [01:30<00:46, 532.01it/s]CWT(cached,batched):  58%|#####7    | 33792/58443 [01:31<00:42, 576.06it/s]CWT(cached,batched):  58%|#####8    | 34048/58443 [01:31<00:40, 604.76it/s]CWT(cached,batched):  59%|#####8    | 34304/58443 [01:32<00:43, 551.93it/s]CWT(cached,batched):  59%|#####9    | 34560/58443 [01:32<00:40, 584.51it/s]CWT(cached,batched):  60%|#####9    | 34816/58443 [01:33<00:43, 546.33it/s]CWT(cached,batched):  60%|######    | 35072/58443 [01:33<00:44, 523.24it/s]CWT(cached,batched):  60%|######    | 35328/58443 [01:33<00:41, 562.32it/s]CWT(cached,batched):  61%|######    | 35584/58443 [01:34<00:38, 600.46it/s]CWT(cached,batched):  61%|######1   | 35840/58443 [01:35<00:50, 450.04it/s]CWT(cached,batched):  62%|######1   | 36096/58443 [01:36<00:59, 373.78it/s]CWT(cached,batched):  62%|######2   | 36352/58443 [01:36<00:52, 421.61it/s]CWT(cached,batched):  63%|######2   | 36608/58443 [01:36<00:47, 461.14it/s]CWT(cached,batched):  63%|######3   | 36864/58443 [01:38<01:17, 278.25it/s]CWT(cached,batched):  64%|######3   | 37120/58443 [01:39<01:11, 299.80it/s]CWT(cached,batched):  64%|######3   | 37376/58443 [01:39<01:01, 343.25it/s]CWT(cached,batched):  64%|######4   | 37632/58443 [01:40<00:50, 408.88it/s]CWT(cached,batched):  65%|######4   | 37888/58443 [01:41<00:57, 356.17it/s]CWT(cached,batched):  65%|######5   | 38144/58443 [01:41<00:48, 420.11it/s]CWT(cached,batched):  66%|######5   | 38400/58443 [01:42<00:54, 371.13it/s]CWT(cached,batched):  66%|######6   | 38656/58443 [01:42<00:45, 432.69it/s]CWT(cached,batched):  67%|######6   | 38912/58443 [01:43<00:39, 493.24it/s]CWT(cached,batched):  67%|######7   | 39168/58443 [01:44<01:04, 299.36it/s]CWT(cached,batched):  67%|######7   | 39424/58443 [01:45<00:52, 365.12it/s]CWT(cached,batched):  68%|######7   | 39680/58443 [01:45<00:47, 391.37it/s]CWT(cached,batched):  68%|######8   | 39936/58443 [01:46<00:56, 326.15it/s]CWT(cached,batched):  69%|######8   | 40192/58443 [01:47<00:51, 353.49it/s]CWT(cached,batched):  69%|######9   | 40448/58443 [01:47<00:43, 412.72it/s]CWT(cached,batched):  70%|######9   | 40704/58443 [01:49<01:05, 269.64it/s]CWT(cached,batched):  70%|#######   | 40960/58443 [01:50<00:57, 304.91it/s]CWT(cached,batched):  71%|#######   | 41216/58443 [01:50<00:57, 301.16it/s]CWT(cached,batched):  71%|#######   | 41472/58443 [01:51<00:47, 359.13it/s]CWT(cached,batched):  71%|#######1  | 41728/58443 [01:52<00:54, 308.37it/s]CWT(cached,batched):  72%|#######1  | 41984/58443 [01:52<00:48, 341.31it/s]CWT(cached,batched):  72%|#######2  | 42240/58443 [01:53<00:44, 367.69it/s]CWT(cached,batched):  73%|#######2  | 42496/58443 [01:53<00:37, 430.69it/s]CWT(cached,batched):  73%|#######3  | 42752/58443 [01:54<00:31, 491.23it/s]CWT(cached,batched):  74%|#######3  | 43008/58443 [01:57<01:22, 186.90it/s]CWT(cached,batched):  74%|#######4  | 43264/58443 [01:57<01:03, 239.00it/s]CWT(cached,batched):  74%|#######4  | 43520/58443 [01:58<00:50, 293.41it/s]CWT(cached,batched):  75%|#######4  | 43776/58443 [01:58<00:43, 336.53it/s]CWT(cached,batched):  75%|#######5  | 44032/58443 [01:59<00:36, 397.61it/s]CWT(cached,batched):  76%|#######5  | 44288/58443 [01:59<00:30, 460.85it/s]CWT(cached,batched):  76%|#######6  | 44544/58443 [02:00<00:30, 458.50it/s]CWT(cached,batched):  77%|#######6  | 44800/58443 [02:01<00:39, 342.97it/s]CWT(cached,batched):  77%|#######7  | 45056/58443 [02:01<00:34, 383.11it/s]CWT(cached,batched):  78%|#######7  | 45312/58443 [02:02<00:32, 404.02it/s]CWT(cached,batched):  78%|#######7  | 45568/58443 [02:02<00:27, 464.97it/s]CWT(cached,batched):  78%|#######8  | 45824/58443 [02:03<00:24, 522.92it/s]CWT(cached,batched):  79%|#######8  | 46080/58443 [02:03<00:24, 503.07it/s]CWT(cached,batched):  79%|#######9  | 46336/58443 [02:04<00:21, 556.73it/s]CWT(cached,batched):  80%|#######9  | 46592/58443 [02:04<00:21, 560.85it/s]CWT(cached,batched):  80%|########  | 46848/58443 [02:05<00:22, 507.63it/s]CWT(cached,batched):  81%|########  | 47104/58443 [02:05<00:20, 563.20it/s]CWT(cached,batched):  81%|########1 | 47360/58443 [02:05<00:18, 608.49it/s]CWT(cached,batched):  81%|########1 | 47616/58443 [02:06<00:18, 584.74it/s]CWT(cached,batched):  82%|########1 | 47872/58443 [02:06<00:21, 480.67it/s]CWT(cached,batched):  82%|########2 | 48128/58443 [02:07<00:25, 398.74it/s]CWT(cached,batched):  83%|########2 | 48384/58443 [02:08<00:23, 431.45it/s]CWT(cached,batched):  83%|########3 | 48640/58443 [02:09<00:23, 423.68it/s]CWT(cached,batched):  84%|########3 | 48896/58443 [02:09<00:20, 472.75it/s]CWT(cached,batched):  84%|########4 | 49152/58443 [02:11<00:32, 285.51it/s]CWT(cached,batched):  85%|########4 | 49408/58443 [02:11<00:28, 319.80it/s]CWT(cached,batched):  85%|########4 | 49664/58443 [02:12<00:31, 277.87it/s]CWT(cached,batched):  85%|########5 | 49920/58443 [02:13<00:24, 341.66it/s]CWT(cached,batched):  86%|########5 | 50176/58443 [02:13<00:20, 407.56it/s]CWT(cached,batched):  86%|########6 | 50432/58443 [02:14<00:18, 430.23it/s]CWT(cached,batched):  87%|########6 | 50688/58443 [02:15<00:28, 268.69it/s]CWT(cached,batched):  87%|########7 | 50944/58443 [02:16<00:22, 331.80it/s]CWT(cached,batched):  88%|########7 | 51200/58443 [02:21<00:57, 125.53it/s]CWT(cached,batched):  88%|########8 | 51456/58443 [02:21<00:42, 165.74it/s]CWT(cached,batched):  88%|########8 | 51712/58443 [02:22<00:32, 206.83it/s]CWT(cached,batched):  89%|########8 | 51968/58443 [02:22<00:24, 259.28it/s]CWT(cached,batched):  89%|########9 | 52224/58443 [02:22<00:19, 318.08it/s]CWT(cached,batched):  90%|########9 | 52480/58443 [02:23<00:18, 330.29it/s]CWT(cached,batched):  90%|######### | 52736/58443 [02:24<00:15, 361.94it/s]CWT(cached,batched):  91%|######### | 52992/58443 [02:24<00:12, 424.77it/s]CWT(cached,batched):  91%|#########1| 53248/58443 [02:25<00:13, 387.52it/s]CWT(cached,batched):  92%|#########1| 53504/58443 [02:26<00:15, 320.42it/s]CWT(cached,batched):  92%|#########1| 53760/58443 [02:27<00:13, 347.80it/s]CWT(cached,batched):  92%|#########2| 54016/58443 [02:27<00:10, 412.87it/s]CWT(cached,batched):  93%|#########2| 54272/58443 [02:27<00:08, 467.17it/s]CWT(cached,batched):  93%|#########3| 54528/58443 [02:28<00:08, 479.91it/s]CWT(cached,batched):  94%|#########3| 54784/58443 [02:28<00:06, 538.36it/s]CWT(cached,batched):  94%|#########4| 55040/58443 [02:29<00:06, 540.03it/s]CWT(cached,batched):  95%|#########4| 55296/58443 [02:29<00:05, 528.88it/s]CWT(cached,batched):  95%|#########5| 55552/58443 [02:29<00:05, 575.37it/s]CWT(cached,batched):  95%|#########5| 55808/58443 [02:30<00:04, 610.85it/s]CWT(cached,batched):  96%|#########5| 56064/58443 [02:30<00:03, 629.37it/s]CWT(cached,batched):  96%|#########6| 56320/58443 [02:31<00:03, 602.53it/s]CWT(cached,batched):  97%|#########6| 56576/58443 [02:31<00:02, 642.62it/s]CWT(cached,batched):  97%|#########7| 56832/58443 [02:31<00:02, 641.16it/s]CWT(cached,batched):  98%|#########7| 57088/58443 [02:32<00:02, 594.99it/s]CWT(cached,batched):  98%|#########8| 57344/58443 [02:32<00:02, 542.10it/s]CWT(cached,batched):  99%|#########8| 57600/58443 [02:33<00:01, 527.33it/s]CWT(cached,batched):  99%|#########8| 57856/58443 [02:33<00:01, 571.46it/s]CWT(cached,batched):  99%|#########9| 58112/58443 [02:34<00:00, 494.34it/s]CWT(cached,batched): 100%|#########9| 58368/58443 [02:34<00:00, 521.08it/s]CWT(cached,batched): 100%|##########| 58443/58443 [02:35<00:00, 471.41it/s]                                                                           [CWT cache] 0/58443 windows*channels reused from cache (0.0%)
+[dense-edge cache] 0/2541 trials reused from disk (0.0%)
+[SparseEvidenceGNN] Precomputing dense edge inputs (coherence_threshold_mode='fixed'): 2541/2541 trial(s) need compute, chunk_size=4...
+dense-edges[fixed]:   0%|          | 0/636 [00:00<?, ?chunk/s]dense-edges[fixed]:   0%|          | 1/636 [00:01<16:01,  1.51s/chunk]dense-edges[fixed]:   1%|          | 4/636 [00:01<03:22,  3.11chunk/s]dense-edges[fixed]:   1%|1         | 7/636 [00:01<01:47,  5.87chunk/s]dense-edges[fixed]:   2%|1         | 10/636 [00:01<01:11,  8.82chunk/s]dense-edges[fixed]:   2%|2         | 13/636 [00:02<01:07,  9.29chunk/s]dense-edges[fixed]:   2%|2         | 15/636 [00:02<00:57, 10.79chunk/s]dense-edges[fixed]:   3%|2         | 18/636 [00:02<00:45, 13.65chunk/s]dense-edges[fixed]:   3%|3         | 21/636 [00:02<01:00, 10.12chunk/s]dense-edges[fixed]:   4%|3         | 23/636 [00:02<00:54, 11.16chunk/s]dense-edges[fixed]:   4%|3         | 25/636 [00:03<00:57, 10.69chunk/s]dense-edges[fixed]:   4%|4         | 28/636 [00:03<01:03,  9.63chunk/s]dense-edges[fixed]:   5%|4         | 30/636 [00:03<00:59, 10.11chunk/s]dense-edges[fixed]:   5%|5         | 32/636 [00:03<01:06,  9.07chunk/s]dense-edges[fixed]:   6%|5         | 35/636 [00:04<00:52, 11.46chunk/s]dense-edges[fixed]:   6%|5         | 37/636 [00:04<00:49, 12.14chunk/s]dense-edges[fixed]:   6%|6         | 39/636 [00:04<00:57, 10.33chunk/s]dense-edges[fixed]:   6%|6         | 41/636 [00:04<00:55, 10.66chunk/s]dense-edges[fixed]:   7%|6         | 44/636 [00:04<00:44, 13.41chunk/s]dense-edges[fixed]:   7%|7         | 46/636 [00:04<00:43, 13.42chunk/s]dense-edges[fixed]:   8%|7         | 49/636 [00:05<00:37, 15.68chunk/s]dense-edges[fixed]:   8%|8         | 52/636 [00:05<00:33, 17.18chunk/s]dense-edges[fixed]:   8%|8         | 54/636 [00:05<00:40, 14.37chunk/s]dense-edges[fixed]:   9%|8         | 57/636 [00:05<00:34, 16.61chunk/s]dense-edges[fixed]:   9%|9         | 60/636 [00:05<00:31, 18.04chunk/s]dense-edges[fixed]:  10%|9         | 62/636 [00:05<00:31, 18.05chunk/s]dense-edges[fixed]:  10%|#         | 64/636 [00:06<00:36, 15.47chunk/s]dense-edges[fixed]:  11%|#         | 67/636 [00:06<00:32, 17.27chunk/s]dense-edges[fixed]:  11%|#1        | 70/636 [00:06<00:30, 18.75chunk/s]dense-edges[fixed]:  11%|#1        | 73/636 [00:06<00:31, 17.98chunk/s]dense-edges[fixed]:  12%|#1        | 76/636 [00:06<00:28, 19.56chunk/s]dense-edges[fixed]:  12%|#2        | 79/636 [00:06<00:27, 20.13chunk/s]dense-edges[fixed]:  13%|#2        | 82/636 [00:07<00:49, 11.21chunk/s]dense-edges[fixed]:  13%|#3        | 85/636 [00:07<00:41, 13.39chunk/s]dense-edges[fixed]:  14%|#3        | 87/636 [00:07<00:39, 13.92chunk/s]dense-edges[fixed]:  14%|#4        | 90/636 [00:07<00:33, 16.09chunk/s]dense-edges[fixed]:  15%|#4        | 93/636 [00:07<00:30, 17.88chunk/s]dense-edges[fixed]:  15%|#5        | 96/636 [00:07<00:28, 19.28chunk/s]dense-edges[fixed]:  16%|#5        | 99/636 [00:08<00:28, 18.88chunk/s]dense-edges[fixed]:  16%|#6        | 102/636 [00:08<00:28, 18.87chunk/s]dense-edges[fixed]:  17%|#6        | 105/636 [00:08<00:26, 20.10chunk/s]dense-edges[fixed]:  17%|#6        | 108/636 [00:08<00:27, 19.19chunk/s]dense-edges[fixed]:  17%|#7        | 111/636 [00:08<00:25, 20.42chunk/s]dense-edges[fixed]:  18%|#7        | 114/636 [00:08<00:24, 21.31chunk/s]dense-edges[fixed]:  18%|#8        | 117/636 [00:08<00:23, 21.79chunk/s]dense-edges[fixed]:  19%|#8        | 120/636 [00:09<00:33, 15.63chunk/s]dense-edges[fixed]:  19%|#9        | 123/636 [00:09<00:30, 16.98chunk/s]dense-edges[fixed]:  20%|#9        | 126/636 [00:09<00:29, 17.42chunk/s]dense-edges[fixed]:  20%|##        | 129/636 [00:09<00:26, 18.90chunk/s]dense-edges[fixed]:  21%|##        | 132/636 [00:09<00:25, 19.93chunk/s]dense-edges[fixed]:  21%|##1       | 135/636 [00:09<00:24, 20.77chunk/s]dense-edges[fixed]:  22%|##1       | 138/636 [00:10<00:24, 20.19chunk/s]dense-edges[fixed]:  22%|##2       | 141/636 [00:10<00:23, 20.63chunk/s]dense-edges[fixed]:  23%|##2       | 144/636 [00:10<00:25, 18.99chunk/s]dense-edges[fixed]:  23%|##2       | 146/636 [00:10<00:27, 17.75chunk/s]dense-edges[fixed]:  23%|##3       | 149/636 [00:10<00:25, 19.29chunk/s]dense-edges[fixed]:  24%|##3       | 152/636 [00:10<00:23, 20.44chunk/s]dense-edges[fixed]:  24%|##4       | 155/636 [00:10<00:22, 21.44chunk/s]dense-edges[fixed]:  25%|##4       | 158/636 [00:11<00:24, 19.43chunk/s]dense-edges[fixed]:  25%|##5       | 161/636 [00:11<00:23, 20.02chunk/s]dense-edges[fixed]:  26%|##5       | 164/636 [00:11<00:22, 20.83chunk/s]dense-edges[fixed]:  26%|##6       | 167/636 [00:11<00:23, 19.56chunk/s]dense-edges[fixed]:  27%|##6       | 170/636 [00:11<00:22, 20.50chunk/s]dense-edges[fixed]:  27%|##7       | 173/636 [00:11<00:22, 20.79chunk/s]dense-edges[fixed]:  28%|##7       | 176/636 [00:11<00:21, 20.98chunk/s]dense-edges[fixed]:  28%|##8       | 179/636 [00:12<00:23, 19.46chunk/s]dense-edges[fixed]:  29%|##8       | 182/636 [00:12<00:22, 20.38chunk/s]dense-edges[fixed]:  29%|##9       | 185/636 [00:12<00:21, 21.12chunk/s]dense-edges[fixed]:  30%|##9       | 188/636 [00:12<00:23, 19.35chunk/s]dense-edges[fixed]:  30%|###       | 191/636 [00:12<00:22, 19.94chunk/s]dense-edges[fixed]:  31%|###       | 194/636 [00:12<00:21, 20.66chunk/s]dense-edges[fixed]:  31%|###       | 197/636 [00:13<00:23, 18.93chunk/s]dense-edges[fixed]:  31%|###1      | 199/636 [00:13<00:22, 19.01chunk/s]dense-edges[fixed]:  32%|###1      | 202/636 [00:13<00:21, 19.75chunk/s]dense-edges[fixed]:  32%|###2      | 205/636 [00:13<00:20, 20.56chunk/s]dense-edges[fixed]:  33%|###2      | 208/636 [00:13<00:21, 19.89chunk/s]dense-edges[fixed]:  33%|###3      | 211/636 [00:13<00:27, 15.41chunk/s]dense-edges[fixed]:  34%|###3      | 214/636 [00:14<00:25, 16.25chunk/s]dense-edges[fixed]:  34%|###4      | 217/636 [00:14<00:23, 17.79chunk/s]dense-edges[fixed]:  35%|###4      | 220/636 [00:14<00:21, 19.04chunk/s]dense-edges[fixed]:  35%|###5      | 223/636 [00:14<00:20, 20.14chunk/s]dense-edges[fixed]:  36%|###5      | 226/636 [00:14<00:20, 20.10chunk/s]dense-edges[fixed]:  36%|###6      | 229/636 [00:14<00:19, 20.95chunk/s]dense-edges[fixed]:  36%|###6      | 232/636 [00:14<00:18, 21.34chunk/s]dense-edges[fixed]:  37%|###6      | 235/636 [00:14<00:18, 21.90chunk/s]dense-edges[fixed]:  37%|###7      | 238/636 [00:15<00:19, 20.67chunk/s]dense-edges[fixed]:  38%|###7      | 241/636 [00:15<00:18, 21.31chunk/s]dense-edges[fixed]:  38%|###8      | 244/636 [00:15<00:17, 21.86chunk/s]dense-edges[fixed]:  39%|###8      | 247/636 [00:15<00:18, 20.97chunk/s]dense-edges[fixed]:  39%|###9      | 250/636 [00:15<00:17, 21.77chunk/s]dense-edges[fixed]:  40%|###9      | 253/636 [00:15<00:17, 22.31chunk/s]dense-edges[fixed]:  40%|####      | 256/636 [00:15<00:17, 22.06chunk/s]dense-edges[fixed]:  41%|####      | 259/636 [00:16<00:17, 21.60chunk/s]dense-edges[fixed]:  41%|####1     | 262/636 [00:16<00:17, 21.62chunk/s]dense-edges[fixed]:  42%|####1     | 265/636 [00:16<00:16, 22.02chunk/s]dense-edges[fixed]:  42%|####2     | 268/636 [00:16<00:16, 22.40chunk/s]dense-edges[fixed]:  43%|####2     | 271/636 [00:16<00:16, 21.75chunk/s]dense-edges[fixed]:  43%|####3     | 274/636 [00:16<00:16, 21.91chunk/s]dense-edges[fixed]:  44%|####3     | 277/636 [00:16<00:16, 22.17chunk/s]dense-edges[fixed]:  44%|####4     | 280/636 [00:17<00:19, 18.32chunk/s]dense-edges[fixed]:  44%|####4     | 283/636 [00:17<00:18, 19.52chunk/s]dense-edges[fixed]:  45%|####4     | 286/636 [00:17<00:17, 20.51chunk/s]dense-edges[fixed]:  45%|####5     | 289/636 [00:17<00:17, 19.83chunk/s]dense-edges[fixed]:  46%|####5     | 292/636 [00:17<00:16, 20.59chunk/s]dense-edges[fixed]:  46%|####6     | 295/636 [00:17<00:16, 21.25chunk/s]dense-edges[fixed]:  47%|####6     | 298/636 [00:17<00:15, 21.31chunk/s]dense-edges[fixed]:  47%|####7     | 301/636 [00:18<00:16, 20.30chunk/s]dense-edges[fixed]:  48%|####7     | 304/636 [00:18<00:15, 20.89chunk/s]dense-edges[fixed]:  48%|####8     | 307/636 [00:18<00:15, 21.41chunk/s]dense-edges[fixed]:  49%|####8     | 310/636 [00:18<00:16, 20.00chunk/s]dense-edges[fixed]:  49%|####9     | 313/636 [00:18<00:16, 20.14chunk/s]dense-edges[fixed]:  50%|####9     | 316/636 [00:18<00:15, 20.72chunk/s]dense-edges[fixed]:  50%|#####     | 319/636 [00:18<00:15, 20.99chunk/s]dense-edges[fixed]:  51%|#####     | 322/636 [00:19<00:16, 19.17chunk/s]dense-edges[fixed]:  51%|#####1    | 325/636 [00:19<00:15, 20.16chunk/s]dense-edges[fixed]:  52%|#####1    | 328/636 [00:19<00:15, 20.53chunk/s]dense-edges[fixed]:  52%|#####2    | 331/636 [00:19<00:15, 19.60chunk/s]dense-edges[fixed]:  53%|#####2    | 334/636 [00:19<00:15, 20.13chunk/s]dense-edges[fixed]:  53%|#####2    | 337/636 [00:19<00:14, 20.99chunk/s]dense-edges[fixed]:  53%|#####3    | 340/636 [00:20<00:14, 20.85chunk/s]dense-edges[fixed]:  54%|#####3    | 343/636 [00:20<00:17, 16.50chunk/s]dense-edges[fixed]:  54%|#####4    | 346/636 [00:20<00:16, 18.06chunk/s]dense-edges[fixed]:  55%|#####4    | 349/636 [00:20<00:15, 18.85chunk/s]dense-edges[fixed]:  55%|#####5    | 352/636 [00:20<00:14, 19.59chunk/s]dense-edges[fixed]:  56%|#####5    | 355/636 [00:20<00:13, 20.38chunk/s]dense-edges[fixed]:  56%|#####6    | 358/636 [00:20<00:13, 21.05chunk/s]dense-edges[fixed]:  57%|#####6    | 361/636 [00:21<00:13, 20.08chunk/s]dense-edges[fixed]:  57%|#####7    | 364/636 [00:21<00:13, 20.85chunk/s]dense-edges[fixed]:  58%|#####7    | 367/636 [00:21<00:12, 21.59chunk/s]dense-edges[fixed]:  58%|#####8    | 370/636 [00:21<00:12, 22.01chunk/s]dense-edges[fixed]:  59%|#####8    | 373/636 [00:21<00:12, 21.32chunk/s]dense-edges[fixed]:  59%|#####9    | 376/636 [00:21<00:12, 21.62chunk/s]dense-edges[fixed]:  60%|#####9    | 379/636 [00:21<00:11, 21.83chunk/s]dense-edges[fixed]:  60%|######    | 382/636 [00:22<00:12, 21.10chunk/s]dense-edges[fixed]:  61%|######    | 385/636 [00:22<00:11, 21.30chunk/s]dense-edges[fixed]:  61%|######1   | 388/636 [00:22<00:11, 21.84chunk/s]dense-edges[fixed]:  61%|######1   | 391/636 [00:22<00:11, 22.27chunk/s]dense-edges[fixed]:  62%|######1   | 394/636 [00:22<00:11, 21.98chunk/s]dense-edges[fixed]:  62%|######2   | 397/636 [00:22<00:10, 21.99chunk/s]dense-edges[fixed]:  63%|######2   | 400/636 [00:22<00:10, 21.63chunk/s]dense-edges[fixed]:  63%|######3   | 403/636 [00:23<00:11, 19.59chunk/s]dense-edges[fixed]:  64%|######3   | 405/636 [00:23<00:11, 19.33chunk/s]dense-edges[fixed]:  64%|######4   | 408/636 [00:23<00:11, 19.84chunk/s]dense-edges[fixed]:  65%|######4   | 411/636 [00:23<00:10, 20.71chunk/s]dense-edges[fixed]:  65%|######5   | 414/636 [00:23<00:10, 20.40chunk/s]dense-edges[fixed]:  66%|######5   | 417/636 [00:23<00:10, 21.32chunk/s]dense-edges[fixed]:  66%|######6   | 420/636 [00:23<00:10, 21.22chunk/s]dense-edges[fixed]:  67%|######6   | 423/636 [00:24<00:11, 19.36chunk/s]dense-edges[fixed]:  67%|######6   | 425/636 [00:24<00:11, 18.98chunk/s]dense-edges[fixed]:  67%|######7   | 428/636 [00:24<00:10, 19.42chunk/s]dense-edges[fixed]:  68%|######7   | 431/636 [00:24<00:10, 19.58chunk/s]dense-edges[fixed]:  68%|######8   | 433/636 [00:24<00:10, 19.40chunk/s]dense-edges[fixed]:  68%|######8   | 435/636 [00:24<00:10, 19.18chunk/s]dense-edges[fixed]:  69%|######8   | 437/636 [00:24<00:10, 19.11chunk/s]dense-edges[fixed]:  69%|######9   | 439/636 [00:24<00:10, 18.63chunk/s]dense-edges[fixed]:  69%|######9   | 441/636 [00:25<00:10, 18.43chunk/s]dense-edges[fixed]:  70%|######9   | 443/636 [00:25<00:10, 17.77chunk/s]dense-edges[fixed]:  70%|######9   | 445/636 [00:25<00:10, 18.08chunk/s]dense-edges[fixed]:  70%|#######   | 447/636 [00:25<00:10, 18.48chunk/s]dense-edges[fixed]:  71%|#######   | 450/636 [00:25<00:09, 18.99chunk/s]dense-edges[fixed]:  71%|#######1  | 452/636 [00:25<00:09, 18.73chunk/s]dense-edges[fixed]:  71%|#######1  | 454/636 [00:25<00:09, 18.77chunk/s]dense-edges[fixed]:  72%|#######1  | 457/636 [00:25<00:09, 19.39chunk/s]dense-edges[fixed]:  72%|#######2  | 459/636 [00:26<00:09, 19.33chunk/s]dense-edges[fixed]:  72%|#######2  | 461/636 [00:26<00:09, 17.94chunk/s]dense-edges[fixed]:  73%|#######2  | 463/636 [00:26<00:09, 17.83chunk/s]dense-edges[fixed]:  73%|#######3  | 465/636 [00:26<00:09, 18.24chunk/s]dense-edges[fixed]:  73%|#######3  | 467/636 [00:26<00:09, 18.31chunk/s]dense-edges[fixed]:  74%|#######3  | 469/636 [00:26<00:09, 18.44chunk/s]dense-edges[fixed]:  74%|#######4  | 471/636 [00:26<00:09, 17.89chunk/s]dense-edges[fixed]:  75%|#######4  | 474/636 [00:26<00:08, 18.46chunk/s]dense-edges[fixed]:  75%|#######4  | 476/636 [00:26<00:08, 18.59chunk/s]dense-edges[fixed]:  75%|#######5  | 478/636 [00:27<00:10, 14.93chunk/s]dense-edges[fixed]:  76%|#######5  | 481/636 [00:27<00:09, 17.07chunk/s]dense-edges[fixed]:  76%|#######6  | 484/636 [00:27<00:08, 18.41chunk/s]dense-edges[fixed]:  77%|#######6  | 487/636 [00:27<00:07, 19.39chunk/s]dense-edges[fixed]:  77%|#######7  | 490/636 [00:27<00:07, 20.05chunk/s]dense-edges[fixed]:  78%|#######7  | 493/636 [00:27<00:06, 20.50chunk/s]dense-edges[fixed]:  78%|#######7  | 496/636 [00:27<00:06, 20.96chunk/s]dense-edges[fixed]:  78%|#######8  | 499/636 [00:28<00:07, 19.53chunk/s]dense-edges[fixed]:  79%|#######8  | 502/636 [00:28<00:06, 19.93chunk/s]dense-edges[fixed]:  79%|#######9  | 505/636 [00:28<00:06, 20.57chunk/s]dense-edges[fixed]:  80%|#######9  | 508/636 [00:28<00:06, 20.95chunk/s]dense-edges[fixed]:  80%|########  | 511/636 [00:28<00:05, 20.94chunk/s]dense-edges[fixed]:  81%|########  | 514/636 [00:28<00:05, 21.38chunk/s]dense-edges[fixed]:  81%|########1 | 517/636 [00:28<00:05, 21.78chunk/s]dense-edges[fixed]:  82%|########1 | 520/636 [00:29<00:05, 21.47chunk/s]dense-edges[fixed]:  82%|########2 | 523/636 [00:29<00:05, 21.48chunk/s]dense-edges[fixed]:  83%|########2 | 526/636 [00:29<00:05, 21.77chunk/s]dense-edges[fixed]:  83%|########3 | 529/636 [00:29<00:04, 22.09chunk/s]dense-edges[fixed]:  84%|########3 | 532/636 [00:29<00:04, 21.35chunk/s]dense-edges[fixed]:  84%|########4 | 535/636 [00:29<00:04, 21.67chunk/s]dense-edges[fixed]:  85%|########4 | 538/636 [00:29<00:04, 22.00chunk/s]dense-edges[fixed]:  85%|########5 | 541/636 [00:30<00:04, 22.16chunk/s]dense-edges[fixed]:  86%|########5 | 544/636 [00:30<00:04, 21.50chunk/s]dense-edges[fixed]:  86%|########6 | 547/636 [00:30<00:04, 20.64chunk/s]dense-edges[fixed]:  86%|########6 | 550/636 [00:30<00:04, 20.15chunk/s]dense-edges[fixed]:  87%|########6 | 553/636 [00:30<00:04, 20.64chunk/s]dense-edges[fixed]:  87%|########7 | 556/636 [00:30<00:03, 20.04chunk/s]dense-edges[fixed]:  88%|########7 | 559/636 [00:31<00:04, 18.33chunk/s]dense-edges[fixed]:  88%|########8 | 561/636 [00:31<00:04, 16.82chunk/s]dense-edges[fixed]:  89%|########8 | 563/636 [00:31<00:04, 14.91chunk/s]dense-edges[fixed]:  89%|########8 | 565/636 [00:31<00:04, 14.60chunk/s]dense-edges[fixed]:  89%|########9 | 567/636 [00:31<00:05, 13.52chunk/s]dense-edges[fixed]:  89%|########9 | 569/636 [00:31<00:04, 13.70chunk/s]dense-edges[fixed]:  90%|########9 | 571/636 [00:31<00:04, 13.94chunk/s]dense-edges[fixed]:  90%|######### | 573/636 [00:32<00:04, 14.18chunk/s]dense-edges[fixed]:  90%|######### | 575/636 [00:32<00:04, 13.28chunk/s]dense-edges[fixed]:  91%|######### | 577/636 [00:32<00:04, 13.41chunk/s]dense-edges[fixed]:  91%|#########1| 579/636 [00:32<00:04, 13.82chunk/s]dense-edges[fixed]:  91%|#########1| 581/636 [00:32<00:04, 13.64chunk/s]dense-edges[fixed]:  92%|#########1| 583/636 [00:32<00:03, 14.87chunk/s]dense-edges[fixed]:  92%|#########1| 585/636 [00:32<00:03, 15.76chunk/s]dense-edges[fixed]:  92%|#########2| 587/636 [00:33<00:02, 16.41chunk/s]dense-edges[fixed]:  93%|#########2| 589/636 [00:33<00:02, 16.15chunk/s]dense-edges[fixed]:  93%|#########2| 591/636 [00:33<00:02, 15.84chunk/s]dense-edges[fixed]:  93%|#########3| 593/636 [00:33<00:04, 10.24chunk/s]dense-edges[fixed]:  94%|#########3| 595/636 [00:34<00:06,  6.09chunk/s]dense-edges[fixed]:  94%|#########3| 596/636 [00:34<00:07,  5.35chunk/s]dense-edges[fixed]:  94%|#########3| 597/636 [00:34<00:06,  5.89chunk/s]dense-edges[fixed]:  94%|#########4| 598/636 [00:34<00:06,  6.04chunk/s]dense-edges[fixed]:  94%|#########4| 599/636 [00:34<00:05,  6.36chunk/s]dense-edges[fixed]:  94%|#########4| 600/636 [00:35<00:06,  5.80chunk/s]dense-edges[fixed]:  95%|#########4| 602/636 [00:35<00:04,  8.13chunk/s]dense-edges[fixed]:  95%|#########4| 604/636 [00:35<00:03, 10.24chunk/s]dense-edges[fixed]:  95%|#########5| 606/636 [00:35<00:02, 12.13chunk/s]dense-edges[fixed]:  96%|#########5| 609/636 [00:35<00:01, 14.70chunk/s]dense-edges[fixed]:  96%|#########6| 611/636 [00:35<00:01, 15.37chunk/s]dense-edges[fixed]:  97%|#########6| 614/636 [00:35<00:01, 17.20chunk/s]dense-edges[fixed]:  97%|#########7| 617/636 [00:36<00:01, 18.33chunk/s]dense-edges[fixed]:  97%|#########7| 619/636 [00:36<00:00, 18.49chunk/s]dense-edges[fixed]:  98%|#########7| 622/636 [00:36<00:00, 19.49chunk/s]dense-edges[fixed]:  98%|#########8| 625/636 [00:36<00:00, 19.98chunk/s]dense-edges[fixed]:  99%|#########8| 628/636 [00:36<00:00, 20.53chunk/s]dense-edges[fixed]:  99%|#########9| 631/636 [00:36<00:00, 20.72chunk/s]dense-edges[fixed]: 100%|#########9| 634/636 [00:36<00:00, 19.92chunk/s]                                                                        [SparseEvidenceGNN] dense-edges[fixed] phase timing over 636 chunk(s) of <= 4 trial(s) (device=cuda): threshold=0.052s transfer=1.768s compute=14.590s copy_back=2.110s total=18.519s (29.12ms/chunk, 7.29ms/trial)
+[Sparse-Evidence] Parameter summary
+[Sparse-Evidence] channel_encoder.net.0.weight: shape=(8, 1, 9) params=72 trainable=True
+[Sparse-Evidence] channel_encoder.net.0.bias: shape=(8,) params=8 trainable=True
+[Sparse-Evidence] channel_encoder.net.2.weight: shape=(8, 8, 9) params=576 trainable=True
+[Sparse-Evidence] channel_encoder.net.2.bias: shape=(8,) params=8 trainable=True
+[Sparse-Evidence] sparse_message_mlp.0.weight: shape=(8, 24) params=192 trainable=True
+[Sparse-Evidence] sparse_message_mlp.0.bias: shape=(8,) params=8 trainable=True
+[Sparse-Evidence] sparse_message_mlp.2.weight: shape=(8, 8) params=64 trainable=True
+[Sparse-Evidence] sparse_message_mlp.2.bias: shape=(8,) params=8 trainable=True
+[Sparse-Evidence] sparse_classifier.weight: shape=(2, 4048) params=8096 trainable=True
+[Sparse-Evidence] sparse_classifier.bias: shape=(2,) params=2 trainable=True
+[Sparse-Evidence] hop_message_mlp.0.weight: shape=(8, 16) params=128 trainable=True
+[Sparse-Evidence] hop_message_mlp.0.bias: shape=(8,) params=8 trainable=True
+[Sparse-Evidence] hop_message_mlp.2.weight: shape=(8, 8) params=64 trainable=True
+[Sparse-Evidence] hop_message_mlp.2.bias: shape=(8,) params=8 trainable=True
+[Sparse-Evidence] hop_update.weight_ih: shape=(24, 8) params=192 trainable=True
+[Sparse-Evidence] hop_update.weight_hh: shape=(24, 8) params=192 trainable=True
+[Sparse-Evidence] hop_update.bias_ih: shape=(24,) params=24 trainable=True
+[Sparse-Evidence] hop_update.bias_hh: shape=(24,) params=24 trainable=True
+[Sparse-Evidence] hop_message_mlp_freq.0.weight: shape=(8, 16) params=128 trainable=True
+[Sparse-Evidence] hop_message_mlp_freq.0.bias: shape=(8,) params=8 trainable=True
+[Sparse-Evidence] hop_message_mlp_freq.2.weight: shape=(8, 8) params=64 trainable=True
+[Sparse-Evidence] hop_message_mlp_freq.2.bias: shape=(8,) params=8 trainable=True
+[Sparse-Evidence] hop_update_freq.weight_ih: shape=(24, 8) params=192 trainable=True
+[Sparse-Evidence] hop_update_freq.weight_hh: shape=(24, 8) params=192 trainable=True
+[Sparse-Evidence] hop_update_freq.bias_ih: shape=(24,) params=24 trainable=True
+[Sparse-Evidence] hop_update_freq.bias_hh: shape=(24,) params=24 trainable=True
+[Sparse-Evidence] freq_pool.weight: shape=(1, 8) params=8 trainable=True
+[Sparse-Evidence] freq_pool.bias: shape=(1,) params=1 trainable=True
+[Sparse-Evidence] dense_edge_conv.gru.weight_ih_l0: shape=(24, 32) params=768 trainable=True
+[Sparse-Evidence] dense_edge_conv.gru.weight_hh_l0: shape=(24, 8) params=192 trainable=True
+[Sparse-Evidence] dense_edge_conv.gru.bias_ih_l0: shape=(24,) params=24 trainable=True
+[Sparse-Evidence] dense_edge_conv.gru.bias_hh_l0: shape=(24,) params=24 trainable=True
+[Sparse-Evidence] total_params=11331 trainable_params=11331 non_trainable_params=0
+[Sparse-Evidence] Parameter hashes algorithm=blake2b-128 precision=1.0e-05
+[Sparse-Evidence] channel_encoder.net.0.weight: weight_hash=0ddee87be54edb4c517dc30734f2cdc6
+[Sparse-Evidence] channel_encoder.net.0.bias: weight_hash=31997420112b95517309f32f62cf9591
+[Sparse-Evidence] channel_encoder.net.2.weight: weight_hash=f8b82d6e0849b21a0488002d8a8e913d
+[Sparse-Evidence] channel_encoder.net.2.bias: weight_hash=40e4bb5d24fa9a2b14cdaca13075c824
+[Sparse-Evidence] sparse_message_mlp.0.weight: weight_hash=64d0b0797e6c3ff04f1df1323fa90772
+[Sparse-Evidence] sparse_message_mlp.0.bias: weight_hash=896779563e115f455c785ab1f3247225
+[Sparse-Evidence] sparse_message_mlp.2.weight: weight_hash=37ddb9fd12609c54623c3747503d78f1
+[Sparse-Evidence] sparse_message_mlp.2.bias: weight_hash=6f50e20f91b8bba5e1a6929bf025349e
+[Sparse-Evidence] sparse_classifier.weight: weight_hash=e6943eafd9ff167236369b4c88ae9535
+[Sparse-Evidence] sparse_classifier.bias: weight_hash=e15c0f651d0d51512ce1af7410be92d2
+[Sparse-Evidence] hop_message_mlp.0.weight: weight_hash=3d2d297c09c0d2cf2bbb1e454812d80d
+[Sparse-Evidence] hop_message_mlp.0.bias: weight_hash=f3b89bbcef7fc1e678af03c2514f68b7
+[Sparse-Evidence] hop_message_mlp.2.weight: weight_hash=6c0ef7a1fccd0fd4291f705b12d03e46
+[Sparse-Evidence] hop_message_mlp.2.bias: weight_hash=ed9451c35d610c7c7d55426a24402a9a
+[Sparse-Evidence] hop_update.weight_ih: weight_hash=8352e7d0426f833797cb8f166f982a43
+[Sparse-Evidence] hop_update.weight_hh: weight_hash=d0716fd7f0f8cb550c5339f9090d557a
+[Sparse-Evidence] hop_update.bias_ih: weight_hash=b983fddc5dce68f638a96b444fc4ee5b
+[Sparse-Evidence] hop_update.bias_hh: weight_hash=12af37301feac42ef9158818c553fcf6
+[Sparse-Evidence] hop_message_mlp_freq.0.weight: weight_hash=9c71df9a40b8c6e5d52dc4e024bef8bb
+[Sparse-Evidence] hop_message_mlp_freq.0.bias: weight_hash=0b19ca9d1f7d5dde0eded00c8540a3b0
+[Sparse-Evidence] hop_message_mlp_freq.2.weight: weight_hash=8a567b7f093493debb6a40b8b5085755
+[Sparse-Evidence] hop_message_mlp_freq.2.bias: weight_hash=049dc81ce8d1d305ff2ecf93c8b4b446
+[Sparse-Evidence] hop_update_freq.weight_ih: weight_hash=b9162a515de9749bcbe5e3ee21a46fbb
+[Sparse-Evidence] hop_update_freq.weight_hh: weight_hash=79047ba1aedf9f1e7cd1dd3c1607d5d7
+[Sparse-Evidence] hop_update_freq.bias_ih: weight_hash=3e31b75b322974f423f6f4458e493252
+[Sparse-Evidence] hop_update_freq.bias_hh: weight_hash=861d479f6777b120cfc879e24e16d9cb
+[Sparse-Evidence] freq_pool.weight: weight_hash=ea92227454b46f9622d7aebdb96c9ff2
+[Sparse-Evidence] freq_pool.bias: weight_hash=e4cd3dbbfdd7959bc3f4348111335e29
+[Sparse-Evidence] dense_edge_conv.gru.weight_ih_l0: weight_hash=c6b826c8041fcebd95cd66079e6bdbbd
+[Sparse-Evidence] dense_edge_conv.gru.weight_hh_l0: weight_hash=dec636946c742b7ab201063b9dc463f9
+[Sparse-Evidence] dense_edge_conv.gru.bias_ih_l0: weight_hash=ef44edbcbd62c0c528a58ef968199144
+[Sparse-Evidence] dense_edge_conv.gru.bias_hh_l0: weight_hash=95488f16090822491e1045fa380f9b5e
+[Sparse-Evidence] weight_model_hash=278602a63667e69826e0a179ba2a9ab3
+[Sparse-Evidence] named_model_hash=27f68ea318b031ac175a0eba79073d15
+[Sparse-Evidence] SparseEvidenceGNN config n_channels=23 edges=253 nfreqs=8 hidden_dim=8 channel_embed_dim=8 coherence_threshold=0.9 phase_threshold_rad=0.1745 smooth_kernel_size=(5, 3) scale_adaptive_smoothing=False coi_enabled=True feature_ablation=zero_channel_embed event_aggregation=concat n_hops=1 freq_aware_hops=False event_mode=dense dense_conv_out_channels=8 time_averaged_graph=False dense_edge_temporal_mode=rnn shuffle_time_order=False temporal_graph_edge_dim=8 dense_edge_time_downsample=16
+[Sparse-Evidence] SparseEvidenceGNN dimensions B=736 T=1024 dtype=torch.float32 n_samples=2541
+[Train] class weights: [0.04171586 1.9582841 ]
+[Train] start epochs=1 batches/epoch=4 batch_size=736 optimizer_step_batch_size=736 optimizer_step_batch_mode=credit device=cuda
+[15:25:45.970] FAIL:  clf.fit(X_train, y_train) -- 252.819 sec
+
+==========================================================================================
+TRAINING FAILED
+==========================================================================================
+[15:25:45.991] Training failed after 252.844 sec
+[15:25:45.991] 
+[15:25:45.991] FULL TRACEBACK:
+Traceback (most recent call last):
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\pipeline_debug.py", line 717, in run_debug
+    clf.fit(X_train, y_train)
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\pipelines\common.py", line 1669, in fit
+    self._train_loop(
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\pipelines\common.py", line 1889, in _train_loop
+    logits, aux_value = self._model_forward(tuple(batch_inputs))
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\pipelines\common.py", line 1524, in _model_forward
+    output = self.model_(*batch_inputs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\nn\modules\module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\nn\modules\module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\pipelines\cwt_gnn_classifiers.py", line 4153, in forward
+    self._dense_edge_features(dense_edge_raw.to(raw_x.dtype))
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\pipelines\cwt_gnn_classifiers.py", line 3999, in _dense_edge_features
+    conv_out = self.dense_edge_conv(conv_in)  # [B, dense_conv_out_channels, E, 1]
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\nn\modules\module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\nn\modules\module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\pipelines\cwt_gnn_classifiers.py", line 1739, in forward
+    _, h_n = self.gru(seq)  # h_n: [1, B*E, out_channels]
+             ^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\nn\modules\module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\nn\modules\module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\nn\modules\rnn.py", line 1391, in forward
+    result = _VF.gru(
+             ^^^^^^^^
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.10 GiB. GPU 0 has a total capacity of 12.00 GiB of which 0 bytes is free. Of the allocated memory 17.75 GiB is allocated by PyTorch, and 844.69 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+[15:25:46.768] Could not read process memory: No module named 'resource'
+[15:25:46.774] TORCH CUDA: available
+[15:25:47.044] CUDA allocated: 5957.6 MB
+[15:25:47.045] CUDA reserved: 19024.0 MB
+
+==========================================================================================
+UNHANDLED FAILURE
+==========================================================================================
+Traceback (most recent call last):
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\pipeline_debug.py", line 1159, in main
+    run_debug(args)
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\pipeline_debug.py", line 717, in run_debug
+    clf.fit(X_train, y_train)
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\pipelines\common.py", line 1669, in fit
+    self._train_loop(
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\pipelines\common.py", line 1889, in _train_loop
+    logits, aux_value = self._model_forward(tuple(batch_inputs))
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\pipelines\common.py", line 1524, in _model_forward
+    output = self.model_(*batch_inputs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\nn\modules\module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\nn\modules\module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\pipelines\cwt_gnn_classifiers.py", line 4153, in forward
+    self._dense_edge_features(dense_edge_raw.to(raw_x.dtype))
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\pipelines\cwt_gnn_classifiers.py", line 3999, in _dense_edge_features
+    conv_out = self.dense_edge_conv(conv_in)  # [B, dense_conv_out_channels, E, 1]
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\nn\modules\module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\nn\modules\module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\Epilepsy\pipelines\cwt_gnn_classifiers.py", line 1739, in forward
+    _, h_n = self.gru(seq)  # h_n: [1, B*E, out_channels]
+             ^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\nn\modules\module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\nn\modules\module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Documents\noshore5\EEG_Benchmarks\.venv\Lib\site-packages\torch\nn\modules\rnn.py", line 1391, in forward
+    result = _VF.gru(
+             ^^^^^^^^
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.10 GiB. GPU 0 has a total capacity of 12.00 GiB of which 0 bytes is free. Of the allocated memory 17.75 GiB is allocated by PyTorch, and 844.69 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+[15:25:47.049] Could not read process memory: No module named 'resource'
+[15:25:47.049] TORCH CUDA: available
+[15:25:47.049] CUDA allocated: 5957.6 MB
+[15:25:47.049] CUDA reserved: 19024.0 MB
