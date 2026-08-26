@@ -9,7 +9,23 @@ Claude/Grok shells that don't share context with each other, and this is
 the one file meant to catch a new shell up without it re-reading
 everything.
 
-**Last updated:** 2026-08-25, by Claude (committed all outstanding
+**Last updated:** 2026-08-26, by Claude (new branch `cg-mambanet`, off
+`main`, NOT merged -- built `Epilepsy/pipelines/cg_mambanet_classifier.py`,
+a CNN-GCN-Mamba-BiLSTM architecture reconstructed from the CG-MambaNet
+paper (arXiv:2606.08226, no public code), wired as `--pipeline
+cg_mambanet` under this repo's own chb01 leave-one-seizure-out protocol
+(NOT the paper's own multi-patient LOPO -- that's still deferred). Real
+chb01 smoke test succeeded (wiring verified), but a REAL (non-smoke) run is
+currently BLOCKED: `mambapy`'s Mamba scan (both `pscan=True` and
+`pscan=False`) does not scale to this encoder's size (12 layers x 2
+directions, seq_len=480) on CPU OR MPS -- severely super-linear batch-size
+scaling, MPS OOMs outright at batch=16. Full investigation, numbers, and
+next steps:
+`Session_notes/2026_08_26/cg_mambanet_architecture_and_mambapy_scaling_wall.md`.
+Decision: stop here rather than shrink `mamba_n_layers` further, resume once
+this runs on the RunPod CUDA image (fused `mamba-ssm` kernel sidesteps the
+whole problem). Added a new "Known gotchas" entry below for this -- don't
+re-discover it.). Prior entry, still current: Claude (committed all outstanding
 work on `continuous-cwt-mamba` -- SlimSeiz channel-select stage, the
 `--slimseiz-fixed-channels` flag, the DBConformer depth/weight sweep, the
 4-way pipeline comparison note, and this file's own recent edits --
@@ -261,26 +277,59 @@ read off a continuous timeline). See "Open threads" below.
 
 ## Branch map
 
-- `main` -- baseline, no dense-edge-mamba, no cwt node encoder.
+- `main` -- **current default branch** (as of 2026-08-25). Has
+  `dense_edge_mamba`, the CWT node encoder, `--skip-folds`, committed
+  continuous Mamba (`scan="chunk"` + `use_cuda_kernel` + `Dockerfile.mamba`),
+  and the DBConformer/SlimSeiz raw-EEG classifier family -- everything
+  `continuous-cwt-mamba` (see below) had, since it was fast-forward-merged
+  here and then deleted.
 - `mamba-temporal-edge-model` (remote, `origin/`) -- where
   `dense_edge_temporal_mode="mamba"` (`_DenseEdgeMambaTemporal`) was
-  developed. Merged into `main` at `6d38573`.
-- `continuous-cwt-mamba` -- **current branch**, tracking
-  `origin/continuous-cwt-mamba`. Has `main` + `mamba-temporal-edge-model`
-  both merged in (so `dense_edge_mamba` IS available here), plus
-  `--skip-folds`, plus committed continuous Mamba (`aa3c565` plumbing,
-  `4760de0` `scan="chunk"` + `use_cuda_kernel` + `Dockerfile.mamba`).
-  Working tree was clean at last update.
+  originally developed. Merged into `main` at `6d38573`. Still exists on
+  `origin`, untouched since.
+- `continuous-cwt-mamba` -- **no longer exists** (deleted both locally and
+  on `origin` 2026-08-25, after being fast-forward-merged into `main`). If
+  you see it referenced as "current branch" anywhere outside this file
+  (stale docstrings, old session notes), treat `main` as current instead.
+- `cg-mambanet` (local only, off `main`, 2026-08-26) -- CG-MambaNet
+  architecture work (`--pipeline cg_mambanet`), NOT merged to `main`. See
+  the 2026-08-26 "Last updated" entry above and
+  `Session_notes/2026_08_26/cg_mambanet_architecture_and_mambapy_scaling_wall.md`
+  for why it's parked here rather than merged (a real run is blocked on
+  `mambapy`'s scan performance, pending a CUDA-box retry).
 - `tf-node-encoding`, `dynmaic_subset` -- exist locally, not investigated
-  this session; don't assume they have dense-edge-mamba unless you check.
-- If you're starting a session and need `dense_edge_mamba`: check you're
-  on (or have merged) `continuous-cwt-mamba` or `mamba-temporal-edge-model`
-  first. `git log --oneline -- Epilepsy/pipelines/cwt_gnn_classifiers.py`
-  or `grep _DenseEdgeMambaTemporal` is a fast way to confirm rather than
-  assuming from the branch name alone.
+  recently; don't assume their state relative to `main` without checking.
+- `dense_edge_mamba` is available on `main` directly now -- no need to
+  check out a side branch for it. `git log --oneline --
+  Epilepsy/pipelines/cwt_gnn_classifiers.py` or `grep _DenseEdgeMambaTemporal`
+  confirms if in doubt.
 
 ## Known gotchas (keep rediscovering these -- stop rediscovering them)
 
+- **`mambapy`'s Mamba scan (BOTH `pscan=True` and `pscan=False`) does not
+  scale to a "many stacked/parallel Mamba instances x long-ish sequence"
+  encoder, on CPU OR MPS -- measured 2026-08-26 building
+  `cg_mambanet_classifier.py`'s bidirectional 12-layer encoder (24 total
+  directional Mamba instances at seq_len=480).** `pscan=True` (default):
+  severely super-linear batch-size scaling (batch 4/8/16 -> 3.1s/12.5s/
+  40.3s total on CPU) and an outright MPS OOM at batch=16 (`pad_npo2`
+  padding the sequence to a power of two and keeping intermediate tensors
+  at every scan level for backward, across all 24 instances at once).
+  `pscan=False` (mambapy's own documented fallback): forward stays cheap
+  but BACKWARD explodes worse (960.89s at batch=16 on CPU) -- the
+  sequential Python loop's ~11,500 chained autograd nodes (24 instances x
+  480 timesteps) is its own catastrophic-backward failure mode. Neither
+  mode is a fix for the other's problem; this is a `mambapy` (pure-PyTorch
+  Mamba) limitation at this depth/sequence-length/instance-count
+  combination, not something a classifier's own hyperparameters (d_model,
+  batch_size within reason) can route around -- `_DenseEdgeMambaTemporal`
+  never hit this because it's a single unidirectional instance, not 24 at
+  once. Full numbers:
+  `Session_notes/2026_08_26/cg_mambanet_architecture_and_mambapy_scaling_wall.md`.
+  The fused `mamba-ssm` CUDA kernel (RunPod image) is a different code path
+  (a real kernel, not chained PyTorch ops) and is expected to sidestep this
+  -- not yet confirmed, no kernel-vs-pscan parity check run for this
+  specific encoder shape yet.
 - **`--pipeline slimseiz` (non-smoke) once blew up memory/crashed this
   Mac; root cause NOT cleanly pinned down despite real profiling; a
   hardening fix is in place but is a mitigation, not a proven fix.**
