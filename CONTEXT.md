@@ -405,12 +405,12 @@ read off a continuous timeline). See "Open threads" below.
   shell this session accidentally did exactly that with a stale local
   copy -- see the "chb02-04 baseline + GitHub-release mirror" entry above
   for how that got sorted out).
-- `cg-mambanet` -- **merged into `main` 2026-08-26** (fast-forward, this
-  update), still exists as a branch (locally and on `origin`) but has
-  nothing `main` doesn't now. Left un-deleted since a real run is still
-  blocked on `mambapy`'s scan performance (see "Known gotchas" below) --
-  may be worth resuming work on this branch specifically once that's
-  unblocked, rather than starting fresh on `main`.
+- `cg-mambanet` -- **merged into `main` 2026-08-26** (fast-forward), then
+  deleted (both locally and on `origin`) 2026-08-26 once confirmed
+  `main..cg-mambanet` was empty (nothing on it main didn't already have).
+  Don't assume it still exists. Its architecture (`cg_mambanet_classifier.py`,
+  `--pipeline cg_mambanet`) lives on `main`; see "Open threads" below for
+  the still-outstanding real-run attempt.
 - `tf-node-encoding`, `dynmaic_subset` -- exist locally, not investigated
   recently; don't assume they have anything `main` doesn't unless you
   check.
@@ -575,6 +575,17 @@ read off a continuous timeline). See "Open threads" below.
 
 ## Open threads
 
+- **Need to actually try `cg_mambanet` for real (2026-08-26).** Built and
+  smoke-tested (`--pipeline cg_mambanet`, `cg_mambanet_classifier.py` on
+  `main`), but a real (non-smoke) run has never completed -- blocked on
+  `mambapy`'s scan not scaling to this encoder's size on CPU/MPS (see
+  "Known gotchas" above for the numbers). Branch `cg-mambanet` itself is
+  deleted (fully merged, nothing left on it); this is just about running
+  the pipeline that's already on `main`. Next step: run it on the RunPod
+  CUDA image (`ghcr.io/noshore5/eeg_benchmarks-mamba:20260825-4760de0`,
+  fused `mamba-ssm` kernel sidesteps `mambapy`'s scan entirely) and see if
+  a real chb01 LOSO pass actually completes and produces numbers worth
+  comparing against the other pipelines.
 - **`channel_subset_k` marks dead edges by zeroing, not an explicit
   liveness bit -- ambiguous in principle (2026-08-26)**:
   `_compute_live_dense_edge_scattered`/`_scatter_live_dense_edge`
