@@ -319,7 +319,7 @@ def main() -> None:
     try:
         t0 = time.perf_counter()
         if p["label_mode"] == "prediction":
-            results, _per_seizure = rp.leave_one_seizure_out_prediction(
+            results, _per_seizure, _window_scores = rp.leave_one_seizure_out_prediction(
                 X, y, metadata, clf_params, p["epochs"], p["window_length"],
                 disable_disk_cache=p["disable_disk_cache"],
                 max_folds=p["max_folds"],

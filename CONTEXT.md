@@ -575,6 +575,126 @@ read off a continuous timeline). See "Open threads" below.
 
 ## Open threads
 
+- **CWT frequency band (`lowest=8.0, highest=40.0, nfreqs=8`) is an
+  untuned motor-imagery-BCI leftover, never revisited for epilepsy
+  (traced 2026-08-27).** `Session_notes/2026_08_15/chb_mit_dataset_and_
+  dense_edge_gru_pipeline.md` documents the actual origin: `lowest=8.0,
+  highest=35.0` came from BNCI2014_001's mu/beta motor-imagery band (a
+  completely different task -- decoding imagined movement, not seizure
+  activity), loosely widened to `highest=40.0` when the codebase moved to
+  CHB-MIT and flagged AT THE TIME as "an explicitly not-tuned broad
+  placeholder... picking a real epilepsy-appropriate band is unstarted
+  work." Never picked back up since. `nfreqs` was separately halved
+  16->8 purely for disk-cache size (2026-08-16), not for spectral-
+  resolution reasons. **35-40Hz is very likely too low a ceiling for
+  epilepsy-relevant fast activity** -- worth a real, literature-informed
+  band selection instead of the inherited placeholder.
+
+  Real considerations before just widening the range (raised 2026-08-27,
+  not yet resolved): (1) mains noise (CHB-MIT is US data, 60Hz + 120Hz
+  harmonic) sits inside any wider band and is currently notch-filtered
+  ONLY in `truong_stft_cnn_classifier.py` (57-63Hz/117-123Hz) -- not
+  applied anywhere in the CWT/coherence path `dense_edge`/
+  `temporal_graph_mamba`/`dense_edge_mamba` actually use, so widening
+  through 60Hz without adding equivalent filtering there risks a
+  purely-artifactual, highly-coherent-by-construction mains spike
+  dominating part of the signal; (2) clinically-relevant high-frequency
+  epilepsy biomarkers (ripples 80-250Hz, fast ripples 250-500Hz) are
+  primarily an intracranial-EEG finding -- scalp recordings like CHB-MIT
+  have real, physiologically-driven SNR loss at high frequency from
+  volume conduction/skull attenuation, so pushing toward Nyquist (128Hz
+  at `sampling_rate=256`) isn't obviously "free" extra signal on this
+  modality; (3) CWT's time-frequency tradeoff (higher-frequency wavelets
+  need shorter temporal support for the same cycle count) interacts with
+  the existing cone-of-influence masking (`_coi_valid_mask`) -- worth
+  checking how much high-frequency content actually survives COI-
+  validity at real window lengths before assuming it's usable; (4)
+  widening the band while keeping `nfreqs=8` fixed coarsens resolution-
+  per-bin further -- real resolution at higher frequencies likely wants
+  more bins, reopening the disk-budget constraint that halved `nfreqs`
+  in the first place.
+
+  Recommended approach: an actual ablation (current 8-40Hz vs. a wider
+  band with mains notching added to the CWT/coherence path vs. a band
+  chosen from real epilepsy/seizure-coherence literature), not reasoning
+  from first principles alone.
+
+  **Literature scan done 2026-08-27** -- found real, directly relevant
+  precedent for going much wider than 40Hz on this exact dataset/sampling
+  rate:
+  - A covariance-matrix-eigenvalue-based seizure prediction paper
+    (`iopscience.iop.org/article/10.1088/1741-2552/ac6063` --
+    methodologically close to this codebase's own coherence-graph
+    approach) uses CHB-MIT-style scalp EEG at `sampling_rate=256`
+    (same as here) and analyzes **0-124Hz in 61 bins of 2Hz resolution**
+    ("we cannot investigate frequencies higher than 128 [Nyquist]... we
+    only focus on (0,124)Hz, excluding marginal frequencies 125-128Hz")
+    -- i.e. essentially the full Nyquist range minus the unusable edge,
+    not a truncated low/mid-frequency band. No explicit 60Hz mains notch
+    reported -- only a general wavelet-based denoising step. Reported
+    false-positive rate as low as 0.09/h (vs. this codebase's current
+    `temporal_graph_mamba` mean FAR/h of 8.44 smoothed -- not apples to
+    apples, different classifier entirely, but a strong existence proof
+    that a wide, near-Nyquist band is workable and can support very low
+    FAR on this kind of data).
+  - A separate frequency-band-analysis paper for seizure prediction
+    (found via search snippet only, full text not fetched --
+    `researchgate.net/publication/258238854`) reports gamma-band
+    (~32-120Hz) features giving the highest sensitivity/precision and
+    lowest false-positive rate among the bands it tested on CHB-MIT,
+    ahead of the lower/classic clinical bands.
+  Both sources point the same direction: **the current 40Hz ceiling is
+  very likely leaving real, usable signal on the table** for this task,
+  and near-Nyquist ranges (approaching but not reaching the unusable
+  125-128Hz edge at `sampling_rate=256`) have real precedent on
+  comparable scalp-EEG/CHB-MIT-style data. Neither source resolves the
+  mains-noise question definitively (neither reports an explicit 60Hz/
+  120Hz notch), so whether this codebase needs to add one before
+  widening remains an open, testable question, not settled by this scan
+  alone -- worth trying the wider band both with and without an added
+  notch to see whether it matters in practice, rather than assuming
+  either way.
+- **Calibrate the decision threshold instead of using `predict()`'s fixed
+  0.5 cutoff -- UNBLOCKED 2026-08-27, not yet done.** On the real 6-fold
+  `temporal_graph_mamba` run's fold 1 (`1_03_0`), AP (auc_pr) was 0.792 --
+  5-6x every other pipeline's fold-1 AP (GRU 0.141, dense_edge_mamba
+  0.156, DBConformer 0.279, SlimSeiz 0.261) -- but FAR/h was the *worst*
+  of the group at the actual 0.5 threshold (18.5 raw, 17.2 smoothed, vs.
+  GRU 18.7/14.8, DBConformer 15.3/10.2). This pattern held across nearly
+  every fold in the completed 6-fold baseline (mean AP 0.674, the best of
+  the compared pipelines, but FAR/h mid-pack) -- see
+  `Session_notes/2026_08_27/temporal_graph_mamba_full_6fold_and_tuning_
+  attempt.md`. AP being threshold-independent while FAR/h is often worst
+  in the group suggests the model's score *ranking* is genuinely good but
+  0.5 is a bad operating point for it -- worth picking a threshold from
+  the validation split's own PR curve (e.g. targeting a FAR/h budget)
+  instead of hardcoding 0.5, the way clinical seizure-prediction
+  literature usually does.
+
+  What changed 2026-08-27: `leave_one_seizure_out_prediction` now has a
+  `dump_window_scores` param / `--dump-window-scores` CLI flag
+  (`run_pipelines.py`) that persists one row per TEST window (`fold_i,
+  held_out_seizure_id, subject, run, window_seizure_id, window_start,
+  y_test, y_score, y_pred, y_pred_smoothed`) to
+  `prediction/prediction_window_scores_<run_id>.csv` -- no retraining
+  needed to test threshold/k-of-n/calibration changes anymore, just
+  reprocessing the saved scores. A real, full untuned 6-fold
+  `temporal_graph_mamba` run WITH this flag already completed cleanly
+  end-to-end 2026-08-27 (no external kill, no `--skip-folds` stitching):
+  `/tmp/tg_mamba_retrain_full/temporal_graph_mamba/prediction/
+  prediction_window_scores_20260827-070913.csv`, 4,241 real test windows
+  across all 6 chb01 folds, real score separation (not clustered near
+  0.5 the way a `--smoke` run's scores are). This file has NOT been
+  copied anywhere durable yet -- it's in `/tmp`, not committed to the
+  repo or `Epilepsy/results/`; move/commit it (or regenerate) before it
+  can be lost to a reboot/tmp-cleanup.
+
+  Next step, not yet done: for each fold, sweep a threshold against that
+  fold's own validation-split scores (need to add validation-split score
+  logging too -- today's CSV only has TEST windows, not the val split
+  `_train_loop` already holds out during training) and re-score the test
+  windows at the chosen threshold instead of the hardcoded 0.5, comparing
+  FAR/h and precision/recall/f1 before vs. after per fold.
 - **Need to actually try `cg_mambanet` for real (2026-08-26).** Built and
   smoke-tested (`--pipeline cg_mambanet`, `cg_mambanet_classifier.py` on
   `main`), but a real (non-smoke) run has never completed -- blocked on
@@ -650,19 +770,63 @@ read off a continuous timeline). See "Open threads" below.
   pushed to `origin`. Next: a real chb01 LOSO run, `temporal_graph_mode=
   "gru"` vs `"mamba"`, and separately vs `dense_edge_mamba`'s own
   numbers -- the actual open question this branch exists to answer.
-- **Explore spatiotemporal state-space models (2026-08-26)**: current
-  `dense_edge_mamba` runs one shared Mamba per edge, independently -- time
-  (per-edge Mamba) and space (the GNN's message-passing/aggregation step)
-  are fully separate stages that only talk to each other at the edge->node
-  handoff (see the diagram at `noshore5.github.io/resources/architecture-
-  diagram-mamba.html`). A graph-aware/spatiotemporal SSM would instead bake
-  the channel-graph topology into the scan itself (e.g. state updates that
-  mix across edges sharing a node at every timestep, not just once at the
-  end), closer to recent graph-Mamba/spatiotemporal-SSM literature. Worth a
-  literature scan for an existing, implementable formulation (vs. building
-  one from scratch) and a rough cost estimate before committing -- this is
-  a genuinely different architecture from the current edge-independent
-  design, not a config flag, so scope it before starting.
+- **Graph-aware state-space Mamba -- whole-graph-as-one-token branch BUILT
+  2026-08-27 as `--pipeline hermitian_ssm`** (branch `graph-state-mamba`,
+  not committed yet). This is the "Graph Spectral Mamba-3" design
+  (`Epilepsy/hermitian_ssm.md`), i.e. Design B + Design C of
+  `graph_state_space_mamba_design.md` taken to their conclusion: complex
+  Hermitian per-frequency channel graph -> `torch.linalg.eigh` -> top-k=2
+  eigenpairs (deterministic, disk-cached per recording) -> complex spectral
+  encoder -> `_DenseEdgeMambaTemporal` (Mamba-2, reused; **Mamba-3 is the
+  documented next step**, comment block in `hermitian_ssm_classifier.py`)
+  -> head. NOT Design A (STG-Mamba `Delta' = Delta @ A` topology-in-the-
+  scan) -- that is still unbuilt.
+  Files: `Epilepsy/pipelines/hermitian_ssm_cache.py` (precompute + cache),
+  `Epilepsy/pipelines/hermitian_ssm_classifier.py` (self-contained, does
+  NOT subclass SparseEvidenceGNNClassifier), `leave_one_seizure_out_
+  hermitian_ssm` + `HERMITIAN_SSM_PARAMS` + `--pipeline hermitian_ssm` in
+  `run_pipelines.py`, `scripts/hermitian_ssm_{numerical_validation,smoke}.py`.
+  Full build writeup + locked decisions: `Session_notes/2026_08_27/
+  hermitian_ssm_pipeline_built.md`.
+  Config: 8-124 Hz, nfreqs=60 -> freq-decimated to 30 bins post-smoothing,
+  time_downsample=16, k=2, 57-63/117-123 Hz mains notch, d_model=256.
+  Cache: per-recording `.npy` dir keyed by `HermitianSpectralConfig.
+  cache_key()`, windowing-independent (any window/step re-slices it),
+  mmap'd during training. ~0.65 GB / 1h recording, ~24 GB projected for
+  all chb01. Precompute is CPU-only (`torch.linalg.eigh` has no MPS impl
+  in this torch build) -- batched CPU eigh ~29us/matrix, so ~1 min/
+  recording, ~40 min one-time for a full 6-fold, then cached.
+  Encoder gained **frequency + mode identity features** (2026-08-27, after
+  first build): `vec_proj`/`val_proj` are weight-shared across both the F
+  and k axes, so identity was otherwise only positional (slot order in
+  `freq_fuse`/`mode_fuse`). `freq_feature=True` concatenates normalised Hz
+  (linear+log) onto the per-mode input; `mode_feature=True` concatenates a
+  learned `[k, 4]` per-slot embedding (slot = `|lambda|`-rank, not a
+  stable physical mode). Both flags in `HERMITIAN_SSM_PARAMS` /
+  `HermitianSSMClassifier`, `False` for ablation. Not built: per-frequency
+  Mamba lanes (`E=F` instead of `E=1`) -- discussed, left as a future
+  config switch, see the session note.
+  **Status (2026-08-27):** numerical validation (design doc Section 20) +
+  synthetic end-to-end smoke PASS. Real CLI smoke
+  (`--pipeline hermitian_ssm --smoke --max-folds 1 --device cpu`, which
+  auto-shrinks the spectral config to nfreqs=12/td=32 for speed) ran
+  clean end to end, exit 0, wrote both CSVs. **Real 6-fold LOSO run NOT
+  started** -- user chose to hold off. When ready:
+  `.venv/bin/python Epilepsy/run_pipelines.py --pipeline hermitian_ssm
+  --device cpu` (no `--smoke`); ~40 min CPU precompute (full config,
+  30 freq bins) then ~6 folds training. RAM is tight on this Mac (17 GB
+  total) -- precompute transient ~3-4 GB, run it watchdog-wrapped +
+  backgrounded, and use `freq_chunk=4` if it swaps hard.
+  **Also not done:** any tuning, GPU precompute path, Mamba-3, commit
+  (branch `graph-state-mamba`).
+  Disk: `~/mne_data/dense_edge_cache` (63 GB, auto-rebuilding
+  CWT/dense-edge recompute cache) was **deleted 2026-08-27** to make room
+  for this pipeline's cache -- the next `dense_edge*` / `temporal_graph_*`
+  run will recompute it (slow first pass, then fine).
+- **STG-Mamba Design A (topology modulates the SSM delta) -- still
+  unbuilt.** See `Epilepsy/graph_state_space_mamba_design.md`; the
+  `hermitian_ssm` pipeline above deliberately took the simpler
+  whole-graph-token route first (the doc's own recommended order).
 - **Significance channel may be redundant in the canonical config, untested
   (2026-08-26)**: `_build_dense_edge_input`'s 4th dense-edge channel is
   `significance = (coh - threshold) / threshold`

@@ -146,6 +146,11 @@ from Epilepsy.pipelines.cwt_gnn_classifiers import (
     StreamingSparseEvidenceGNNClassifier,
 )
 from Epilepsy.pipelines.continuous_cwt_mamba_classifier import ContinuousCWTMambaClassifier
+from Epilepsy.pipelines.hermitian_ssm_classifier import HermitianSSMClassifier
+from Epilepsy.pipelines.hermitian_ssm_cache import (
+    HermitianSpectralConfig,
+    default_hermitian_ssm_cache_root,
+)
 from Epilepsy.pipelines.cwt_window_cache import DISABLE_CWT_CACHE, DiskCWTCache, default_cwt_cache_root
 from Epilepsy.pipelines.dense_edge_cache import default_dense_edge_cache_root
 from Epilepsy.pipelines.truong_stft_cnn_classifier import TruongSTFTCNNClassifier, k_of_n_alarm
@@ -493,6 +498,20 @@ PREDICTION_TEMPORAL_GRAPH_MAMBA_PARAMS: dict[str, object] = dict(
     TEMPORAL_GRAPH_MAMBA_PARAMS,
     batch_size=32,
     validation_split=0.2,
+    # 2026-08-26 overnight FAR-tuning pass (weight_decay 1e-4->3e-4,
+    # temporal_graph_mamba_dropout 0.0->0.15) was tried and REVERTED
+    # 2026-08-27 -- net negative: fold 1_04_0 failed to train entirely
+    # (early stopping restored epoch 1's near-init checkpoint after 6
+    # epochs stuck at chance-level loss) and fold 1_03_0's AP collapsed
+    # 0.792->0.232 despite fitting its own validation split well (internal
+    # val_roc_auc reached 0.985) -- a real train/val-vs-true-holdout
+    # generalization gap, not an undertraining artifact. See
+    # Session_notes/2026_08_27/temporal_graph_mamba_full_6fold_and_tuning_
+    # attempt.md for the full fold-by-fold comparison and epoch-level
+    # evidence. Back to the untuned defaults (TEMPORAL_GRAPH_MAMBA_PARAMS'
+    # own weight_decay=1e-4, temporal_graph_mamba_dropout=0.0) until
+    # decision-threshold calibration (the actually-promising lever) is
+    # implemented instead.
 )
 
 # --pipeline=continuous_cwt_mamba -- the continuous-cwt-mamba paradigm's
@@ -527,6 +546,90 @@ CONTINUOUS_CWT_MAMBA_PARAMS: dict[str, object] = dict(
     t_chunk=128,  # scripts/continuous_cwt_scale_probe.py measured this the safe/fast RTX 3070 Ti default
     validation_split=0.2,
 )
+
+
+# --pipeline="hermitian_ssm" -- "Graph Spectral Mamba-3" (Epilepsy/hermitian_ssm.md).
+# Entirely self-contained: HermitianSSMClassifier does NOT subclass
+# SparseEvidenceGNNClassifier, so none of _SHARED_ARCH_PARAMS applies. The
+# "spectral_*" keys below are the deterministic precompute config -- they
+# form the disk-cache key (hermitian_ssm_cache.HermitianSpectralConfig), so
+# changing any of them rebuilds the cache. mamba_* mirror
+# DENSE_EDGE_MAMBA_PARAMS (isolated-ablation convention), except d_model,
+# which the design doc sets to 256 for the whole-graph token (vs. 16 for
+# dense_edge_mamba's per-edge sequence).
+HERMITIAN_SSM_PARAMS: dict[str, object] = dict(
+    epochs=30,
+    batch_size=64,
+    learning_rate=1e-3,
+    weight_decay=1e-4,
+    grad_clip_norm=1.0,
+    validation_split=0.2,
+    early_stopping_patience=5,
+    use_class_weights=True,
+    # deterministic spectral precompute (== the cache key)
+    spectral_sampling_rate=256.0,
+    spectral_lowest=8.0,
+    spectral_highest=124.0,     # just below the 125-128 Hz Nyquist edge
+    spectral_nfreqs=60,
+    spectral_time_downsample=16,
+    spectral_freq_downsample=2,  # -> 30 cached freq bins (Welch-style, post-smoothing)
+    spectral_smooth_time_steps=5,
+    spectral_mains_notch=True,
+    spectral_diagonal="power",
+    spectral_eigenvalue_sort="abs",
+    spectral_k=2,
+    # encoder
+    d_model=256,
+    d_mode=32,
+    d_freq=64,
+    freq_feature=True,   # feed normalised Hz into the per-mode encoder (2026-08-27); ablate by flipping False
+    mode_feature=True,   # learned per-mode-slot (|lambda|-rank) embedding into the per-mode encoder (2026-08-27)
+
+    # temporal (mamba) -- dense_edge_mamba's config, d_model per the doc
+    mamba_d_state=16,
+    mamba_d_conv=4,
+    mamba_expand=2,
+    mamba_n_layers=1,
+    mamba_dropout=0.0,
+    mamba_chunk_size=128,
+    head_hidden=64,
+)
+
+
+def _hermitian_ssm_clf_params(args: argparse.Namespace) -> tuple[dict, HermitianSpectralConfig]:
+    """Split HERMITIAN_SSM_PARAMS into (HermitianSSMClassifier kwargs,
+    HermitianSpectralConfig) and overlay the shared CLI knobs."""
+    p = dict(HERMITIAN_SSM_PARAMS)
+    spectral_kw = dict(
+        sampling_rate=p.pop("spectral_sampling_rate"),
+        lowest=p.pop("spectral_lowest"),
+        highest=p.pop("spectral_highest"),
+        nfreqs=p.pop("spectral_nfreqs"),
+        time_downsample=p.pop("spectral_time_downsample"),
+        freq_downsample=p.pop("spectral_freq_downsample"),
+        smooth_time_steps=p.pop("spectral_smooth_time_steps"),
+        mains_notch=p.pop("spectral_mains_notch"),
+        diagonal=p.pop("spectral_diagonal"),
+        eigenvalue_sort=p.pop("spectral_eigenvalue_sort"),
+        k=p.pop("spectral_k"),
+    )
+    if args.smoke:
+        # The per-recording eigh precompute is the slow part; shrink it hard
+        # for wiring checks (the real config is exercised by
+        # scripts/hermitian_ssm_numerical_validation.py, not the CLI smoke).
+        spectral_kw.update(nfreqs=12, freq_downsample=2, time_downsample=32, highest=60.0)
+    cfg = HermitianSpectralConfig(**spectral_kw)
+    p.pop("epochs", None)  # epochs is passed positionally by the LOSO loop, resolved in main()
+    p["spectral_config"] = cfg
+    p["seed"] = args.seed
+    p["device"] = args.device
+    if args.verbose is not None:
+        p["verbose"] = args.verbose
+    if args.validation_split is not None:
+        p["validation_split"] = args.validation_split
+    if args.early_stopping_patience is not None:
+        p["early_stopping_patience"] = args.early_stopping_patience
+    return p, cfg
 
 
 def _dense_family_params(pipeline: str, label_mode: str) -> dict:
@@ -1267,7 +1370,8 @@ def leave_one_seizure_out_prediction(
     k_of_n_n: int = DEFAULT_TRUONG_K_OF_N_N,
     max_folds: int | None = None,
     skip_folds: set[int] | None = None,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+    dump_window_scores: bool = False,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame | None]:
     """Leave-one-seizure-out CV for label_mode="prediction".
 
     negative_to_positive_ratio : float | None (default None)
@@ -1315,6 +1419,22 @@ def leave_one_seizure_out_prediction(
     counts/scores) that misses can later be checked for clustering by
     seizure characteristics instead of assumed to be uniform modeling
     failure.
+
+    dump_window_scores : bool (default False)
+        2026-08-27: if True, also return a third DataFrame with one row per
+        TEST window across every fold (subject/run/fold's held-out
+        seizure_id/window's own seizure_id-or-None/window_start/y_test/
+        y_score/y_pred raw/y_pred smoothed). Exists so the decision
+        threshold, k-of-n window, and any post-hoc probability calibration
+        can be swept/refit AFTER the fact from saved probabilities, without
+        retraining -- see Session_notes/2026_08_27/temporal_graph_mamba_
+        full_6fold_and_tuning_attempt.md's "What's NOT done yet". Off by
+        default: one row per window (tens of thousands per fold) is much
+        bigger than the existing per-seizure/per-fold summary CSVs, not
+        worth writing for runs that don't need it (e.g. quick --smoke
+        checks). No effect on training or on the two existing return
+        values -- pure additional logging of already-computed y_score/
+        y_pred/y_pred_smoothed.
     """
     if "seizure_id" not in metadata.columns:
         raise ValueError(
@@ -1400,6 +1520,7 @@ def leave_one_seizure_out_prediction(
 
     fold_rows = []
     per_seizure_rows = []
+    window_score_rows = [] if dump_window_scores else None
     for fold_i, seizure in enumerate(unique_seizures):
         subject, run, seizure_id = seizure["subject"], seizure["run"], seizure["seizure_id"]
         onset, offset = seizure["seizure_onset"], seizure["seizure_offset"]
@@ -1464,6 +1585,34 @@ def leave_one_seizure_out_prediction(
             order = order.to_numpy()
             raw = (y_pred[order] == 1).astype(np.int64)
             y_pred_smoothed[order] = k_of_n_alarm(raw, k=k_of_n_k, n=k_of_n_n)
+
+        if window_score_rows is not None:
+            # One row per TEST window, this fold -- see dump_window_scores'
+            # docstring above. window_seizure_id (meta_test's own per-window
+            # seizure_id, None for interictal) is deliberately kept separate
+            # from this fold's held-out seizure_id: a reader post-hoc-
+            # calibrating needs to know which window came from which fold's
+            # test split, not just which window belongs to which seizure.
+            window_seizure_id = meta_test["seizure_id"].to_numpy()
+            window_start = (
+                meta_test["window_start"].to_numpy() if "window_start" in meta_test.columns
+                else np.full(len(meta_test), np.nan)
+            )
+            for i in range(len(meta_test)):
+                window_score_rows.append(
+                    {
+                        "fold_i": fold_i,
+                        "held_out_seizure_id": seizure_id,
+                        "subject": meta_test["subject"].iat[i],
+                        "run": meta_test["run"].iat[i],
+                        "window_seizure_id": window_seizure_id[i],
+                        "window_start": window_start[i],
+                        "y_test": int(y_test[i]),
+                        "y_score": float(y_score[i]),
+                        "y_pred": int(y_pred[i]),
+                        "y_pred_smoothed": int(y_pred_smoothed[i]),
+                    }
+                )
 
         row = {
             "subject": subject,
@@ -1583,7 +1732,8 @@ def leave_one_seizure_out_prediction(
         print("  CWT cache: disabled (--disable-disk-cache)")
     else:
         print(f"  CWT cache: {len(shared_cwt_cache)} unique (window, channel) transforms on disk")
-    return pd.DataFrame(fold_rows), per_seizure_df
+    window_scores_df = pd.DataFrame(window_score_rows) if window_score_rows is not None else None
+    return pd.DataFrame(fold_rows), per_seizure_df, window_scores_df
 
 
 def leave_one_seizure_out_continuous_mamba(
@@ -1789,6 +1939,182 @@ def leave_one_seizure_out_continuous_mamba(
         )
     per_seizure_df["gap_to_nearest_seizure_same_recording_s"] = gaps
 
+    return pd.DataFrame(fold_rows), per_seizure_df
+
+
+def leave_one_seizure_out_hermitian_ssm(
+    recordings: list[dict],
+    clf_params: dict,
+    epochs: int,
+    window_length: float,
+    k_of_n_k: int = DEFAULT_TRUONG_K_OF_N_K,
+    k_of_n_n: int = DEFAULT_TRUONG_K_OF_N_N,
+    max_folds: int | None = None,
+    skip_folds: set[int] | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Leave-one-seizure-out CV for --pipeline hermitian_ssm
+    (HermitianSSMClassifier). Same recording-level fold construction,
+    metric set, and per-seizure log as leave_one_seizure_out_continuous_mamba
+    -- deliberately a separate copy (this file's "kept independent
+    everywhere it matters" convention), the only real differences being the
+    classifier class and that ``epochs`` is passed via clf_params, not a
+    positional arg.
+
+    Unlike continuous_cwt_mamba this paradigm carries NO state across a
+    recording's windows -- the recording-level interface exists only so the
+    classifier can slice the per-recording spectral cache. Fold grain is
+    still the recording (held-out seizure's recording + a round-robin share
+    of the seizure-free recordings), for parity with the other prediction
+    loops' event-level FAR/h bookkeeping.
+    """
+    all_seizures: list[dict] = []
+    seen: set[str] = set()
+    for rec in recordings:
+        for w in rec["windows"]:
+            sid = w.get("seizure_id")
+            if sid is not None and sid not in seen:
+                seen.add(sid)
+                all_seizures.append(
+                    {
+                        "subject": rec["subject"], "run": rec["run"], "seizure_id": sid,
+                        "seizure_onset": w["seizure_onset"], "seizure_offset": w["seizure_offset"],
+                    }
+                )
+    unique_seizures = sorted(all_seizures, key=lambda s: (s["subject"], s["run"], s["seizure_onset"]))
+    if not unique_seizures:
+        raise ValueError(
+            "No preictal windows survived label_mode='prediction' -- nothing to leave-one-seizure-out over."
+        )
+
+    seizure_run_pairs = {(s["subject"], s["run"]) for s in unique_seizures}
+    interictal_only = [rec for rec in recordings if (rec["subject"], rec["run"]) not in seizure_run_pairs]
+    n_folds = len(unique_seizures)
+    fold_interictal = [
+        [rec for j, rec in enumerate(interictal_only) if j % n_folds == i] for i in range(n_folds)
+    ]
+    if max_folds is not None:
+        unique_seizures = unique_seizures[: max(1, int(max_folds))]
+    if not interictal_only:
+        print("  WARNING: no seizure-free recordings -- every fold's false_alarms_per_hour is undefined.")
+
+    by_key = {(rec["subject"], rec["run"]): rec for rec in recordings}
+    fold_rows, per_seizure_rows = [], []
+    for fold_i, seizure in enumerate(unique_seizures):
+        subject, run, seizure_id = seizure["subject"], seizure["run"], seizure["seizure_id"]
+        onset, offset = seizure["seizure_onset"], seizure["seizure_offset"]
+        if skip_folds and fold_i in skip_folds:
+            print(f"  fold {fold_i} seizure {seizure_id}: SKIPPED (--skip-folds)")
+            continue
+
+        seizure_recording = by_key[(subject, run)]
+        test_recordings = [seizure_recording] + fold_interictal[fold_i]
+        test_keys = {(r["subject"], r["run"]) for r in test_recordings}
+        train_recordings = [r for r in recordings if (r["subject"], r["run"]) not in test_keys]
+
+        clf = HermitianSSMClassifier(epochs=epochs, **clf_params)
+        clf.fit(train_recordings)
+        probs_list = clf.predict_proba(test_recordings)
+
+        y_test_parts, y_score_parts, y_pred_parts = [], [], []
+        own_parts, inter_parts, smoothed_parts = [], [], []
+        for rec, probs in zip(test_recordings, probs_list):
+            labels = np.array([w["label"] for w in rec["windows"]], dtype=np.int64)
+            score = probs[:, 1]
+            pred = clf.classes_[np.argmax(probs, axis=1)]
+            y_test_parts.append(labels)
+            y_score_parts.append(score)
+            y_pred_parts.append(pred)
+            own_parts.append(np.array([w.get("seizure_id") == seizure_id for w in rec["windows"]]))
+            inter_parts.append(labels == 0)
+            smoothed_parts.append(k_of_n_alarm((pred == 1).astype(np.int64), k=k_of_n_k, n=k_of_n_n))
+
+        y_test = np.concatenate(y_test_parts)
+        y_score = np.concatenate(y_score_parts)
+        y_pred = np.concatenate(y_pred_parts)
+        y_pred_smoothed = np.concatenate(smoothed_parts)
+        own_seizure_mask = np.concatenate(own_parts)
+        interictal_mask = np.concatenate(inter_parts)
+
+        row = {
+            "subject": subject, "run": run, "seizure_id": seizure_id,
+            "n_train": len(train_recordings), "n_test": int(y_test.shape[0]),
+            "n_test_preictal": int(y_test.sum()),
+            "accuracy": accuracy_score(y_test, y_pred),
+            "precision": precision_score(y_test, y_pred, zero_division=0),
+            "recall": recall_score(y_test, y_pred, zero_division=0),
+            "f1": f1_score(y_test, y_pred, zero_division=0),
+            "average_precision": average_precision_score(y_test, y_score),
+        }
+        try:
+            row["roc_auc"] = roc_auc_score(y_test, y_score)
+        except ValueError:
+            row["roc_auc"] = float("nan")
+
+        n_interictal = int(interictal_mask.sum())
+        interictal_hours = (n_interictal * window_length) / 3600.0
+
+        def _event_metrics(preds: np.ndarray) -> dict[str, object]:
+            n_pre = int(own_seizure_mask.sum())
+            n_hit = int((preds[own_seizure_mask] == 1).sum()) if n_pre else 0
+            n_fa = int((preds[interictal_mask] == 1).sum())
+            far = (n_fa / interictal_hours) if interictal_hours > 0 else float("nan")
+            return {"hit": n_hit > 0, "n_hit": n_hit, "n_false_alarms": n_fa, "false_alarms_per_hour": far}
+
+        raw_events = _event_metrics(y_pred)
+        smoothed_events = _event_metrics(y_pred_smoothed)
+        n_preictal = int(own_seizure_mask.sum())
+
+        row["hit"] = raw_events["hit"]
+        row["n_preictal_windows"] = n_preictal
+        row["n_preictal_windows_predicted_positive"] = raw_events["n_hit"]
+        row["n_interictal_windows"] = n_interictal
+        row["n_false_alarms"] = raw_events["n_false_alarms"]
+        row["interictal_hours_monitored"] = interictal_hours
+        row["false_alarms_per_hour"] = raw_events["false_alarms_per_hour"]
+        row["hit_smoothed"] = smoothed_events["hit"]
+        row["n_false_alarms_smoothed"] = smoothed_events["n_false_alarms"]
+        row["false_alarms_per_hour_smoothed"] = smoothed_events["false_alarms_per_hour"]
+        fold_rows.append(row)
+
+        mean_preictal_score = float(y_score[own_seizure_mask].mean()) if n_preictal else float("nan")
+        per_seizure_rows.append(
+            {
+                "subject": subject, "run": run, "seizure_id": seizure_id,
+                "seizure_onset_s": onset, "seizure_offset_s": offset,
+                "seizure_duration_s": offset - onset,
+                "run_start_time": seizure_recording.get("run_start_time"),
+                "hit": raw_events["hit"], "hit_smoothed": smoothed_events["hit"],
+                "n_preictal_windows": n_preictal,
+                "n_preictal_windows_predicted_positive": raw_events["n_hit"],
+                "mean_preictal_score": mean_preictal_score,
+                "n_interictal_windows": n_interictal,
+                "n_false_alarms": raw_events["n_false_alarms"],
+                "false_alarms_per_hour": raw_events["false_alarms_per_hour"],
+                "false_alarms_per_hour_smoothed": smoothed_events["false_alarms_per_hour"],
+            }
+        )
+        print(
+            f"  seizure {seizure_id}: n_test={row['n_test']} preictal={n_preictal}  "
+            f"hit={raw_events['hit']} (smoothed={smoothed_events['hit']})  "
+            f"FAR/h={raw_events['false_alarms_per_hour']:.3f} "
+            f"(smoothed={smoothed_events['false_alarms_per_hour']:.3f})  "
+            f"precision={row['precision']:.3f} recall={row['recall']:.3f} "
+            f"f1={row['f1']:.3f} auc_pr={row['average_precision']:.3f}"
+        )
+
+    per_seizure_df = pd.DataFrame(per_seizure_rows)
+    gaps = []
+    for _, r in per_seizure_df.iterrows():
+        same_run = per_seizure_df[
+            (per_seizure_df["subject"] == r["subject"])
+            & (per_seizure_df["run"] == r["run"])
+            & (per_seizure_df["seizure_id"] != r["seizure_id"])
+        ]
+        gaps.append(
+            float("nan") if same_run.empty
+            else float((same_run["seizure_onset_s"] - r["seizure_onset_s"]).abs().min())
+        )
+    per_seizure_df["gap_to_nearest_seizure_same_recording_s"] = gaps
     return pd.DataFrame(fold_rows), per_seizure_df
 
 
@@ -2236,7 +2562,7 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         choices=[
             "dense_edge_gru", "dense_edge", "dense_edge_mamba", "continuous_cwt_mamba",
             "truong_stft_cnn", "dbconformer", "slimseiz", "cg_mambanet",
-            "temporal_graph_gru", "temporal_graph_mamba",
+            "temporal_graph_gru", "temporal_graph_mamba", "hermitian_ssm",
         ],
         default="dense_edge_gru",
         help=(
@@ -2313,7 +2639,17 @@ def _build_argument_parser() -> argparse.ArgumentParser:
             "against dense_edge_mamba and the rest of this table. Always applies the paper's "
             "fixed 16-channel montage (CG_MAMBANET_CHANNEL_INDICES) -- chb01-only "
             "(--subjects must be [1]). Respects --label-mode; results go under "
-            "results/cg_mambanet/."
+            "results/cg_mambanet/. "
+            "'hermitian_ssm' (2026-08-27): the 'Graph Spectral Mamba-3' design "
+            "(Epilepsy/hermitian_ssm.md). A deterministic per-recording precompute "
+            "(CWT -> wavelet coherence -> complex Hermitian channel graph A(f,t) -> "
+            "torch.linalg.eigh -> top-k eigenpairs, disk-cached under "
+            "<mne_data>/hermitian_ssm_cache/, keyed so different window/step re-slice "
+            "one cache) feeds a complex-aware spectral encoder -> Mamba temporal block "
+            "(reused _DenseEdgeMambaTemporal; Mamba-3 is the documented next step, not "
+            "yet wired) -> 2-class head. label_mode=prediction ONLY (forces it). "
+            "Recording-preserving dataset like continuous_cwt_mamba. Requires 'mambapy' "
+            "+ scipy. Results go under results/hermitian_ssm/prediction/."
         ),
     )
     parser.add_argument(
@@ -2377,6 +2713,21 @@ def _build_argument_parser() -> argparse.ArgumentParser:
             "truncation). Useful to resume a partial multi-fold run without "
             "redoing folds that already finished, e.g. --skip-folds 0 1 2. "
             "Unset (default): no folds skipped."
+        ),
+    )
+    parser.add_argument(
+        "--dump-window-scores", action="store_true",
+        help=(
+            "label_mode=prediction (dense-family pipelines: dense_edge*, "
+            "temporal_graph_gru/mamba) only: also write "
+            "prediction/prediction_window_scores_<run_id>.csv, one row per "
+            "TEST window across every fold (fold_i, held_out_seizure_id, "
+            "subject, run, window_seizure_id, window_start, y_test, "
+            "y_score, y_pred, y_pred_smoothed). Lets decision threshold, "
+            "k-of-n window, or post-hoc probability calibration be swept/"
+            "refit afterward from saved probabilities, without retraining. "
+            "Off by default (2026-08-27): one row per window is much "
+            "bigger than the existing per-seizure/per-fold summary CSVs."
         ),
     )
     parser.add_argument(
@@ -2756,7 +3107,7 @@ def main(args: argparse.Namespace) -> None:
             f"{'--no-disable-disk-cache' if args.disable_disk_cache else '--disable-disk-cache'} to override)"
         )
     label_mode = args.label_mode
-    if pipeline in ("truong_stft_cnn", "continuous_cwt_mamba") and label_mode != "prediction":
+    if pipeline in ("truong_stft_cnn", "continuous_cwt_mamba", "hermitian_ssm") and label_mode != "prediction":
         print(
             f"  note: --pipeline={pipeline} only supports label_mode=prediction -- "
             f"overriding --label-mode={label_mode}."
@@ -2892,6 +3243,99 @@ def main(args: argparse.Namespace) -> None:
         print(means.to_string())
         print(f"event-level hit rate (raw):    {n_hits}/{n_seizures} ({100 * n_hits / n_seizures:.1f}%)")
         print(f"event-level hit rate (k-of-n): {n_hits_smoothed}/{n_seizures} ({100 * n_hits_smoothed / n_seizures:.1f}%)")
+        return
+
+    if pipeline == "hermitian_ssm":
+        # Recording-preserving path (like continuous_cwt_mamba) -- NOT because
+        # state is carried across windows (it is not, see
+        # HermitianSSMClassifier's docstring), but because the deterministic
+        # spectral cache is keyed per RECORDING on a continuous downsampled-
+        # time grid so any window/step re-slices one cache. Window-row-shaped
+        # diagnostics (--max-channels/--shuffle-labels) aren't supported.
+        if args.max_channels is not None:
+            raise NotImplementedError("--max-channels is not supported with --pipeline=hermitian_ssm.")
+        if args.shuffle_labels:
+            raise NotImplementedError("--shuffle-labels is not supported with --pipeline=hermitian_ssm.")
+
+        clf_params, spectral_cfg = _hermitian_ssm_clf_params(args)
+        if args.disable_disk_cache:
+            clf_params["cache_root"] = None
+            print("  hermitian_ssm spectral cache: DISABLED (--disable-disk-cache) -- recompute every fold")
+        else:
+            clf_params["cache_root"] = str(default_hermitian_ssm_cache_root())
+
+        print(f"Building continuous (recording-preserving) dataset for subjects={subjects} "
+              f"(window_length={window_length}s, step_size={step_size}s)...")
+        recordings = _build_continuous_dataset(
+            subjects, window_length, step_size, label_mode=label_mode,
+            sph=args.sph, sop=args.sop, postictal_buffer=args.postictal_buffer,
+            interictal_buffer=args.interictal_buffer,
+            max_interictal_recordings=max_interictal_recordings,
+        )
+        n_windows_total = sum(len(r["windows"]) for r in recordings)
+        n_preictal_total = sum(1 for r in recordings for w in r["windows"] if w["label"] == 1)
+        print(f"  {len(recordings)} recordings, {n_windows_total} windows total, "
+              f"{n_preictal_total}/{n_windows_total} preictal "
+              f"({100 * n_preictal_total / max(1, n_windows_total):.1f}%)")
+
+        from Epilepsy.pipelines.hermitian_ssm_cache import estimate_cache_bytes_per_recording
+        n_ch = recordings[0]["raw_x"].shape[0] if recordings else 23
+        est_total = sum(
+            estimate_cache_bytes_per_recording(
+                spectral_cfg, r["raw_x"].shape[0], r["raw_x"].shape[1] / r["sampling_rate"]
+            )
+            for r in recordings
+        )
+        print(
+            f"  spectral cache: key={spectral_cfg.cache_key()}  "
+            f"F_out={spectral_cfg.nfreqs // spectral_cfg.freq_downsample}  k={spectral_cfg.k}  "
+            f"~{est_total / 1e9:.1f} GB projected for {len(recordings)} recordings "
+            f"({'disk' if clf_params['cache_root'] else 'in-memory only'})"
+        )
+
+        run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
+        output_dir = Path(args.output_dir)
+        _write_results_readme(output_dir)
+        if args.smoke:
+            epochs_eff = 2
+        elif args.epochs is not None:
+            epochs_eff = args.epochs
+        else:
+            epochs_eff = int(HERMITIAN_SSM_PARAMS["epochs"])
+        print(
+            f"Running leave-one-seizure-out prediction (pipeline=hermitian_ssm, "
+            f"epochs={epochs_eff}, sph={args.sph}s, sop={args.sop}s, "
+            f"validation_split={clf_params['validation_split']}, "
+            f"early_stopping_patience={clf_params['early_stopping_patience']})..."
+        )
+        results, per_seizure = leave_one_seizure_out_hermitian_ssm(
+            recordings, clf_params, epochs_eff, window_length,
+            k_of_n_k=args.k_of_n_k, k_of_n_n=args.k_of_n_n,
+            max_folds=args.max_folds,
+            skip_folds=set(args.skip_folds) if args.skip_folds else None,
+        )
+
+        prediction_dir = output_dir / "hermitian_ssm" / "prediction"
+        prediction_dir.mkdir(parents=True, exist_ok=True)
+        results_path = prediction_dir / f"prediction_leave_one_seizure_out_{run_id}.csv"
+        per_seizure_path = prediction_dir / f"prediction_per_seizure_{run_id}.csv"
+        results.to_csv(results_path, index=False)
+        per_seizure.to_csv(per_seizure_path, index=False)
+        print(f"\nWrote per-fold results to {results_path}")
+        print(f"Wrote per-seizure log to {per_seizure_path}")
+
+        numeric_cols = [
+            "accuracy", "precision", "recall", "f1", "average_precision", "roc_auc",
+            "false_alarms_per_hour", "false_alarms_per_hour_smoothed",
+        ]
+        means = results[numeric_cols].mean(numeric_only=True)
+        n_hits = int(results["hit"].sum())
+        n_hits_smoothed = int(results["hit_smoothed"].sum())
+        n_seizures = len(results)
+        print("\n=== Mean across folds (pipeline=hermitian_ssm, label_mode=prediction) ===")
+        print(means.to_string())
+        print(f"event-level hit rate (raw):    {n_hits}/{n_seizures} ({100 * n_hits / max(1, n_seizures):.1f}%)")
+        print(f"event-level hit rate (k-of-n): {n_hits_smoothed}/{n_seizures} ({100 * n_hits_smoothed / max(1, n_seizures):.1f}%)")
         return
 
     print(f"Building windowed dataset for subjects={subjects} label_mode={label_mode} "
@@ -3083,13 +3527,14 @@ def main(args: argparse.Namespace) -> None:
             f"validation_split={clf_params['validation_split']}, "
             f"early_stopping_patience={clf_params['early_stopping_patience']})..."
         )
-        results, per_seizure = leave_one_seizure_out_prediction(
+        results, per_seizure, window_scores = leave_one_seizure_out_prediction(
             X, y, metadata, clf_params, epochs, window_length,
             negative_to_positive_ratio=negative_to_positive_ratio,
             disable_disk_cache=args.disable_disk_cache,
             k_of_n_k=args.k_of_n_k, k_of_n_n=args.k_of_n_n,
             max_folds=args.max_folds,
             skip_folds=set(args.skip_folds) if args.skip_folds else None,
+            dump_window_scores=args.dump_window_scores,
         )
 
         # Separate output path (task 6, bullet 1): never pooled with
@@ -3117,6 +3562,14 @@ def main(args: argparse.Namespace) -> None:
         per_seizure.to_csv(per_seizure_path, index=False)
         print(f"\nWrote per-fold results to {results_path}")
         print(f"Wrote per-seizure log to {per_seizure_path}")
+        if window_scores is not None:
+            # 2026-08-27: raw per-window probabilities, so decision
+            # threshold / k-of-n window / post-hoc calibration can be swept
+            # afterward without retraining -- see leave_one_seizure_out_
+            # prediction's dump_window_scores docstring.
+            window_scores_path = prediction_dir / f"prediction_window_scores_{run_id}.csv"
+            window_scores.to_csv(window_scores_path, index=False)
+            print(f"Wrote per-window scores to {window_scores_path}")
 
         numeric_cols = [
             "accuracy", "precision", "recall", "f1", "average_precision", "roc_auc",
