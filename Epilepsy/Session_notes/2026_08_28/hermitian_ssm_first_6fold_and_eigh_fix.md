@@ -151,6 +151,35 @@ worse ranker, not just miscalibrated. Whether to keep iterating (float16
 cache, frequency-band sweep, k sweep, lr/reg) or park it is the open
 decision.
 
+## float16 eigenvector storage (2026-08-28, to make the fold fit in RAM)
+
+`HermitianSpectralConfig.eigenvector_storage`: `"complex64"` (old) or
+`"float16"` (new default in `HERMITIAN_SSM_PARAMS` via
+`spectral_eigenvector_storage`). float16 stores the eigenvectors real/imag
+split as `[T, F, k, C, 2]` float16 -- 4 B/component vs complex64's 8:
+
+- cache ~24 GB -> ~12 GB, one fold's training mmap ~17 GB -> ~8.5 GB,
+  now fits 16 GB RAM.
+- Measured roundtrip error on unit-norm eigenvector components: ~1.4e-4
+  abs. Negligible vs the ~1e-6 eigh accuracy and the coherence
+  smoothing/decimation already applied. The eigh itself still runs at
+  `eigenvector_dtype` (complex64) -- only storage changes.
+- `eigenvector_storage` is in `cache_key()`. Adding the dataclass field
+  changed *every* key regardless, so the old `a46c3e7d9c372dc5` complex64
+  cache is orphaned -> `rm -rf ~/mne_data/hermitian_ssm_cache/
+  a46c3e7d9c372dc5` (24 GB). Next run recomputes at the new key (~40 min;
+  the eigh fix is in, so no crash this time).
+
+Code: `_pack_eigenvectors` / `_is_packed_float16` in `hermitian_ssm_cache.
+py`, applied in `HermitianSpectralCache.ensure` (disk save) and `get`
+(in-memory path); `window_features` unpacks to complex for its contract;
+`_WindowDataset.__getitem__` handles both layouts by `u_all.ndim`.
+`compute_recording_spectral` and `scripts/hermitian_ssm_numerical_
+validation.py` are unchanged (they work in complex64). `scripts/
+hermitian_ssm_smoke.py` now runs with `eigenvector_storage="float16"` to
+exercise the packed path end to end. Validation + smoke + a disk-cache
+roundtrip test all pass.
+
 ## Open
 
 - Option A fallback if d_model=64 is capacity-limited: keep the encoder

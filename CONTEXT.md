@@ -834,14 +834,17 @@ read off a continuous timeline). See "Open threads" below.
   tensors, ~3-4 GB retained (E=1 -> `n_rows=64 <= chunk_size 128` so
   `_DenseEdgeMambaTemporal` skips its gradient-checkpointed path) -> swap
   on 16 GB RAM.
-  **Now IO-bound**, not compute (~130 s/epoch): the eigenvector cache is
-  ~17 GB/fold regardless of d_model, > 16 GB RAM, `num_workers=0`. Next
-  speed levers (deferred pending a decision on whether hermitian_ssm --
-  still ~0.24 AP, worst pipeline -- is worth more iteration): store
-  eigenvectors as **float16** (cache 24->12 GB, fold set fits RAM, ~1e-3
-  precision hit on unit-norm components -- negligible; needs an
-  `eigenvector_dtype` config change -> one-time recompute) + DataLoader
-  `num_workers`/prefetch.
+  **Was IO-bound** at ~130 s/epoch (eigenvector cache ~17 GB/fold > 16 GB
+  RAM, `num_workers=0`). **float16 eigenvector storage added 2026-08-28**
+  (`HermitianSpectralConfig.eigenvector_storage="float16"`, now the
+  `HERMITIAN_SSM_PARAMS` default): real/imag split as float16, 4 B/
+  component vs complex64's 8 -> cache ~24->12 GB, fold mmap fits RAM.
+  ~1e-4 abs error on unit-norm components (measured), negligible.
+  `eigenvector_storage` is in the cache key, and adding the field changed
+  *every* key anyway, so the old `a46c3e7d9c372dc5` complex64 cache (24 GB)
+  is orphaned -- delete `~/mne_data/hermitian_ssm_cache/a46c3e7d9c372dc5`.
+  Next run recomputes at the new key (~40 min, eigh fix is in so it won't
+  crash). If still IO-bound after that, add DataLoader `num_workers`.
   **Also not done:** frequency-band sweep (the whole benchmark runs
   8-40 Hz / nfreqs=8, picked for *disk budget* not accuracy -- see
   `_SHARED_ARCH_PARAMS` comment; hermitian_ssm's 8-124 / 30-bin input is a
@@ -851,10 +854,10 @@ read off a continuous timeline). See "Open threads" below.
   Disk: `~/mne_data/dense_edge_cache` (was 63 GB, auto-rebuilding
   CWT/dense-edge recompute cache) was **deleted 2026-08-27** -- the next
   `dense_edge*` / `temporal_graph_*` run recomputes it (slow first pass).
-  `~/mne_data/hermitian_ssm_cache` holds ~24 GB (all 41 chb01 recordings
-  at key `a46c3e7d9c372dc5`, td=16/nfreqs=60/fd=2, complex64); reused by
-  any run at that spectral config (d_model does not affect the cache key;
-  switching to float16 storage would).
+  `~/mne_data/hermitian_ssm_cache`: the old `a46c3e7d9c372dc5` dir (24 GB,
+  complex64, 41 recordings) is now **orphaned** (config gained the
+  `eigenvector_storage` field -> every key changed) -- safe to delete. The
+  next run rebuilds at the new float16 key.
 - **STG-Mamba Design A (topology modulates the SSM delta) -- still
   unbuilt.** See `Epilepsy/graph_state_space_mamba_design.md`; the
   `hermitian_ssm` pipeline above deliberately took the simpler

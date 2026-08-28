@@ -132,7 +132,16 @@ class HermitianSpectralConfig:
     coi_cycles: float = 2.0
 
     # Numerical.
-    eigenvector_dtype: str = "complex64"   # never reduce below this pre-validation (doc Section 15)
+    eigenvector_dtype: str = "complex64"   # compute dtype; never reduce below this pre-validation (doc Section 15)
+    # On-disk / in-dataset storage for the eigenvectors ONLY (the eigh itself
+    # always runs at eigenvector_dtype). "complex64" = 8 B/component;
+    # "float16" = real/imag split as float16, 4 B/component -> halves the
+    # cache and the training mmap so a full fold's eigenvectors fit in RAM.
+    # Eigenvector components are unit-norm (|u| = 1), so float16's ~1e-3
+    # relative error there is far below the ~1e-6 eigh accuracy and the
+    # coherence smoothing / freq decimation already applied. Affects
+    # cache_key() -> switching triggers a one-time recompute.
+    eigenvector_storage: str = "complex64"
 
     version: int = 1  # bump to invalidate every cache when the math changes
 
@@ -143,6 +152,10 @@ class HermitianSpectralConfig:
             raise ValueError(f"diagonal must be 'power' or 'zero', got {self.diagonal!r}")
         if self.eigenvalue_sort not in ("abs", "value"):
             raise ValueError(f"eigenvalue_sort must be 'abs' or 'value', got {self.eigenvalue_sort!r}")
+        if self.eigenvector_storage not in ("complex64", "float16"):
+            raise ValueError(
+                f"eigenvector_storage must be 'complex64' or 'float16', got {self.eigenvector_storage!r}"
+            )
         if self.lowest <= 0 or self.highest <= self.lowest:
             raise ValueError(f"require 0 < lowest < highest, got {self.lowest}, {self.highest}")
         if self.freq_downsample < 1 or self.nfreqs % self.freq_downsample != 0:
@@ -487,6 +500,20 @@ def default_hermitian_ssm_cache_root() -> Path:
 _ARRAY_FILES = ("eigenvalues", "eigenvectors", "coi_valid", "freqs")
 
 
+def _pack_eigenvectors(evecs: np.ndarray, storage: str) -> np.ndarray:
+    """complex64 [T, F, k, C]  ->  the on-disk representation for `storage`.
+    "complex64": unchanged. "float16": real/imag split to float16,
+    [T, F, k, C, 2] (last axis = [Re, Im])."""
+    if storage == "complex64":
+        return evecs
+    return np.stack([evecs.real, evecs.imag], axis=-1).astype(np.float16)
+
+
+def _is_packed_float16(evecs: np.ndarray) -> bool:
+    """True for the float16 [..., C, 2] layout, False for complex64 [..., C]."""
+    return evecs.dtype == np.float16 and evecs.ndim == 5 and evecs.shape[-1] == 2
+
+
 class HermitianSpectralCache:
     """Disk-backed per-recording spectral cache.
 
@@ -496,6 +523,7 @@ class HermitianSpectralCache:
             config.json
             <subject>_<run>/eigenvalues.npy    [T_ds, F_out, k]     float32
             <subject>_<run>/eigenvectors.npy   [T_ds, F_out, k, C]  complex64
+                                  OR [T_ds, F_out, k, C, 2] float16  (eigenvector_storage="float16")
             <subject>_<run>/coi_valid.npy      [T_ds, F_out]        bool
             <subject>_<run>/freqs.npy          [F_out]              float32
             <subject>_<run>/meta.json          {time_downsample, n_channels, n_samples}
@@ -550,6 +578,8 @@ class HermitianSpectralCache:
 
             shutil.rmtree(tmp)
         tmp.mkdir(parents=True)
+        out = dict(out)
+        out["eigenvectors"] = _pack_eigenvectors(out["eigenvectors"], self.cfg.eigenvector_storage)
         for n in _ARRAY_FILES:
             np.save(tmp / f"{n}.npy", out[n])
         (tmp / "meta.json").write_text(
@@ -572,9 +602,13 @@ class HermitianSpectralCache:
             if key not in self._mem:
                 if self.verbose:
                     print(f"  [hermitian_ssm cache] computing (in-memory) subject={subject} run={run} ...")
-                self._mem[key] = compute_recording_spectral(
+                mem = compute_recording_spectral(
                     raw_x, self.cfg, device=self.device, verbose=self.verbose
                 )
+                mem["eigenvectors"] = _pack_eigenvectors(
+                    mem["eigenvectors"], self.cfg.eigenvector_storage
+                )
+                self._mem[key] = mem
             return self._mem[key]
 
         self.ensure(subject, run, raw_x)
@@ -595,9 +629,12 @@ class HermitianSpectralCache:
         t0 = start_sample // f
         t1 = max(t0 + 1, end_sample // f)
         t1 = min(t1, rec["eigenvalues"].shape[0])
+        evecs = rec["eigenvectors"][t0:t1]
+        if _is_packed_float16(rec["eigenvectors"]):
+            evecs = (evecs[..., 0] + 1j * evecs[..., 1]).astype(np.complex64)
         return {
             "eigenvalues": np.ascontiguousarray(rec["eigenvalues"][t0:t1]),
-            "eigenvectors": np.ascontiguousarray(rec["eigenvectors"][t0:t1]),
+            "eigenvectors": np.ascontiguousarray(evecs),
             "coi_valid": np.ascontiguousarray(rec["coi_valid"][t0:t1]),
         }
 
@@ -606,6 +643,7 @@ def estimate_cache_bytes_per_recording(cfg: HermitianSpectralConfig, n_channels:
     t_ds = int(duration_s * cfg.sampling_rate / cfg.time_downsample)
     f_out = cfg.nfreqs // cfg.freq_downsample
     vals = t_ds * f_out * cfg.k * 4
-    vecs = t_ds * f_out * cfg.k * n_channels * 8
+    bytes_per_component = 4 if cfg.eigenvector_storage == "float16" else 8  # float16 re/im vs complex64
+    vecs = t_ds * f_out * cfg.k * n_channels * bytes_per_component
     coi = t_ds * f_out  # bool
     return vals + vecs + coi

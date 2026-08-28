@@ -78,7 +78,10 @@ def main() -> int:
     ]
     test = [_make_recording(1, "04", 90, seizure=True, seed=4)]
 
-    cfg = HermitianSpectralConfig(nfreqs=24, freq_downsample=2, highest=110.0)
+    cfg = HermitianSpectralConfig(
+        nfreqs=24, freq_downsample=2, highest=110.0,
+        eigenvector_storage="float16",  # exercise the packed re/im path end to end
+    )
     clf = HermitianSSMClassifier(
         epochs=3,
         batch_size=16,

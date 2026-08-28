@@ -526,14 +526,19 @@ class _WindowDataset(torch.utils.data.Dataset):
         ui = np.zeros((tw, f, k, c), dtype=np.float32)
         if n > 0:
             ev_s = np.array(ev_all[t0:t1], dtype=np.float32)
-            u_s = np.array(u_all[t0:t1])
-            invalid = ~np.array(coi[t0:t1])                # [n, F]
+            packed = u_all.ndim == 5                         # float16 [n,F,k,C,2] vs complex64 [n,F,k,C]
+            u_s = np.asarray(u_all[t0:t1]).astype(np.float32 if packed else np.complex64)
+            invalid = ~np.array(coi[t0:t1])                  # [n, F]
             ev_s = (ev_s - self.m) / self.s
             ev_s[invalid] = 0.0
             u_s[invalid] = 0.0
             ev[:n] = ev_s
-            ur[:n] = u_s.real
-            ui[:n] = u_s.imag
+            if packed:
+                ur[:n] = u_s[..., 0]
+                ui[:n] = u_s[..., 1]
+            else:
+                ur[:n] = u_s.real
+                ui[:n] = u_s.imag
         return (
             torch.from_numpy(ev),
             torch.from_numpy(ur),

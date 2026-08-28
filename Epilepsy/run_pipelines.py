@@ -578,6 +578,11 @@ HERMITIAN_SSM_PARAMS: dict[str, object] = dict(
     spectral_diagonal="power",
     spectral_eigenvalue_sort="abs",
     spectral_k=2,
+    # eigenvectors stored as float16 re/im (4 B/component vs complex64's 8):
+    # halves the cache (~24->12 GB) and the training mmap so a full fold's
+    # eigenvectors fit in 16 GB RAM. ~1e-3 error on unit-norm components,
+    # negligible. Part of the cache key. 2026-08-28.
+    spectral_eigenvector_storage="float16",
     # encoder
     # d_model: width of the fused whole-graph token AND the Mamba (they are
     # tied). Doc default was 256; cut to 64 on 2026-08-28 -- at 256 the
@@ -619,6 +624,7 @@ def _hermitian_ssm_clf_params(args: argparse.Namespace) -> tuple[dict, Hermitian
         diagonal=p.pop("spectral_diagonal"),
         eigenvalue_sort=p.pop("spectral_eigenvalue_sort"),
         k=p.pop("spectral_k"),
+        eigenvector_storage=p.pop("spectral_eigenvector_storage"),
     )
     if args.smoke:
         # The per-recording eigh precompute is the slow part; shrink it hard
