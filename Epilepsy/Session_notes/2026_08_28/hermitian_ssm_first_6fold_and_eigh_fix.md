@@ -120,6 +120,37 @@ measured choice. Raw per-`(timestep, freq_bin)` feature width is only
   after this commit. Cache key is unchanged by `d_model`, so the ~20 GB
   spectral cache is reused.
 
+## d_model=64 run (Option B, `*_20260828-055322.csv`)
+
+Same command, same spectral cache (key unchanged by d_model), `d_model`
+256 -> 64 (committed `1ffec2e`). ~2.5 h wall.
+
+| metric | d_model=256 | d_model=64 |
+|---|---|---|
+| mean AP | 0.237 | 0.241 |
+| mean ROC-AUC | 0.871 | 0.880 |
+| mean FAR/h raw->sm | 19.0->9.0 | 12.4->5.0 |
+| k-of-n hits | 4/6 | 3/6 |
+| epoch time | ~240 s | ~130 s |
+
+Per-fold AP (d256 -> d64): 1_03 .107->.099, 1_04 .130->.300,
+1_15 .498->.204, 1_16 .330->.433, 1_18 .251->.309, 1_26 .104->.105.
+Noisy fold-to-fold (different init + early-stop points), but the means
+say **narrowing the token cost nothing** -- AP flat, AUC slightly up, FAR
+down, 2x faster. 256 was oversized; **d_model=64 adopted as the default.**
+
+Epoch time only halved (not to ~1 min) because the bottleneck moved:
+the Mamba head is no longer dominant, but the ~17 GB/fold eigenvector
+mmap doesn't fit 16 GB RAM and `num_workers=0` serializes the reads
+(swap sat at ~10 GB during the run). float16 cache + `num_workers` is the
+next speed pass -- deferred, see below.
+
+hermitian_ssm is still the weakest full-6-fold pipeline (AP ~0.24 vs
+temporal_graph_mamba 0.67), and AUC 0.88 vs 0.94 means it is genuinely a
+worse ranker, not just miscalibrated. Whether to keep iterating (float16
+cache, frequency-band sweep, k sweep, lr/reg) or park it is the open
+decision.
+
 ## Open
 
 - Option A fallback if d_model=64 is capacity-limited: keep the encoder

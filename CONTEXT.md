@@ -808,31 +808,40 @@ read off a continuous timeline). See "Open threads" below.
   `HermitianSSMClassifier`, `False` for ablation. Not built: per-frequency
   Mamba lanes (`E=F` instead of `E=1`) -- discussed, left as a future
   config switch, see the session note.
-  **Status (2026-08-28):** first real 6-fold LOSO run DONE (CPU, ~6.5 h,
-  `results/hermitian_ssm/prediction/*_20260827-231141.csv`). **Mean AP
-  0.237**, ROC-AUC 0.871, precision 0.147, recall 0.643, FAR/h 19.0->9.0,
-  hits 6/6 raw / 4/6 k-of-n. Per fold AP: 1_03 .107, 1_04 .130, 1_15 .498,
-  1_16 .330, 1_18 .251, 1_26 .104. **Weakest full-6-fold pipeline so far**
-  (temporal_graph_mamba 0.674, dense_edge_gru k=20 0.567, dense_edge_mamba
-  0.42/0.50, dbconformer 0.44). Untuned -- no d_model / frequency-band /
-  regularization sweep, same "good-ish ranking, no threshold calibration"
-  shape as the rest but a worse ranker.
+  **Status (2026-08-28):** two real 6-fold LOSO runs done (CPU). d_model=256
+  (`*_20260827-231141.csv`): mean AP 0.237, AUC 0.871, FAR/h 19.0->9.0,
+  hits 6/6 raw / 4/6 k-of-n. d_model=64 (`*_20260828-055322.csv`): mean AP
+  0.241, AUC 0.880, FAR/h 12.4->5.0, hits 6/6 raw / 3/6 k-of-n.
+  **Weakest full-6-fold pipeline so far** (temporal_graph_mamba 0.674,
+  dense_edge_gru k=20 0.567, dense_edge_mamba 0.42/0.50, dbconformer 0.44)
+  -- and AUC 0.88 vs temporal_graph_mamba's 0.94 says it is a worse
+  *ranker*, not just badly thresholded. Untuned -- no frequency-band /
+  regularization / k sweep.
   Bug found + fixed during the run (`hermitian_ssm_cache.py`,
   `compute_recording_spectral`): `torch.linalg.eigh` (LAPACK syevd) fails
   to converge on flatlined / dropped-electrode segments in real CHB-MIT
   (LinAlgError code 22, kills the whole batch). Fix: `nan_to_num` + on
   LinAlgError fall back to the general `torch.linalg.eig` solver for that
   freq chunk. Numerical validation still PASS.
-  **Speed:** ~4 min/epoch on this Mac, ~4x `temporal_graph_mamba`'s
-  ~1 min. Cause (measured): entirely `d_model=256`. mambapy's pure-PyTorch
-  pscan materializes `[B, T, expand*d_model, d_state]` = `[64, 480, 512,
-  16]` ~1 GB tensors, ~3-4 GB retained (E=1 -> `n_rows=64 <= chunk_size
-  128` so `_DenseEdgeMambaTemporal` skips its gradient-checkpointed path)
-  -> swaps on 16 GB RAM. Encoder is minor (~0.6 s/batch vs ~4 s for the
-  Mamba head). **Next run: `d_model` 256 -> 64** (Option B -- shrink
-  `freq_fuse` output + token + Mamba together; raw per-(t,f) feature width
-  is only 94, so 256 was oversized). Expected ~`temporal_graph_mamba`
-  epoch speed.
+  **`d_model` 256 -> 64 done** (2026-08-28, committed `1ffec2e`, run
+  `*_20260828-055322.csv`): mean AP 0.237->**0.241**, AUC 0.871->0.880,
+  FAR/h 19.0->12.4, k-of-n hits 4/6->3/6, epoch ~4min->~2.2min. Narrowing
+  the token cost nothing on accuracy -- 256 was oversized (raw per-(t,f)
+  feature width is only 94); **64 is now the default**. Per-fold AP is
+  noisy run-to-run (1_04 .13->.30, 1_15 .50->.20, rest similar).
+  Why d_model mattered for speed: at 256, `d_inner=expand*d_model=512` and
+  mambapy's pure-PyTorch pscan materializes `[64, 480, 512, 16]` ~1 GB
+  tensors, ~3-4 GB retained (E=1 -> `n_rows=64 <= chunk_size 128` so
+  `_DenseEdgeMambaTemporal` skips its gradient-checkpointed path) -> swap
+  on 16 GB RAM.
+  **Now IO-bound**, not compute (~130 s/epoch): the eigenvector cache is
+  ~17 GB/fold regardless of d_model, > 16 GB RAM, `num_workers=0`. Next
+  speed levers (deferred pending a decision on whether hermitian_ssm --
+  still ~0.24 AP, worst pipeline -- is worth more iteration): store
+  eigenvectors as **float16** (cache 24->12 GB, fold set fits RAM, ~1e-3
+  precision hit on unit-norm components -- negligible; needs an
+  `eigenvector_dtype` config change -> one-time recompute) + DataLoader
+  `num_workers`/prefetch.
   **Also not done:** frequency-band sweep (the whole benchmark runs
   8-40 Hz / nfreqs=8, picked for *disk budget* not accuracy -- see
   `_SHARED_ARCH_PARAMS` comment; hermitian_ssm's 8-124 / 30-bin input is a
@@ -842,9 +851,10 @@ read off a continuous timeline). See "Open threads" below.
   Disk: `~/mne_data/dense_edge_cache` (was 63 GB, auto-rebuilding
   CWT/dense-edge recompute cache) was **deleted 2026-08-27** -- the next
   `dense_edge*` / `temporal_graph_*` run recomputes it (slow first pass).
-  `~/mne_data/hermitian_ssm_cache` now holds ~20 GB (34 recordings at
-  key `a46c3e7d9c372dc5`, td=16/nfreqs=60/fd=2); reused by any run at
-  that spectral config (d_model does not affect the cache key).
+  `~/mne_data/hermitian_ssm_cache` holds ~24 GB (all 41 chb01 recordings
+  at key `a46c3e7d9c372dc5`, td=16/nfreqs=60/fd=2, complex64); reused by
+  any run at that spectral config (d_model does not affect the cache key;
+  switching to float16 storage would).
 - **STG-Mamba Design A (topology modulates the SSM delta) -- still
   unbuilt.** See `Epilepsy/graph_state_space_mamba_design.md`; the
   `hermitian_ssm` pipeline above deliberately took the simpler
