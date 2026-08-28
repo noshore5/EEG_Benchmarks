@@ -3005,6 +3005,19 @@ class SparseEvidenceGNNCore(nn.Module):
         # and this is not "gru" -- same "explicit no-op rejection"
         # precedent as event_aggregation's own temporal_graph requirement.
         temporal_graph_mode: Literal["gru", "mamba"] = "gru",
+        # 2026-08-28. temporal_graph_mode="mamba" only. "pre" (default,
+        # bit-identical to before this param): scatter-mean the [B,E,T,H]
+        # per-edge messages down to [B,C,T,H] node sequences FIRST, then run
+        # ONE Mamba per node over T. "post": run the Mamba over each of the
+        # E (~253) edge sequences' own T FIRST, THEN scatter-mean the E
+        # per-edge summaries to C nodes -- the temporal model sees the full
+        # edge graph instead of a 23-node per-timestep average. ~E/C (~11x)
+        # more Mamba rows => ~that much slower per epoch, but n_rows=B*E far
+        # exceeds temporal_graph_mamba_chunk_size so _DenseEdgeMambaTemporal
+        # gradient-checkpoints and peak memory stays bounded. Cache is
+        # untouched (same precomputed [B,4,E,T,F] stack). See
+        # _temporal_graph_node_states.
+        temporal_graph_aggregate: Literal["pre", "post"] = "pre",
         temporal_graph_mamba_d_state: int = 16,
         temporal_graph_mamba_d_conv: int = 4,
         temporal_graph_mamba_expand: int = 2,
@@ -3090,6 +3103,20 @@ class SparseEvidenceGNNCore(nn.Module):
             raise ValueError(
                 "temporal_graph_mode='mamba' requires event_mode='temporal_graph' "
                 f"-- got event_mode={event_mode!r}."
+            )
+        if temporal_graph_aggregate not in ("pre", "post"):
+            raise ValueError(
+                f"temporal_graph_aggregate must be 'pre' or 'post', got "
+                f"{temporal_graph_aggregate!r}."
+            )
+        if temporal_graph_aggregate == "post" and temporal_graph_mode != "mamba":
+            # "post" only reorders the Mamba path (self.temporal_node_mamba
+            # over the E-edge axis before scatter-mean). The GRU path has no
+            # such reordering implemented, so a non-default value there would
+            # be silently ignored -- same rejection precedent as above.
+            raise ValueError(
+                "temporal_graph_aggregate='post' requires temporal_graph_mode='mamba' "
+                f"-- got temporal_graph_mode={temporal_graph_mode!r}."
             )
         if event_aggregation == "concat" and event_mode != "dense":
             # "concat"'s per-node readout (_aggregate_events' "concat" branch)
@@ -3343,6 +3370,7 @@ class SparseEvidenceGNNCore(nn.Module):
         self.time_averaged_graph = bool(time_averaged_graph)
         self.temporal_graph_edge_dim = temporal_graph_edge_dim
         self.temporal_graph_mode = temporal_graph_mode
+        self.temporal_graph_aggregate = temporal_graph_aggregate
         self.cwt_encoder = bool(cwt_encoder)
         self.node_embedding_dim = int(
             hidden_dim if node_embedding_dim is None else node_embedding_dim
@@ -5170,6 +5198,28 @@ class SparseEvidenceGNNCore(nn.Module):
         # every other event_mode's message step uses; nn.Linear applies to
         # the last dim regardless of the extra T axis here.
 
+        if self.temporal_graph_aggregate == "post":
+            # Mamba over each EDGE's own T sequence FIRST (X=E ~253 rows --
+            # _DenseEdgeMambaTemporal's original per-edge role), THEN
+            # scatter-mean the E per-edge summaries to C nodes. The temporal
+            # model sees the full edge graph, not a per-timestep 23-node
+            # average. Same dst_idx / temporal_node_in_degree divisor as the
+            # "pre" path below, just applied after the Mamba instead of
+            # before. __init__ guarantees temporal_graph_mode == "mamba" here.
+            edge_in = msg.permute(0, 3, 1, 2)  # [B, hidden_dim, E, T]
+            edge_out = self.temporal_node_mamba(edge_in)  # [B, hidden_dim, E, 1]
+            edge_summary = edge_out.squeeze(-1).permute(0, 2, 1)  # [B, E, hidden_dim]
+            evidence = torch.zeros(
+                batch_size_actual, self.n_channels, self.hidden_dim,
+                dtype=edge_summary.dtype, device=edge_summary.device,
+            )
+            dst_idx_post = self.dst_idx.view(1, -1, 1).expand(
+                batch_size_actual, -1, self.hidden_dim
+            )
+            evidence.scatter_add_(1, dst_idx_post, edge_summary)
+            evidence = evidence / self.temporal_node_in_degree.view(1, -1, 1)
+            return evidence
+
         # Per-timestep "mean" aggregation to nodes -- the existing
         # _aggregate_events' "mean" branch generalized with an extra T axis
         # (event_mode="temporal_graph" requires event_aggregation="mean",
@@ -5743,6 +5793,9 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         # Forwarded to SparseEvidenceGNNCore -- see Core's matching
         # docstring ("aggregate-then-Mamba", 2026-08-26).
         temporal_graph_mode: Literal["gru", "mamba"] = "gru",
+        # Forwarded to SparseEvidenceGNNCore -- "pre" (default) / "post"
+        # aggregate-vs-Mamba ordering; see Core's matching docstring (2026-08-28).
+        temporal_graph_aggregate: Literal["pre", "post"] = "pre",
         temporal_graph_mamba_d_state: int = 16,
         temporal_graph_mamba_d_conv: int = 4,
         temporal_graph_mamba_expand: int = 2,
@@ -6160,6 +6213,7 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         self.mamba_use_cuda_kernel = mamba_use_cuda_kernel
         self.temporal_graph_edge_dim = temporal_graph_edge_dim
         self.temporal_graph_mode = temporal_graph_mode
+        self.temporal_graph_aggregate = temporal_graph_aggregate
         self.temporal_graph_mamba_d_state = temporal_graph_mamba_d_state
         self.temporal_graph_mamba_d_conv = temporal_graph_mamba_d_conv
         self.temporal_graph_mamba_expand = temporal_graph_mamba_expand
@@ -7637,6 +7691,7 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
             shuffle_time_order=self.shuffle_time_order,
             temporal_graph_edge_dim=self.temporal_graph_edge_dim,
             temporal_graph_mode=self.temporal_graph_mode,
+            temporal_graph_aggregate=self.temporal_graph_aggregate,
             temporal_graph_mamba_d_state=self.temporal_graph_mamba_d_state,
             temporal_graph_mamba_d_conv=self.temporal_graph_mamba_d_conv,
             temporal_graph_mamba_expand=self.temporal_graph_mamba_expand,

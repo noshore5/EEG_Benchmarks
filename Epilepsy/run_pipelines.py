@@ -420,6 +420,13 @@ TEMPORAL_GRAPH_GRU_PARAMS: dict[str, object] = dict(
 TEMPORAL_GRAPH_MAMBA_PARAMS: dict[str, object] = dict(
     TEMPORAL_GRAPH_GRU_PARAMS,
     temporal_graph_mode="mamba",
+    # "pre" (default): scatter-mean [B,E,T,H] edge messages to [B,C,T,H]
+    # node sequences, then one Mamba per node over T. "post": Mamba over
+    # each of the ~253 edge sequences first, then scatter-mean to nodes --
+    # the temporal model keeps the full edge graph instead of a 23-node
+    # per-timestep average. ~11x more Mamba rows (slower epochs), cache
+    # unchanged. See _temporal_graph_node_states / CONTEXT.md open thread.
+    temporal_graph_aggregate="pre",
     temporal_graph_mamba_d_state=16,
     temporal_graph_mamba_d_conv=4,
     temporal_graph_mamba_expand=2,
@@ -498,21 +505,30 @@ PREDICTION_TEMPORAL_GRAPH_MAMBA_PARAMS: dict[str, object] = dict(
     TEMPORAL_GRAPH_MAMBA_PARAMS,
     batch_size=32,
     validation_split=0.2,
-    # 2026-08-28: wide-band experiment. _SHARED_ARCH_PARAMS runs 8-40 Hz /
-    # nfreqs=8 (a disk-budget choice, never swept for accuracy -- see its
-    # comment). hermitian_ssm's 8-124 Hz input is a different regime, so
-    # the architecture comparison isn't clean. Widen this pipeline (the
-    # current prediction leader, AP 0.67) to the same band at 15 log-spaced
-    # CWT voices. dense_edge_time_downsample 16->32 (T 480->240 into the
-    # Mamba) ~cancels the nfreqs 8->15 growth in the cwt_window_cache /
-    # dense_edge_cache disk footprint (~70 GB at nfreqs=8; both scale
-    # linearly in nfreqs, halve with 2x more time-downsample) so it still
-    # fits local disk. Revert all four to the _SHARED_ARCH_PARAMS values
-    # if this doesn't beat the 8-40 / nfreqs=8 / tds=16 baseline.
-    lowest=8.0,
-    highest=124.0,
-    nfreqs=15,
-    dense_edge_time_downsample=32,
+    # 2026-08-28: wide-band experiment -- ABANDONED, negative result.
+    # _SHARED_ARCH_PARAMS runs 8-40 Hz / nfreqs=8 (a disk-budget choice,
+    # never swept for accuracy). hermitian_ssm's 8-124 Hz input is a
+    # different regime, so widening this pipeline (the prediction leader,
+    # AP 0.674) toward that band seemed worth a look.
+    #   attempt 1  nfreqs=15, dense_edge_time_downsample=32:
+    #     1_03 AP 0.792->0.307, 1_04 0.830->0.315  (killed after 2 folds)
+    #   attempt 2  nfreqs=10, tds=16 (isolates the band from the tds cut):
+    #     1_03 AP 0.792->0.236  (killed after fold 1 -- WORSE, so tds
+    #     wasn't the cause; the wide band itself dilutes the 8-40 signal:
+    #     40-124 Hz scalp coherence is mostly EMG/noise and it all gets
+    #     linearly mixed by temporal_edge_proj's 4*nfreqs->edge_dim layer).
+    # Reverted to _SHARED_ARCH_PARAMS' 8-40 / nfreqs=8. See
+    # Session_notes/2026_08_28/ and CONTEXT.md.
+    #
+    # temporal_graph_aggregate (cwt_gnn_classifiers.py): "pre" (default,
+    # the AP 0.674 baseline) scatter-means edge messages to 23 node
+    # sequences BEFORE the per-node Mamba; "post" runs the Mamba over each
+    # of the ~253 EDGE sequences first and aggregates to nodes after, so
+    # the temporal model keeps the full edge graph instead of a per-
+    # timestep 23-node average (~11x slower/epoch, cache unchanged). A
+    # 6-fold "post" A/B (only this knob changed) is running 2026-08-28 --
+    # flip to "post" here to reproduce; keep "pre" until it beats 0.674.
+    temporal_graph_aggregate="pre",
     # 2026-08-26 overnight FAR-tuning pass (weight_decay 1e-4->3e-4,
     # temporal_graph_mamba_dropout 0.0->0.15) was tried and REVERTED
     # 2026-08-27 -- net negative: fold 1_04_0 failed to train entirely
