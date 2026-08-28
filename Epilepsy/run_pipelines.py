@@ -498,6 +498,21 @@ PREDICTION_TEMPORAL_GRAPH_MAMBA_PARAMS: dict[str, object] = dict(
     TEMPORAL_GRAPH_MAMBA_PARAMS,
     batch_size=32,
     validation_split=0.2,
+    # 2026-08-28: wide-band experiment. _SHARED_ARCH_PARAMS runs 8-40 Hz /
+    # nfreqs=8 (a disk-budget choice, never swept for accuracy -- see its
+    # comment). hermitian_ssm's 8-124 Hz input is a different regime, so
+    # the architecture comparison isn't clean. Widen this pipeline (the
+    # current prediction leader, AP 0.67) to the same band at 15 log-spaced
+    # CWT voices. dense_edge_time_downsample 16->32 (T 480->240 into the
+    # Mamba) ~cancels the nfreqs 8->15 growth in the cwt_window_cache /
+    # dense_edge_cache disk footprint (~70 GB at nfreqs=8; both scale
+    # linearly in nfreqs, halve with 2x more time-downsample) so it still
+    # fits local disk. Revert all four to the _SHARED_ARCH_PARAMS values
+    # if this doesn't beat the 8-40 / nfreqs=8 / tds=16 baseline.
+    lowest=8.0,
+    highest=124.0,
+    nfreqs=15,
+    dense_edge_time_downsample=32,
     # 2026-08-26 overnight FAR-tuning pass (weight_decay 1e-4->3e-4,
     # temporal_graph_mamba_dropout 0.0->0.15) was tried and REVERTED
     # 2026-08-27 -- net negative: fold 1_04_0 failed to train entirely
