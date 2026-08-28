@@ -579,7 +579,14 @@ HERMITIAN_SSM_PARAMS: dict[str, object] = dict(
     spectral_eigenvalue_sort="abs",
     spectral_k=2,
     # encoder
-    d_model=256,
+    # d_model: width of the fused whole-graph token AND the Mamba (they are
+    # tied). Doc default was 256; cut to 64 on 2026-08-28 -- at 256 the
+    # mambapy pscan materializes ~1GB [B,T,expand*d_model,d_state] tensors
+    # that are retained for backward (E=1 skips _DenseEdgeMambaTemporal's
+    # gradient-checkpointed path) and swap on 16GB RAM -> ~4x slower/epoch
+    # than temporal_graph_mamba. Raw per-(t,f) feature width is only 94, so
+    # 256 was oversized anyway. See Session_notes/2026_08_28/.
+    d_model=64,
     d_mode=32,
     d_freq=64,
     freq_feature=True,   # feed normalised Hz into the per-mode encoder (2026-08-27); ablate by flipping False

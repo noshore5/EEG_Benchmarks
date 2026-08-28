@@ -242,7 +242,7 @@ class HermitianSSMClassifier:
         cache_root: str | None = None,
         precompute_device: str = "cpu",
         # encoder
-        d_model: int = 256,
+        d_model: int = 64,   # 2026-08-28: was 256 (doc default); see run_pipelines HERMITIAN_SSM_PARAMS
         d_mode: int = 32,
         d_freq: int = 64,
         freq_feature: bool = True,   # feed normalised Hz into the per-mode encoder
