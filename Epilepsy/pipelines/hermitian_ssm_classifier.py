@@ -49,6 +49,8 @@ To adopt it here:
 
 from __future__ import annotations
 
+import time
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -120,7 +122,7 @@ class _SpectralEncoder(nn.Module):
         self.use_freq_feature = freqs is not None
         n_ff = 0
         if self.use_freq_feature:
-            f = torch.as_tensor(np.asarray(freqs, dtype=np.float32))       # [F], highest-first
+            f = torch.from_numpy(np.array(freqs, dtype=np.float32))        # [F], highest-first (np.array copies -> writable)
             f_lin = (f - f.min()) / (f.max() - f.min() + 1e-8)
             lg = torch.log(f.clamp_min(1e-6))
             f_log = (lg - lg.min()) / (lg.max() - lg.min() + 1e-8)
@@ -393,6 +395,7 @@ class HermitianSSMClassifier:
 
         best_val, best_state, bad = float("inf"), None, 0
         for epoch in range(self.epochs):
+            epoch_t0 = time.perf_counter()
             self.model_.train()
             tot, seen = 0.0, 0
             for ev_b, ur_b, ui_b, y_b in train_loader:
@@ -420,14 +423,16 @@ class HermitianSSMClassifier:
                     bad += 1
                 if self.verbose:
                     print(f"  [hermitian_ssm] epoch {epoch + 1}/{self.epochs} "
-                          f"train_loss={tr_loss:.4f} val_loss={val_loss:.4f} val_auc={vauc:.3f}"
+                          f"train_loss={tr_loss:.4f} val_loss={val_loss:.4f} val_auc={vauc:.3f} "
+                          f"({time.perf_counter() - epoch_t0:.1f}s)"
                           + (" *" if improved else ""))
                 if self.early_stopping_patience and bad >= self.early_stopping_patience:
                     if self.verbose:
                         print(f"  [hermitian_ssm] early stop at epoch {epoch + 1}")
                     break
             elif self.verbose:
-                print(f"  [hermitian_ssm] epoch {epoch + 1}/{self.epochs} train_loss={tr_loss:.4f}")
+                print(f"  [hermitian_ssm] epoch {epoch + 1}/{self.epochs} train_loss={tr_loss:.4f} "
+                      f"({time.perf_counter() - epoch_t0:.1f}s)")
 
         if best_state is not None:
             self.model_.load_state_dict(best_state)

@@ -772,7 +772,7 @@ read off a continuous timeline). See "Open threads" below.
   numbers -- the actual open question this branch exists to answer.
 - **Graph-aware state-space Mamba -- whole-graph-as-one-token branch BUILT
   2026-08-27 as `--pipeline hermitian_ssm`** (branch `graph-state-mamba`,
-  not committed yet). This is the "Graph Spectral Mamba-3" design
+  committed `26dd172`; eigh fix + first 6-fold result 2026-08-28). This is the "Graph Spectral Mamba-3" design
   (`Epilepsy/hermitian_ssm.md`), i.e. Design B + Design C of
   `graph_state_space_mamba_design.md` taken to their conclusion: complex
   Hermitian per-frequency channel graph -> `torch.linalg.eigh` -> top-k=2
@@ -789,7 +789,9 @@ read off a continuous timeline). See "Open threads" below.
   Full build writeup + locked decisions: `Session_notes/2026_08_27/
   hermitian_ssm_pipeline_built.md`.
   Config: 8-124 Hz, nfreqs=60 -> freq-decimated to 30 bins post-smoothing,
-  time_downsample=16, k=2, 57-63/117-123 Hz mains notch, d_model=256.
+  time_downsample=16, k=2, 57-63/117-123 Hz mains notch. `d_model` was 256
+  for the first run (the doc's "whole-graph token width"); being cut to 64
+  next -- see status.
   Cache: per-recording `.npy` dir keyed by `HermitianSpectralConfig.
   cache_key()`, windowing-independent (any window/step re-slices it),
   mmap'd during training. ~0.65 GB / 1h recording, ~24 GB projected for
@@ -806,23 +808,43 @@ read off a continuous timeline). See "Open threads" below.
   `HermitianSSMClassifier`, `False` for ablation. Not built: per-frequency
   Mamba lanes (`E=F` instead of `E=1`) -- discussed, left as a future
   config switch, see the session note.
-  **Status (2026-08-27):** numerical validation (design doc Section 20) +
-  synthetic end-to-end smoke PASS. Real CLI smoke
-  (`--pipeline hermitian_ssm --smoke --max-folds 1 --device cpu`, which
-  auto-shrinks the spectral config to nfreqs=12/td=32 for speed) ran
-  clean end to end, exit 0, wrote both CSVs. **Real 6-fold LOSO run NOT
-  started** -- user chose to hold off. When ready:
-  `.venv/bin/python Epilepsy/run_pipelines.py --pipeline hermitian_ssm
-  --device cpu` (no `--smoke`); ~40 min CPU precompute (full config,
-  30 freq bins) then ~6 folds training. RAM is tight on this Mac (17 GB
-  total) -- precompute transient ~3-4 GB, run it watchdog-wrapped +
-  backgrounded, and use `freq_chunk=4` if it swaps hard.
-  **Also not done:** any tuning, GPU precompute path, Mamba-3, commit
-  (branch `graph-state-mamba`).
-  Disk: `~/mne_data/dense_edge_cache` (63 GB, auto-rebuilding
-  CWT/dense-edge recompute cache) was **deleted 2026-08-27** to make room
-  for this pipeline's cache -- the next `dense_edge*` / `temporal_graph_*`
-  run will recompute it (slow first pass, then fine).
+  **Status (2026-08-28):** first real 6-fold LOSO run DONE (CPU, ~6.5 h,
+  `results/hermitian_ssm/prediction/*_20260827-231141.csv`). **Mean AP
+  0.237**, ROC-AUC 0.871, precision 0.147, recall 0.643, FAR/h 19.0->9.0,
+  hits 6/6 raw / 4/6 k-of-n. Per fold AP: 1_03 .107, 1_04 .130, 1_15 .498,
+  1_16 .330, 1_18 .251, 1_26 .104. **Weakest full-6-fold pipeline so far**
+  (temporal_graph_mamba 0.674, dense_edge_gru k=20 0.567, dense_edge_mamba
+  0.42/0.50, dbconformer 0.44). Untuned -- no d_model / frequency-band /
+  regularization sweep, same "good-ish ranking, no threshold calibration"
+  shape as the rest but a worse ranker.
+  Bug found + fixed during the run (`hermitian_ssm_cache.py`,
+  `compute_recording_spectral`): `torch.linalg.eigh` (LAPACK syevd) fails
+  to converge on flatlined / dropped-electrode segments in real CHB-MIT
+  (LinAlgError code 22, kills the whole batch). Fix: `nan_to_num` + on
+  LinAlgError fall back to the general `torch.linalg.eig` solver for that
+  freq chunk. Numerical validation still PASS.
+  **Speed:** ~4 min/epoch on this Mac, ~4x `temporal_graph_mamba`'s
+  ~1 min. Cause (measured): entirely `d_model=256`. mambapy's pure-PyTorch
+  pscan materializes `[B, T, expand*d_model, d_state]` = `[64, 480, 512,
+  16]` ~1 GB tensors, ~3-4 GB retained (E=1 -> `n_rows=64 <= chunk_size
+  128` so `_DenseEdgeMambaTemporal` skips its gradient-checkpointed path)
+  -> swaps on 16 GB RAM. Encoder is minor (~0.6 s/batch vs ~4 s for the
+  Mamba head). **Next run: `d_model` 256 -> 64** (Option B -- shrink
+  `freq_fuse` output + token + Mamba together; raw per-(t,f) feature width
+  is only 94, so 256 was oversized). Expected ~`temporal_graph_mamba`
+  epoch speed.
+  **Also not done:** frequency-band sweep (the whole benchmark runs
+  8-40 Hz / nfreqs=8, picked for *disk budget* not accuracy -- see
+  `_SHARED_ARCH_PARAMS` comment; hermitian_ssm's 8-124 / 30-bin input is a
+  different regime, so hermitian_ssm-vs-others is not yet a clean
+  architecture comparison), GPU precompute path, Mamba-3, per-frequency
+  Mamba lanes.
+  Disk: `~/mne_data/dense_edge_cache` (was 63 GB, auto-rebuilding
+  CWT/dense-edge recompute cache) was **deleted 2026-08-27** -- the next
+  `dense_edge*` / `temporal_graph_*` run recomputes it (slow first pass).
+  `~/mne_data/hermitian_ssm_cache` now holds ~20 GB (34 recordings at
+  key `a46c3e7d9c372dc5`, td=16/nfreqs=60/fd=2); reused by any run at
+  that spectral config (d_model does not affect the cache key).
 - **STG-Mamba Design A (topology modulates the SSM delta) -- still
   unbuilt.** See `Epilepsy/graph_state_space_mamba_design.md`; the
   `hermitian_ssm` pipeline above deliberately took the simpler

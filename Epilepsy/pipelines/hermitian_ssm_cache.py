@@ -407,7 +407,27 @@ def compute_recording_spectral(
 
         # torch.linalg.eigh: ascending real eigenvalues, orthonormal
         # (generally complex) eigenvectors. Batched over [fc_out, T_ds].
-        evals, evecs = torch.linalg.eigh(a)                           # [fc_out,T_ds,C], [...,C,C]
+        #
+        # Real CHB-MIT recordings contain flatlined / dropped-electrode
+        # segments whose cross-spectral matrix is ~0 or has (near-)repeated
+        # eigenvalues; LAPACK's Hermitian divide-and-conquer (syevd) then
+        # fails to converge (LinAlgError, error code 22) and takes the whole
+        # batch down. Two guards:
+        #   1. nan_to_num -- a NaN/Inf anywhere in the batch fails the solve;
+        #      zero it (degenerate slice, masked / noise downstream).
+        #   2. On LinAlgError, fall back to the general (geev) solver
+        #      torch.linalg.eig for the whole chunk: a different LAPACK path
+        #      with no syevd convergence mode. Hermitian input => real
+        #      eigenvalues (drop the ~1e-7 imaginary residue) and unit-norm,
+        #      near-orthonormal eigenvectors -- good enough, since the code
+        #      below re-sorts by |lambda| and phase-gauges anyway.
+        a = torch.nan_to_num(a, nan=0.0, posinf=0.0, neginf=0.0)
+        try:
+            evals, evecs = torch.linalg.eigh(a)                       # [fc_out,T_ds,C], [...,C,C]
+        except torch._C._LinAlgError:
+            ce, cv = torch.linalg.eig(a.to(torch.complex64))
+            evals = ce.real.to(torch.float32)
+            evecs = cv
         del a
 
         # Reorder: design doc Section 9 -- do not trust the solver order.
