@@ -8,8 +8,15 @@ SSM that can only accumulate/decay. Wired as `mamba_backend="mamba3"`,
 made it the `HERMITIAN_SSM_PARAMS` default. Also built + verified +
 **parked** `temporal_mode="per_freq"` (one weight-shared Mamba lane per
 frequency; not a bug, just ~8x slower with no epoch-1 advantage). All in
-commit `7d672e1` on `main` (pushed). 6-fold run in progress -- results
-section below filled in as folds land.
+commit `7d672e1` on `main` (pushed).
+
+**Result: mamba3 is NEGATIVE.** 6-fold mean AP **0.408 vs real-Mamba
+0.436** (also worse ROC-AUC 0.939 vs 0.947, k-of-n hits 4/6 vs 6/6). The
+complex-diagonal state does not help at this data budget. The committed
+`mamba_backend="mamba3"` default should revert to `"mamba"` (doing it
+with the k-axis work below). Next lever: rebuild the spectral cache at
+**k=12** (then maybe k=23) -- the one untried point on the axis that gave
+the only big jump (k=2->6 = +0.18 AP).
 
 Follow-on to `2026_08_29/hermitian_ssm_bandmatch_6fold.md`, whose
 conclusion was: encoder-variant search CLOSED NEGATIVE, **only untried
@@ -160,18 +167,56 @@ mean AP **0.436**, ROC-AUC 0.947, per-fold AP
 | fold | baseline AP (real Mamba) | **mamba3 AP** | note |
 |---|---|---|---|
 | `1_03_0` | 0.254 | **0.399** | win; early-stop ep 11, val_loss noisy (0.31->1.07->0.45), val_auc held 0.93-0.95 |
-| `1_04_0` | 0.324 | _pending_ | |
-| `1_15_0` | 0.414 | _pending_ | |
-| `1_16_0` | 0.279 | _pending_ | |
-| `1_18_0` | 0.788 | _pending_ | |
-| `1_26_0` | 0.556 | _pending_ | |
-| **mean** | **0.436** | _pending_ | |
+| `1_04_0` | 0.324 | **0.342** | marginal win; cleanest curve of the run (val_loss 0.69->0.148 monotone, val_auc 0.987), yet held-out AP barely moved |
+| `1_15_0` | 0.414 | **0.401** | ~tie (loss by 0.013); 21 epochs, noisiest curve; smoothed hit=False here (baseline: True, recall 1.0) |
+| `1_16_0` | 0.279 | **0.218** | loss by 0.061; healthy curve (val_loss 0.182, val_auc 0.971) again -> weak held-out AP |
+| `1_18_0` | 0.788 | **0.719** | loss by 0.069; still the strong fold (precision 1.0, FAR/h 0.0), raw hit / smoothed miss |
+| `1_26_0` | 0.556 | **0.371** | loss by 0.185 (worst fold); healthy curve again |
+| **mean AP** | **0.436** | **0.408** | **mamba3 loses by 0.028** |
+| ROC-AUC | 0.947 | 0.939 | loss |
+| hit raw / k-of-n | 6/6 / 6/6 | 6/6 / **4/6** | loss |
+| FAR/h sm | 8.0 | 7.15 | ~tie |
 
-Fold 1 note: mamba3's val_loss curve is *not* healthier than real Mamba's
-in this run (both wander up after ~epoch 6); the difference so far is
-purely in the held-out AP. Standard fragility caveat: internal val split
-is random windows from the *training* seizures -- it has never predicted
-held-out-seizure AP in this project.
+**Verdict: mamba3 NEGATIVE.** Mean AP 0.408 vs real-Mamba 0.436, worse
+on ROC-AUC and k-of-n hit rate too. Fold 1 (`1_03_0`) was the only real
+win (+0.145); folds 3-6 gave it all back, fold 6 worst (-0.185). Per-fold
+the two backends trade blows around the same mean with no consistent
+edge -- the complex-diagonal state does not help at this data budget.
+
+Fold-by-fold the pattern held every time: mamba3 trained to a *healthy*
+internal curve (val_auc 0.94-0.99, best val_loss 0.15-0.31) on all 6
+folds -- often cleaner than real Mamba -- and it made no difference to
+held-out AP. This is the fragility thesis from
+`hermitian_ssm_bandmatch_6fold.md` confirmed once more from the temporal-
+model side: the ~30-preictal-window budget caps this, not whether the
+recurrence can represent an evolving phase. The "integrate the coherence
+PHASE over time" hypothesis is not wrong in principle -- there is just
+not enough data here for the extra expressiveness to pay for itself.
+
+CSVs: `Epilepsy/results/hermitian_ssm/prediction/*_20260829-2*.csv`
+(mamba3 6-fold). Real-Mamba baseline: `*_20260829-111904.csv`.
+
+## Where this leaves the deliverable
+
+Both hermitian temporal-model levers now tried:
+- `mamba_backend="mamba3"` -- NEGATIVE (0.408 vs 0.436), this note.
+- `temporal_mode="per_freq"` -- parked (not a bug, 8x slower, no gain).
+
+Plus the encoder-variant search closed NEGATIVE in
+`hermitian_ssm_bandmatch_6fold.md`. The remaining untried hermitian lever
+is the **k axis** (top-k eigenpairs): k=2->6 was +0.18 AP, the single
+biggest jump in the whole investigation, and k=6->23 (full eigenbasis,
+zero truncation) has never been measured -- the note only *assumed*
+diminishing returns. Next step (user call 2026-08-30): rebuild the
+spectral cache at **k=12** as a direction check (real-Mamba backend, clean
+A/B vs the 0.436 baseline). If 6->12 moves AP, go to k=23; if flat, the
+axis is done and the deliverable reverts to
+`temporal_graph_aggregate="post"` (see CONTEXT.md).
+
+Revert note: `HERMITIAN_SSM_PARAMS` currently has `mamba_backend="mamba3"`
+as the committed default (from `7d672e1`, set before this result). Given
+the negative, it should go back to `"mamba"` -- doing that with the k-axis
+work rather than as a standalone flip.
 
 ## Code / repo status
 

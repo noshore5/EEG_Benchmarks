@@ -9,34 +9,45 @@ Claude/Grok shells that don't share context with each other, and this is
 the one file meant to catch a new shell up without it re-reading
 everything.
 
-**Last updated:** 2026-08-29, by Claude (Mac shell). On `main` (another
+**Last updated:** 2026-08-30, by Claude (Mac shell). On `main` (another
 shell switched off `graph-state-mamba`; hermitian work committed straight
-to `main` -- `68dd589`, pushed). Working tree: `hermitian_ssm_classifier.py`,
-`run_pipelines.py`, new `Epilepsy/pipelines/mamba3.py` uncommitted (this
-turn's per-freq + Mamba-3 wiring).
+to `main` -- `68dd589`, `7d672e1`, `a799a57`, all pushed). Working tree:
+`run_pipelines.py` uncommitted (the `spectral_k` change for the k-axis run
+below, PLUS an unrelated `_CG_MAMBANET_SHARED_PARAMS` capacity cut that is
+another shell's cg_mambanet work -- don't commit that one).
 
-**Active state 2026-08-29 EOD:** hermitian_ssm eigenvector encoder +
-**`mamba_backend="mamba3"` 6-fold RUNNING** (`herm_m3.log`). Status of the
-architecture search:
+**Active state 2026-08-30:** hermitian architecture search -- temporal-model
+levers exhausted, moving to the k (eigenpair count) axis.
 - **encoder variants CLOSED NEGATIVE** (eigenvector 0.436 is the ceiling;
   projector 0.273, graph 0.169 fold-1, evolution ~chance -- worse the more
-  channel identity dropped).
+  channel identity dropped). `Session_notes/2026_08_29/hermitian_ssm_bandmatch_6fold.md`.
 - **`temporal_mode="per_freq"`** (one Mamba lane per frequency, fuse after)
   BUILT -- NOT a bug (epoch-1 val_auc 0.77 is normal) but ~8x slower
   (~831 s/epoch), no epoch-1 advantage. Parked.
-- **`mamba_backend="mamba3"`** (`Epilepsy/pipelines/mamba3.py`) -- BUILT +
-  VERIFIED: complex-diagonal selective SSM, lambda = -exp(a)+i*omega.
-  Complex Blelloch pscan (`_ComplexPScan`) with a conjugation-correct
-  backward, gradchecked fp64, ~2x a real pscan (~200 s/epoch expected).
-  This is the graph-native temporal model -- it integrates the coherence
-  PHASE over time instead of a dense layer interpreting a number.
+- **`mamba_backend="mamba3"`** (`Epilepsy/pipelines/mamba3.py`, complex-
+  diagonal selective SSM, lambda=-exp(a)+i*omega, `_ComplexPScan` complex
+  Blelloch pscan w/ conjugation-correct backward, gradchecked fp64) --
+  BUILT + VERIFIED, 6-fold done: **NEGATIVE, mean AP 0.408 vs real-Mamba
+  0.436** (worse ROC-AUC + k-of-n hits too). Fold 1 the only win; folds
+  3-6 gave it back. Healthy internal curves every fold, no held-out gain
+  -- fragility thesis confirmed from the temporal side.
+  `Session_notes/2026_08_29/mamba3_and_perfreq.md`.
+- **k axis (NEXT, RUNNING):** k=2->6 was +0.18 AP (biggest jump found),
+  k=6->23 never measured. Rebuilding spectral cache at **k=12** (real-Mamba
+  backend, clean A/B vs 0.436). If 6->12 moves AP -> k=23; if flat, the
+  hermitian ceiling is confirmed and deliverable reverts to "post".
+- **`mamba_backend` committed default is still `"mamba3"`** (`7d672e1`, set
+  before the negative result) -- revert to `"mamba"`, doing it with the
+  k-axis commit.
 User's position (2026-08-29): `temporal_graph_mamba` "pre" (0.674) is NOT
 an acceptable deliverable -- it collapses 253 edges -> 23 nodes *before*
 the temporal model, failing the graph-native requirement regardless of the
 number. Acceptable deliverables, in preference order:
-  1. hermitian_ssm (eigenvector encoder; 0.436 real Mamba, mamba3 pending).
-  2. **`temporal_graph_aggregate="post"`** -- FALLBACK if the hermitian +
-     mamba3 experiments all fail. "post" runs Mamba over each of the ~253
+  1. hermitian_ssm (eigenvector encoder; 0.436 real Mamba. mamba3 NEGATIVE
+     0.408. k-axis in progress).
+  2. **`temporal_graph_aggregate="post"`** -- FALLBACK if the hermitian
+     experiments all fail (mamba3 already did; k-axis is the last one).
+     "post" runs Mamba over each of the ~253
      EDGE sequences first, aggregates to nodes *after* -> the graph flows
      through the temporal model, which meets the graph-native bar. Its
      6-fold was a near-wash (mean AP 0.639 vs "pre" 0.674, ROC-AUC 0.970
