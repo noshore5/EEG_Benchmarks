@@ -25,24 +25,57 @@ interface exists only so the classifier can slice the per-recording
 spectral cache, which is what makes that cache windowing-independent.
 
 =========================================================================
+ENCODERS (``encoder_mode``):
+
+  "projector" (default, 2026-08-29) -- ``_ProjectorEncoder``. Encodes
+    gauge-invariant node summaries of the rank-k spectral projector
+    ``P(f,t) = sum_r lambda_r u_r u_r^H`` rather than the raw eigenvectors.
+    Eigenvectors are only defined up to a phase ``e^{i theta}``; feeding
+    ``[Re u, Im u]`` through a Linear is not invariant to that gauge, which
+    is the source of the frame-to-frame sign-flip churn and the
+    mode-crossing ambiguity (Session_notes/2026_08_29/). Every feature
+    here is a function of ``P``, hence invariant to both the eigenvector
+    phase and the ``|lambda|``-sort mode reordering. ``P`` is a low-rank
+    denoised coherence matrix, so this is "denoised-connectivity node
+    summaries -> temporal model".
+
+  "graph" (2026-08-29) -- ``_GraphEncoder``. Lossless: feeds the upper
+    triangle of ``P`` (``C^2`` reals/freq) rather than node summaries of
+    it. Gauge/order-invariant like "projector" but discards nothing in the
+    rank-k truncation. ``P``'s triangle is precomputed per window in
+    ``_WindowDataset`` (numpy, no autograd).
+
+  "evolution" (2026-08-29) -- ``_EvolutionEncoder``. Each token is the
+    complex k x k subspace-evolution operator ``M(t) = U(t)^H U(t-1)``
+    (+ lambda(t)), i.e. how the modal subspace *moved*, not its state.
+    Forces eigenvector phase-canonicalisation. The variant that actually
+    motivates Mamba-3 (a stream of complex rotations to integrate).
+
+  "eigenvector" -- ``_SpectralEncoder``, the original. Collapses each
+    complex eigenvector to ``[Re u, Im u]`` reals + a learned per-mode-slot
+    embedding. Best result so far (band-match 6-fold mean AP 0.436).
+    ``canonicalize_eigenvectors=True`` (#4) phase-fixes u_r first.
+    "projector" underperformed it (0.273); see Session_notes/2026_08_29/.
+
+=========================================================================
 MAMBA-3 INTEGRATION POINT (next step -- not done here, see design doc):
-The encoder below collapses each complex eigenvector to ``[Re u, Im u]``
-reals and feeds a plain real ``d_model`` token into a standard (Mamba-2
-style) recurrence. Mamba-3 (arXiv 2603.15569) adds a genuinely
+The temporal head is still a standard (Mamba-2 style) real recurrence.
+Mamba-3 (arXiv 2603.15569) adds a genuinely
 complex-valued diagonal state, losslessly carried as a 2N real state, with
 per-dimension 2x2 rotation blocks and a "RoPE trick" that folds the
 rotation into the B/C projections *before* the scan (so it still runs on
 real kernels/pscan -- no custom CUDA kernel).
 
 To adopt it here:
-  * The encoder should stop flattening phase into a bare scalar. Emit the
-    per-frequency token as a complex vector (or interleaved 2N real) so the
-    eigenvector's relative phase structure is preserved into the recurrence.
+  * ``_ProjectorEncoder`` already emits a per-frequency real feature vector
+    whose ``c_i`` block (node net coupling) is an interleaved complex
+    quantity -- keep it complex into the recurrence instead of splitting
+    Re/Im into unrelated channels.
   * Replace ``_DenseEdgeMambaTemporal`` with a Mamba-3 block whose state
     transition factors into (magnitude decay) x (rotation); the rotation is
     where the Hermitian graph's phase belongs, handled as an actual
     rotation operator rather than a number a dense layer must interpret.
-  * ``_encode`` and ``_MambaTemporalHead`` are the two seams to change;
+  * The encoder and ``_MambaTemporalHead`` are the two seams to change;
     the cache format and everything left of it stays fixed.
 =========================================================================
 """
@@ -65,8 +98,234 @@ from Epilepsy.pipelines.hermitian_ssm_cache import (
 
 
 # --------------------------------------------------------------------------
-# Spectral encoder:  eigenpairs at one timestep  ->  one d_model token
+# Spectral encoders:  eigenpairs at one timestep  ->  one d_model token
 # --------------------------------------------------------------------------
+
+class _ProjectorEncoder(nn.Module):
+    """Gauge-invariant encoder (2026-08-29, ``encoder_mode="projector"``).
+
+    Forms the rank-k spectral projector, per frequency and timestep,
+
+        P(f,t) = sum_{r=1..k} lambda_r * u_r u_r^H        [C, C] Hermitian
+
+    and encodes only functions of ``P`` that are invariant to (a) the
+    eigenvector phase gauge ``u_r -> e^{i theta_r} u_r`` and (b) the
+    ``|lambda|``-sort mode reordering (``P`` is a sum over modes):
+
+        lambda_1..k                              mode strengths       (k)
+        d_i  = P_ii = sum_r lambda_r |u_ri|^2    signed self-power    (C)
+        g_i  = sum_r |lambda_r| |u_ri|^2         unsigned self-power  (C)
+        c_i  = sum_r lambda_r u_ri conj(S_r - u_ri)   node net complex
+               where S_r = sum_j u_rj             coupling (Re,Im)    (2C)
+
+    ``c_i`` is ``(P 1)_i - P_ii`` written without materialising the C x C
+    matrix (``S_r`` is one scalar per mode). ``P`` is a low-rank denoised
+    coherence matrix, so this is "denoised connectivity node summaries ->
+    temporal model". No per-mode-slot embedding: there are no stable slots
+    once the individual eigenvectors are gone, which is the point.
+    """
+
+    def __init__(
+        self,
+        n_channels: int,
+        n_freqs: int,
+        k: int,
+        d_model: int,
+        d_freq: int,
+        *,
+        freqs: "np.ndarray | None" = None,
+    ) -> None:
+        super().__init__()
+        self.n_channels = n_channels
+        self.n_freqs = n_freqs
+        self.k = k
+
+        # Frequency-as-feature: same rationale as _SpectralEncoder -- without
+        # it freq_proj is weight-shared across all F bins, so the model can
+        # only tell them apart by slot order in freq_fuse. Two normalised Hz
+        # features (linear + log), both in [0, 1]. Ablate: freqs=None.
+        self.use_freq_feature = freqs is not None
+        n_ff = 0
+        if self.use_freq_feature:
+            f = torch.from_numpy(np.array(freqs, dtype=np.float32))       # [F], highest-first
+            f_lin = (f - f.min()) / (f.max() - f.min() + 1e-8)
+            lg = torch.log(f.clamp_min(1e-6))
+            f_log = (lg - lg.min()) / (lg.max() - lg.min() + 1e-8)
+            self.register_buffer("freq_feat", torch.stack([f_lin, f_log], dim=-1))  # [F, 2]
+            n_ff = 2
+
+        feat_width = k + 4 * n_channels + n_ff
+        self.norm = nn.LayerNorm(feat_width)          # features are O(1) but heavy-tailed; cheap insurance
+        self.freq_proj = nn.Linear(feat_width, d_freq)
+        self.freq_fuse = nn.Linear(n_freqs * d_freq, d_model)
+        self.act = nn.GELU()
+
+    def forward(self, eigvals: torch.Tensor, eigvecs: torch.Tensor) -> torch.Tensor:
+        """eigvals: [B, T, F, k] real. eigvecs: [B, T, F, k, C] complex.
+        Returns tokens [B, T, d_model]. COI-invalid / padded slices arrive
+        as all-zero eigenpairs (handled upstream) -> all-zero feature row."""
+        b, t, f, k = eigvals.shape
+        lam = eigvals                                             # [B,T,F,k]
+        u = eigvecs                                               # [B,T,F,k,C] complex
+        absu2 = u.real * u.real + u.imag * u.imag                 # [B,T,F,k,C]
+        d = (lam.unsqueeze(-1) * absu2).sum(dim=3)                # [B,T,F,C]  P_ii
+        g = (lam.abs().unsqueeze(-1) * absu2).sum(dim=3)          # [B,T,F,C]
+        s_mode = u.sum(dim=-1, keepdim=True)                     # [B,T,F,k,1]  S_r
+        cross = u * (s_mode - u).conj()                          # [B,T,F,k,C]  u_ri conj(S_r - u_ri)
+        c_net = (lam.unsqueeze(-1).to(cross.dtype) * cross).sum(dim=3)  # [B,T,F,C] complex
+        feat = torch.cat([lam, d, g, c_net.real, c_net.imag], dim=-1)  # [B,T,F, k+4C]
+        if self.use_freq_feature:
+            ff = self.freq_feat.view(1, 1, f, -1).expand(b, t, f, -1)
+            feat = torch.cat([feat, ff], dim=-1)
+        feat = self.norm(feat)
+        freq_emb = self.act(self.freq_proj(feat))                # [B,T,F,d_freq]
+        token = self.freq_fuse(freq_emb.reshape(b, t, -1))       # [B,T,d_model]
+        return token
+
+
+class _GraphEncoder(nn.Module):
+    """Lossless gauge-invariant encoder (2026-08-29, ``encoder_mode="graph"``).
+
+    Feeds the *denoised graph itself* -- the upper triangle of the rank-k
+    projector
+
+        P(f,t) = sum_{r=1..k} lambda_r * u_r u_r^H        [C, C] Hermitian
+
+    -- rather than node summaries of it (``_ProjectorEncoder``, which lost
+    to the raw-eigenvector encoder because collapsing C x C -> C-vectors is
+    lossy). Every unique entry of ``P`` is kept:
+
+        diag(P)_i               real,  C
+        Re P_ij, Im P_ij  i<j    real,  2 * C(C-1)/2
+
+    total ``C^2`` reals / freq (529 for C=23). ``P`` is exactly
+    reconstructable from this, so no information in the rank-k truncation
+    is discarded; and ``P`` is invariant to the eigenvector phase gauge and
+    to mode reordering, so none of the churn the raw-eigenvector encoder
+    suffers is present.
+
+    ``P``'s diagonal and upper triangle are a deterministic function of the
+    cached eigenpairs, so ``_WindowDataset`` computes them per window in
+    numpy (no autograd) and hands this encoder the finished
+    ``(p_diag [B,T,F,C], p_upper [B,T,F,E])`` -- reconstructing the C x C
+    products as a batched autograd tensor every step was ~5x slower
+    (~520 s/epoch vs ~100 s). The C x C matrix is never materialised.
+    """
+
+    def __init__(
+        self,
+        n_channels: int,
+        n_freqs: int,
+        k: int,
+        d_model: int,
+        d_freq: int,
+        *,
+        freqs: "np.ndarray | None" = None,
+    ) -> None:
+        super().__init__()
+        self.n_channels = n_channels
+        self.n_freqs = n_freqs
+        self.k = k
+        n_edges = n_channels * (n_channels - 1) // 2               # C(C-1)/2
+
+        self.use_freq_feature = freqs is not None
+        n_ff = 0
+        if self.use_freq_feature:
+            f = torch.from_numpy(np.array(freqs, dtype=np.float32))
+            f_lin = (f - f.min()) / (f.max() - f.min() + 1e-8)
+            lg = torch.log(f.clamp_min(1e-6))
+            f_log = (lg - lg.min()) / (lg.max() - lg.min() + 1e-8)
+            self.register_buffer("freq_feat", torch.stack([f_lin, f_log], dim=-1))  # [F, 2]
+            n_ff = 2
+
+        feat_width = n_channels + 2 * n_edges + n_ff               # C + 2*C(C-1)/2 (+2) = C^2 (+2)
+        self.norm = nn.LayerNorm(feat_width)
+        self.freq_proj = nn.Linear(feat_width, d_freq)
+        self.freq_fuse = nn.Linear(n_freqs * d_freq, d_model)
+        self.act = nn.GELU()
+
+    def forward(self, p_diag: torch.Tensor, p_upper: torch.Tensor) -> torch.Tensor:
+        """p_diag: [B, T, F, C] real. p_upper: [B, T, F, E] complex (E =
+        C(C-1)/2, precomputed in _WindowDataset). Returns [B, T, d_model]."""
+        b, t, f, _ = p_diag.shape
+        feat = torch.cat([p_diag, p_upper.real, p_upper.imag], dim=-1)         # [B,T,F, C^2]
+        if self.use_freq_feature:
+            ff = self.freq_feat.view(1, 1, f, -1).expand(b, t, f, -1)
+            feat = torch.cat([feat, ff], dim=-1)
+        feat = self.norm(feat)
+        freq_emb = self.act(self.freq_proj(feat))                 # [B,T,F,d_freq]
+        token = self.freq_fuse(freq_emb.reshape(b, t, -1))        # [B,T,d_model]
+        return token
+
+
+class _EvolutionEncoder(nn.Module):
+    """Subspace-evolution encoder (2026-08-29, ``encoder_mode="evolution"``).
+
+    Each token describes how the graph's top-k modal subspace *moved*
+    between consecutive graph timesteps, rather than its instantaneous
+    state. Per frequency,
+
+        M(t) = U(t)^H U(t-1)   in  C^{k x k}       (M(0) := I_k)
+
+    where ``U(t)`` is the k orthonormal top-k eigenvectors at timestep t.
+    ``M_ij`` = how much mode i now overlaps mode j from the previous frame;
+    |M_ij| is the subspace mixing (gauge-invariant), arg(M_ij) is the
+    precession of that coupling -- meaningful only because ``U`` is
+    phase-canonicalised first (``_WindowDataset(canonicalize=True)``, forced
+    on for this mode). ``M`` and ``lambda(t)`` are precomputed per window in
+    numpy.
+
+    This is the variant that actually motivates Mamba-3: the sequence
+    content is a stream of complex k x k rotations for the recurrence's
+    complex state to integrate, not a per-frame snapshot.
+
+    Features / (f,t):  lambda(t) [k],  Re M [k^2],  Im M [k^2],  |M| [k^2].
+    """
+
+    def __init__(
+        self,
+        n_channels: int,
+        n_freqs: int,
+        k: int,
+        d_model: int,
+        d_freq: int,
+        *,
+        freqs: "np.ndarray | None" = None,
+    ) -> None:
+        super().__init__()
+        self.n_freqs = n_freqs
+        self.k = k
+
+        self.use_freq_feature = freqs is not None
+        n_ff = 0
+        if self.use_freq_feature:
+            f = torch.from_numpy(np.array(freqs, dtype=np.float32))
+            f_lin = (f - f.min()) / (f.max() - f.min() + 1e-8)
+            lg = torch.log(f.clamp_min(1e-6))
+            f_log = (lg - lg.min()) / (lg.max() - lg.min() + 1e-8)
+            self.register_buffer("freq_feat", torch.stack([f_lin, f_log], dim=-1))  # [F, 2]
+            n_ff = 2
+
+        feat_width = k + 3 * k * k + n_ff
+        self.norm = nn.LayerNorm(feat_width)
+        self.freq_proj = nn.Linear(feat_width, d_freq)
+        self.freq_fuse = nn.Linear(n_freqs * d_freq, d_model)
+        self.act = nn.GELU()
+
+    def forward(self, lam: torch.Tensor, m: torch.Tensor) -> torch.Tensor:
+        """lam: [B, T, F, k] real. m: [B, T, F, k, k] complex (M(t), M(0)=I).
+        Returns [B, T, d_model]."""
+        b, t, f, k = lam.shape
+        m_flat = m.reshape(b, t, f, k * k)
+        feat = torch.cat([lam, m_flat.real, m_flat.imag, m_flat.abs()], dim=-1)  # [B,T,F, k+3k^2]
+        if self.use_freq_feature:
+            ff = self.freq_feat.view(1, 1, f, -1).expand(b, t, f, -1)
+            feat = torch.cat([feat, ff], dim=-1)
+        feat = self.norm(feat)
+        freq_emb = self.act(self.freq_proj(feat))                 # [B,T,F,d_freq]
+        token = self.freq_fuse(freq_emb.reshape(b, t, -1))        # [B,T,d_model]
+        return token
+
 
 class _SpectralEncoder(nn.Module):
     """Per graph timestep: a collection of ``(lambda_r, u_r)`` over ``F``
@@ -204,13 +463,15 @@ class _MambaTemporalHead(nn.Module):
 
 
 class _HermitianSSMNet(nn.Module):
-    def __init__(self, encoder: _SpectralEncoder, temporal: _MambaTemporalHead) -> None:
+    def __init__(self, encoder: nn.Module, temporal: _MambaTemporalHead) -> None:
         super().__init__()
         self.encoder = encoder
         self.temporal = temporal
 
-    def forward(self, eigvals: torch.Tensor, eigvecs: torch.Tensor) -> torch.Tensor:
-        return self.temporal(self.encoder(eigvals, eigvecs))
+    def forward(self, feat_a: torch.Tensor, feat_b: torch.Tensor) -> torch.Tensor:
+        # (eigvals, eigvecs) for eigenvector/projector encoders;
+        # (p_diag, p_upper) for the graph encoder -- see _WindowDataset.
+        return self.temporal(self.encoder(feat_a, feat_b))
 
 
 # --------------------------------------------------------------------------
@@ -242,11 +503,13 @@ class HermitianSSMClassifier:
         cache_root: str | None = None,
         precompute_device: str = "cpu",
         # encoder
+        encoder_mode: str = "eigenvector",  # "eigenvector" (best, 0.436) | "projector" (neg, 0.273) | "graph" | "evolution"
+        canonicalize_eigenvectors: bool = False,  # phase-fix each u_r; auto-on for "evolution"
         d_model: int = 64,   # 2026-08-28: was 256 (doc default); see run_pipelines HERMITIAN_SSM_PARAMS
-        d_mode: int = 32,
+        d_mode: int = 32,    # "eigenvector" mode only
         d_freq: int = 64,
-        freq_feature: bool = True,   # feed normalised Hz into the per-mode encoder
-        mode_feature: bool = True,   # learned per-mode-slot (rank) embedding into the per-mode encoder
+        freq_feature: bool = True,   # feed normalised Hz into the encoder
+        mode_feature: bool = True,   # "eigenvector" mode only: learned per-mode-slot (rank) embedding
         # temporal (mamba) -- dense_edge_mamba's config, d_model from the doc
         mamba_d_state: int = 16,
         mamba_d_conv: int = 4,
@@ -270,6 +533,11 @@ class HermitianSSMClassifier:
         self.cfg = spectral_config or HermitianSpectralConfig()
         self.cache_root = cache_root
         self.precompute_device = precompute_device
+        if encoder_mode not in ("projector", "eigenvector", "graph", "evolution"):
+            raise ValueError("encoder_mode must be 'eigenvector', 'projector', 'graph' or "
+                             f"'evolution', got {encoder_mode!r}")
+        self.encoder_mode = encoder_mode
+        self.canonicalize_eigenvectors = bool(canonicalize_eigenvectors)
         self.d_model = d_model
         self.d_mode = d_mode
         self.d_freq = d_freq
@@ -340,6 +608,10 @@ class HermitianSSMClassifier:
         std = float(np.sqrt(max(ss / n - m * m, 0.0)))
         return m, (std if std > 1e-8 else 1.0)
 
+    def _item_mode(self) -> str:
+        """What _WindowDataset.__getitem__ should return for this encoder."""
+        return {"graph": "graph", "evolution": "evolution"}.get(self.encoder_mode, "eigenpairs")
+
     def _loader(self, dataset, indices, *, shuffle: bool):
         sub = torch.utils.data.Subset(dataset, indices)
         return torch.utils.data.DataLoader(
@@ -355,6 +627,11 @@ class HermitianSSMClassifier:
         uniq = np.unique(y)
         self.classes_ = uniq if len(uniq) > 1 else np.array([0, 1])
         self._val_norm = self._eigenvalue_norm(recs_by_key)
+        if self.encoder_mode in ("projector", "graph"):
+            # These encoders multiply lambda into u u^H, so a mean SHIFT of
+            # lambda would corrupt P. Scale-only (mean forced to 0) is a
+            # harmless global gain on P and on the standalone lambda block.
+            self._val_norm = (0.0, self._val_norm[1])
 
         cache = self._get_cache()
         first_key = next(iter(recs_by_key))
@@ -363,17 +640,33 @@ class HermitianSSMClassifier:
         n_channels = probe["eigenvectors"].shape[3]
         freqs = np.asarray(probe["freqs"]) if self.freq_feature else None
 
-        dataset = _WindowDataset(cache, recs_by_key, index, y, self._val_norm)
+        dataset = _WindowDataset(
+            cache, recs_by_key, index, y, self._val_norm,
+            item_mode=self._item_mode(), canonicalize=self.canonicalize_eigenvectors,
+        )
 
         rng = np.random.default_rng(self.seed)
         perm = rng.permutation(len(index))
         n_val = int(round(self.validation_split * len(index))) if self.validation_split else 0
         val_idx, tr_idx = perm[:n_val].tolist(), perm[n_val:].tolist()
 
-        encoder = _SpectralEncoder(
-            n_channels, n_freqs, k, self.d_model, self.d_mode, self.d_freq,
-            freqs=freqs, mode_feature=self.mode_feature,
-        )
+        if self.encoder_mode == "projector":
+            encoder = _ProjectorEncoder(
+                n_channels, n_freqs, k, self.d_model, self.d_freq, freqs=freqs,
+            )
+        elif self.encoder_mode == "graph":
+            encoder = _GraphEncoder(
+                n_channels, n_freqs, k, self.d_model, self.d_freq, freqs=freqs,
+            )
+        elif self.encoder_mode == "evolution":
+            encoder = _EvolutionEncoder(
+                n_channels, n_freqs, k, self.d_model, self.d_freq, freqs=freqs,
+            )
+        else:
+            encoder = _SpectralEncoder(
+                n_channels, n_freqs, k, self.d_model, self.d_mode, self.d_freq,
+                freqs=freqs, mode_feature=self.mode_feature,
+            )
         temporal = _MambaTemporalHead(
             self.d_model, d_state=self.mamba_d_state, d_conv=self.mamba_d_conv,
             expand=self.mamba_expand, n_layers=self.mamba_n_layers, dropout=self.mamba_dropout,
@@ -468,7 +761,10 @@ class HermitianSSMClassifier:
         out: list[np.ndarray] = []
         for rec in recordings:
             recs_by_key, index, y = self._build_index([rec])
-            dataset = _WindowDataset(cache, recs_by_key, index, y, self._val_norm)
+            dataset = _WindowDataset(
+                cache, recs_by_key, index, y, self._val_norm,
+                item_mode=self._item_mode(), canonicalize=self.canonicalize_eigenvectors,
+            )
             loader = torch.utils.data.DataLoader(
                 dataset, batch_size=self.batch_size, shuffle=False, num_workers=0
             )
@@ -489,15 +785,36 @@ class HermitianSSMClassifier:
 class _WindowDataset(torch.utils.data.Dataset):
     """Lazily slices one window's spectral features out of the per-recording
     mmap-backed cache. COI-invalid ``(timestep, frequency)`` entries and any
-    right-padding (edge windows) contribute a zero token."""
+    right-padding (edge windows) contribute a zero token.
+
+    ``item_mode`` picks what ``__getitem__`` returns (all as a 4-tuple
+    ``(a, b, c, label)`` so the training loop is mode-agnostic; b,c are the
+    real/imag halves the loop recombines into one complex tensor):
+
+      "eigenpairs" (default) -- ``(ev, Re u, Im u)``.
+      "graph"                -- ``(p_diag, Re p_upper, Im p_upper)``: diag +
+        upper triangle of ``P = sum_r lambda_r u_r u_r^H``.
+      "evolution"            -- ``(lambda, Re M, Im M)`` where
+        ``M(t) = U(t)^H U(t-1)`` in C^{k x k} (M(0)=I); forces canonicalize.
+
+    All derived quantities are computed here in numpy per window (no
+    autograd) -- rebuilding them as batched autograd tensors every step was
+    ~5x slower for "graph". ``canonicalize`` phase-fixes each ``u_r`` (its
+    largest-|.| entry made real +) before anything else; required for
+    "evolution" (M's phase is otherwise gauge-noise), optional for the
+    others."""
 
     def __init__(self, cache: HermitianSpectralCache, recs_by_key: dict, index: list[dict],
-                 y: np.ndarray, val_norm: tuple[float, float]) -> None:
+                 y: np.ndarray, val_norm: tuple[float, float], *, item_mode: str = "eigenpairs",
+                 canonicalize: bool = False) -> None:
         self.cache = cache
         self.recs = recs_by_key
         self.index = index
         self.y = y
         self.m, self.s = val_norm
+        self.item_mode = item_mode
+        self.canonicalize = canonicalize or item_mode == "evolution"
+        self._triu: tuple[np.ndarray, np.ndarray] | None = None   # (iu, ju), lazily on first item
         self._open: dict[tuple, dict] = {}
 
     def _arrays(self, key: tuple) -> dict:
@@ -539,9 +856,58 @@ class _WindowDataset(torch.utils.data.Dataset):
             else:
                 ur[:n] = u_s.real
                 ui[:n] = u_s.imag
+
+        label = torch.tensor(int(self.y[i]), dtype=torch.long)
+
+        if self.canonicalize:
+            # rotate each u_r so its largest-|.| entry is real, non-negative
+            # (design doc Sec 11). Deterministic; zero vectors are untouched.
+            u = ur + 1j * ui                                     # [tw,f,k,c]
+            amax = np.abs(u).argmax(axis=-1, keepdims=True)      # [tw,f,k,1]
+            pivot = np.take_along_axis(u, amax, axis=-1)         # [tw,f,k,1]
+            phase = np.exp(-1j * np.angle(pivot))
+            phase[np.abs(pivot) < 1e-12] = 1.0
+            u = u * phase
+            ur, ui = np.ascontiguousarray(u.real, dtype=np.float32), np.ascontiguousarray(u.imag, dtype=np.float32)
+
+        if self.item_mode == "graph":
+            # P = sum_r lambda_r u_r u_r^H  (lambda already scale-normalised
+            # into ev; mean is forced to 0 for this mode so P scales by 1/s).
+            # Invalid / padded (t,f) have u = 0 -> P = 0 there, as before.
+            if self._triu is None:
+                self._triu = np.triu_indices(c, k=1)
+            iu, ju = self._triu
+            u = ur + 1j * ui                                     # [tw,f,k,c] complex64
+            absu2 = ur * ur + ui * ui                            # [tw,f,k,c]
+            p_diag = (ev[..., None] * absu2).sum(axis=2)         # [tw,f,c] real
+            p_up = (ev[..., None] * u[:, :, :, iu] * np.conj(u[:, :, :, ju])).sum(axis=2)  # [tw,f,E]
+            return (
+                torch.from_numpy(np.ascontiguousarray(p_diag, dtype=np.float32)),
+                torch.from_numpy(np.ascontiguousarray(p_up.real, dtype=np.float32)),
+                torch.from_numpy(np.ascontiguousarray(p_up.imag, dtype=np.float32)),
+                label,
+            )
+
+        if self.item_mode == "evolution":
+            # M(t) = U(t)^H U(t-1)  in C^{k x k}, per freq;  M(0) := I_k.
+            # U canonicalised above so arg(M) is meaningful. Invalid/padded
+            # (t,f) have u = 0 -> M = 0 there (not I) -> zero token.
+            u = ur + 1j * ui                                     # [tw,f,k,c]
+            m = np.zeros((tw, f, k, k), dtype=np.complex64)
+            m[0] = np.eye(k, dtype=np.complex64)[None]           # [f,k,k]
+            if tw > 1:
+                # einsum: sum_c conj(u[t,f,i,c]) * u[t-1,f,j,c]
+                m[1:] = np.einsum("tfic,tfjc->tfij", np.conj(u[1:]), u[:-1])
+            return (
+                torch.from_numpy(ev),                            # [tw,f,k]
+                torch.from_numpy(np.ascontiguousarray(m.real, dtype=np.float32)),  # [tw,f,k,k]
+                torch.from_numpy(np.ascontiguousarray(m.imag, dtype=np.float32)),
+                label,
+            )
+
         return (
             torch.from_numpy(ev),
             torch.from_numpy(ur),
             torch.from_numpy(ui),
-            torch.tensor(int(self.y[i]), dtype=torch.long),
+            label,
         )

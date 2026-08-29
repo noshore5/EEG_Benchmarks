@@ -201,6 +201,48 @@ across pipelines the way `1_18_0` is (Mamba, DBConformer, and SlimSeiz
 all still count it as a raw+smoothed hit) — just a hard fold for
 everyone in absolute AP terms.
 
+## CG-MambaNet addendum (2026-08-29)
+
+A fifth pipeline, `cg_mambanet` — an architecture reconstructed from a
+paper (arXiv 2606.08226, Chen et al.; no public code existed) rather than
+one of this repo's own designs — run once on the same chb01
+`label_mode=prediction`, same 6 LOSO folds, same shared training protocol
+via `run_pipelines.py --pipeline cg_mambanet --label-mode prediction
+--device cuda`. Run on a RunPod RTX 4090 (needed the fused `mamba-ssm`
+CUDA kernel; `mambapy`'s pure-PyTorch scan doesn't scale at this
+architecture's depth/seq_len on CPU/MPS — see
+`cg_mambanet_architecture_and_mambapy_scaling_wall.md`). Source run:
+`prediction_leave_one_seizure_out_20260829-114933.csv`, single run, not
+tuned — treat as a first data point, not this architecture's ceiling.
+
+| metric | GRU | Mamba | DBConformer | SlimSeiz | CG-MambaNet |
+|---|---|---|---|---|---|
+| accuracy | 0.878 | 0.896 | 0.897 | 0.913 | 0.837 |
+| precision | 0.343 | 0.348 | 0.273 | 0.286 | 0.124 |
+| recall | 0.807 | 0.750 | 0.772 | 0.556 | 0.516 |
+| f1 | 0.436 | 0.389 | 0.366 | 0.340 | 0.197 |
+| AP | 0.423 | **0.499** | 0.442 | 0.431 | 0.127 |
+| AUC | 0.944 | 0.953 | 0.952 | 0.951 | 0.797 |
+| FAR/h raw | 14.26 | 11.73 | 11.73 | 8.56 | 17.90 |
+| FAR/h smoothed | 9.21 | 6.39 | 7.95 | **6.31** | 1.50 |
+| hit rate, raw | **6/6** | **6/6** | **6/6** | 5/6 | **6/6** |
+| hit rate, k-of-n (smoothed) | 5/6 | 5/6 | 5/6 | **4/6** | 3/6 |
+
+CG-MambaNet is last on nearly every metric here — lowest AP by a wide
+margin (0.127 vs. next-worst GRU's 0.423), lowest AUC (0.797 vs. all four
+others ≥0.944), worst k-of-n hit rate (3/6), and worst FAR/h-raw (17.9).
+Its one bright spot, FAR/h-smoothed (1.50), is misleading in isolation:
+smoothing is dragging down an already-low positive rate (precision 0.124,
+the lowest of the five) rather than reflecting confident, well-separated
+predictions — consistent with the low AUC/AP. Training logs show fast
+overfitting (early stopping typically epoch 3-8 of 20, val_loss rising
+well before that) on several folds, so this may understate the
+architecture's ceiling; no hyperparameter tuning was attempted, unlike
+DBConformer's depth/class-weight sweep. Not a fair apples-to-apples
+verdict on the paper's own architecture until that's tried, but on this
+protocol, as reconstructed and run once, it underperforms every pipeline
+already in this repo.
+
 ## Caveats
 
 - Four different training runs, four different random seeds/environments

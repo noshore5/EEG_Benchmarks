@@ -599,16 +599,25 @@ HERMITIAN_SSM_PARAMS: dict[str, object] = dict(
     use_class_weights=True,
     # deterministic spectral precompute (== the cache key)
     spectral_sampling_rate=256.0,
+    # 2026-08-29: matched to temporal_graph_mamba's band (8-40 Hz, 8 cached
+    # bins) so hermitian_ssm-vs-leader is finally an apples-to-apples
+    # comparison, AND to test the eigen-feature diagnosis (Session_notes/
+    # 2026_08_28/hermitian_ssm_first_6fold_and_eigh_fix.md): diagonal="zero"
+    # removes the per-channel power spikes that were blowing up lambda_1
+    # (median 14, max 3210); k=6 gives the encoder something past the
+    # near-redundant top-2 (corr(l1,l2)=0.93). Prior 8-124/nfreqs=60/k=2
+    # config: mean AP 0.253. nfreqs=16/fd=2 keeps the Welch-style freq
+    # smoothing that stabilises the eigh (6% eigenvector flips at fd=1-ish).
     spectral_lowest=8.0,
-    spectral_highest=124.0,     # just below the 125-128 Hz Nyquist edge
-    spectral_nfreqs=60,
+    spectral_highest=40.0,
+    spectral_nfreqs=16,
     spectral_time_downsample=16,
-    spectral_freq_downsample=2,  # -> 30 cached freq bins (Welch-style, post-smoothing)
+    spectral_freq_downsample=2,  # -> 8 cached freq bins (Welch-style, post-smoothing)
     spectral_smooth_time_steps=5,
     spectral_mains_notch=True,
-    spectral_diagonal="power",
+    spectral_diagonal="zero",   # was "power"; power now enters only via eigenstructure, not the diagonal
     spectral_eigenvalue_sort="abs",
-    spectral_k=2,
+    spectral_k=6,               # was 2; top-2 were near-redundant
     # eigenvectors stored as float16 re/im (4 B/component vs complex64's 8):
     # halves the cache (~24->12 GB) and the training mmap so a full fold's
     # eigenvectors fit in 16 GB RAM. ~1e-3 error on unit-norm components,
@@ -622,11 +631,29 @@ HERMITIAN_SSM_PARAMS: dict[str, object] = dict(
     # gradient-checkpointed path) and swap on 16GB RAM -> ~4x slower/epoch
     # than temporal_graph_mamba. Raw per-(t,f) feature width is only 94, so
     # 256 was oversized anyway. See Session_notes/2026_08_28/.
+    # encoder_mode (Session_notes/2026_08_29/hermitian_ssm_bandmatch_6fold.md):
+    #   "eigenvector" -- raw [Re u, Im u] per mode + mode_id slot. Best so
+    #                    far: band-match 6-fold mean AP 0.436.
+    #   "projector"   -- gauge-invariant node summaries of P = sum_r lambda_r
+    #                    u_r u_r^H. NEGATIVE: mean AP 0.273 (C x C -> C-vec
+    #                    collapse is lossy; gauge noise was not the problem).
+    #   "graph"       -- upper triangle of P (lossless, gauge-invariant, no
+    #                    node collapse; P triangle precomputed per-window in
+    #                    _WindowDataset). fold 1 = 0.169, killed.
+    #   "evolution"   -- token = complex k x k subspace-evolution operator
+    #                    M(t) = U(t)^H U(t-1); forces phase-canonicalisation.
+    #                    NEGATIVE (folds 1-2 ~chance): M is pure mode-space,
+    #                    zero channel identity.
+    # 2026-08-29 encoder investigation CLOSED: alternatives to "eigenvector"
+    # lose ground monotonically with how much channel identity they drop
+    # ("projector" 0.273, "graph" fold1 0.169, "evolution" ~chance).
+    # "eigenvector" (mean AP 0.436) is the hermitian ceiling for this config.
+    encoder_mode="eigenvector",
     d_model=64,
-    d_mode=32,
+    d_mode=32,           # "eigenvector" encoder only
     d_freq=64,
-    freq_feature=True,   # feed normalised Hz into the per-mode encoder (2026-08-27); ablate by flipping False
-    mode_feature=True,   # learned per-mode-slot (|lambda|-rank) embedding into the per-mode encoder (2026-08-27)
+    freq_feature=True,   # feed normalised Hz into the encoder (2026-08-27); ablate by flipping False
+    mode_feature=True,   # "eigenvector" encoder only: learned per-mode-slot (|lambda|-rank) embedding (2026-08-27)
 
     # temporal (mamba) -- dense_edge_mamba's config, d_model per the doc
     mamba_d_state=16,

@@ -9,29 +9,129 @@ Claude/Grok shells that don't share context with each other, and this is
 the one file meant to catch a new shell up without it re-reading
 everything.
 
-**Last updated:** 2026-08-28, by Claude (Mac shell). Branch
-`graph-state-mamba` **merged into `main` (fast-forward) and deleted**
-(local + `origin`); `main` is the current branch again. That branch
-carried: the `temporal_graph_gru`/`temporal_graph_mamba` `--pipeline`
-wiring, the whole `hermitian_ssm` pipeline, and the new
-`temporal_graph_aggregate` pre/post knob. This session's work:
-- **`hermitian_ssm` final 6-fold (float16, d_model=64):** mean AP
-  **0.253**, AUC 0.888, FAR/h 12.5->5.0, hits 5/6 raw / 4/6 k-of-n
-  (`*_20260828-091710.csv`). Still the weakest full-6-fold pipeline;
-  parked, not deleted. eigh-convergence fix, d_model 256->64, and
-  float16 eigenvector storage are all DONE (see the hermitian thread
-  under Open threads).
+**Last updated:** 2026-08-29, by Claude (Mac shell). Branch is
+`graph-state-mamba` (working tree; uncommitted: `run_pipelines.py`
+`HERMITIAN_SSM_PARAMS`, and `hermitian_ssm_classifier.py` -- now carries 4
+`encoder_mode`s. See the hermitian thread.). Earlier `graph-state-mamba`
+was merged to `main` + deleted 2026-08-28; it had carried the
+`temporal_graph_gru`/`temporal_graph_mamba` `--pipeline` wiring, the whole
+`hermitian_ssm` pipeline, and the `temporal_graph_aggregate` pre/post knob.
+
+**Active state 2026-08-29 EOD:** no runs in flight. hermitian encoder-
+variant investigation CLOSED NEGATIVE (see hermitian thread): the
+eigenvector encoder (band-match, **mean AP 0.436**) is the hermitian
+ceiling; every alternative that abstracts away channel identity
+(projector #2 = 0.273, graph #3 fold-1 = 0.169, evolution #6 = ~chance)
+does worse, monotonically. `temporal_graph_mamba` "pre" (**mean AP
+0.674**) remains the prediction leader. Only untried hermitian lever is
+Mamba-3 on the eigenvector encoder (low expected value). Nothing
+committed.
+
+Also 2026-08-29 (separate thread, `main`, not this branch): stood up
+`cg_mambanet` on a RunPod GPU end-to-end -- fixed a GHCR pull-rate-limit
+(mirrored image to Docker Hub), a torch-ABI mismatch in `Dockerfile.mamba`
+(`--no-deps`), and two missing runtime deps found live
+(`huggingface_hub`, `transformers`) -- then ran the real 6-fold chb01
+LOSO prediction test. Results are weak (see Known gotchas below and the
+CG-MambaNet addendum in `pipeline_comparison_gru_mamba_dbconformer_slimseiz.md`);
+pod terminated after the run. Results CSVs are in
+`Epilepsy/results/cg_mambanet/prediction/`.
+
+2026-08-29 session work:
+- **`hermitian_ssm` band-match 6-fold -- big jump, now competitive.**
+  Config-only changes vs the 0.253 run: band 8-124->**8-40 Hz**, nfreqs
+  60->**16** (fd=2 -> 8 cached bins), `diagonal` **"power"->"zero"**, `k`
+  **2->6**. Result: mean AP **0.436** (was 0.253, +72%), ROC-AUC **0.947**
+  (>= tgm "pre" 0.94), hit rate **6/6 raw + 6/6 smoothed** (tgm "pre" is
+  6/6 / 5/6), FAR/h smoothed **8.0** (tgm "pre" 8.44). Per-fold AP vs "pre":
+  1_03 .254/.792, 1_04 .324/.830, 1_15 **.414/.331**, 1_16 .279/.996,
+  1_18 .788/.802, 1_26 **.556/.293** -- hermitian wins the 2 folds where
+  "pre" is weak, loses the 3 where it's strong. Strong ROC-AUC + weak AP =
+  precision-at-top / calibration gap, not a ranking failure. `diag="zero"`
+  is the likely main lever (removed the per-channel power spikes that
+  pinned lambda_1 to a global-synchrony common mode). CSVs
+  `Epilepsy/results/hermitian_ssm/prediction/*_20260829-111904.csv`. See
+  `Session_notes/2026_08_29/hermitian_ssm_bandmatch_6fold.md`.
+  - **Uncommitted:** the `HERMITIAN_SSM_PARAMS` edit in `run_pipelines.py`
+    (spectral cache key -> new key `9d6ad0d850b8b8f0`). Not committed
+    pending the user's call. Stale line ~899 ("8-124 / 30-bin input is a
+    different regime") is now wrong -- the band IS matched.
+  - **Cache:** `~/mne_data/hermitian_ssm_cache/9d6ad0d850b8b8f0` = 9.8 GB,
+    all 41 recordings, warm. Old-key caches were already deleted 2026-08-28.
+  - **Projector encoder (#2) -- NEGATIVE (2026-08-29).**
+    `encoder_mode="projector"` (`_ProjectorEncoder`): gauge-invariant node
+    summaries of `P = Sum lambda_r u_r u_r^H`. Same warm cache, only the
+    encoder changed. Per-fold AP `.138/.190/.259/.300/.585/.168`, **mean
+    0.273**, ROC-AUC 0.898 (`*_20260829-152511.csv`) -- worse than the
+    eigenvector encoder (0.436/0.947) on every axis. Gauge noise was not
+    the bottleneck; the C x C -> C-vector collapse loses more than it saves.
+  - **Encoder-variant investigation -- CLOSED 2026-08-29, NEGATIVE.**
+    `HermitianSSMClassifier.encoder_mode` now has 4 options (all BUILT +
+    smoke-passed, all reuse the warm k=6 cache, all in
+    `hermitian_ssm_classifier.py`; `_WindowDataset.item_mode` +
+    `canonicalize` do the per-window numpy prep):
+      | mode | what it feeds | channel identity | result |
+      |---|---|---|---|
+      | `"eigenvector"` (default) | `[Re u, Im u]` + `mode_id` + lambda | **full** (u_r in C^23) | **mean AP 0.436** -- hermitian best |
+      | `"projector"` (#2) | gauge-inv node summaries of `P` | partial->collapsed | 0.273, 5/6 folds down |
+      | `"graph"` (#3) | upper triangle of `P` (lossless) | partial | fold 1 = 0.169, killed |
+      | `"evolution"` (#6) | complex k x k `M(t)=U(t)^H U(t-1)` + lambda | **none** (pure mode space) | folds 1-2 ~chance (.062,.091), val_auc stuck <0.77, killed |
+    `canonicalize_eigenvectors=True` (#4) also BUILT, NOT run -- skipped:
+    #2/#3 already show gauge noise isn't the cap, #4 = "gauge fix + same
+    encoder" has ~nil expected value.
+    **Conclusion:** result degrades monotonically with how much channel
+    identity the encoder drops. What hermitian needs is *which channels
+    couple*, in raw eigenvector coordinates. Every abstraction toward the
+    "graph as an object" loses ground. Confirms the fragility thesis (data
+    budget, not representation) from the opposite direction.
+    **Ceiling: mean AP ~0.44.** `temporal_graph_mamba` "pre" (0.674) stays
+    the prediction leader.
+    **Only lever left for hermitian:** Mamba-3 (complex state) on the
+    eigenvector encoder -- but that's a temporal-model change not a
+    representation one, and expected value is low. Unbuilt (~150-250 lines).
+    Uncommitted: `hermitian_ssm_classifier.py` (4 encoder modes),
+    `run_pipelines.py` (`HERMITIAN_SSM_PARAMS`, `encoder_mode="eigenvector"`).
+    See `Session_notes/2026_08_29/hermitian_ssm_bandmatch_6fold.md`.
+  - **k-sweep (do AFTER 3/4/6, on whichever encoder wins, and add
+    DataLoader `num_workers` first).** Cache is linear in k (`eigenvectors.npy`
+    is 96% of it; `eigh` always computes full rank so precompute time is
+    ~flat). k=6 -> 9.8 GB / ~100-120 s per epoch / ~2 h 6-fold. **k=12 ->
+    ~19-20 GB / ~200 s / ~5 h** (batch 16 ok). k=23 -> ~37 GB / ~380 s /
+    ~9-10 h (graph enc needs batch 8). New cache key each, additive to the
+    k=6 cache (68 GB free). NB k=23 => P == A exactly, so graph-enc at k=23
+    is just "feed raw coherence upper triangle" -- not compression. k=12 is
+    the meaningful middle. Epochs are IO-bound purely because
+    `num_workers=0`; parallelising the loader ~halves epoch time and should
+    land before any k>6 run.
+
+Prior (2026-08-28) session work:
+- **`hermitian_ssm` 6-fold (float16, d_model=64, 8-124 Hz):** mean AP
+  **0.253**, AUC 0.888 (`*_20260828-091710.csv`). Superseded by the
+  band-match run above.
 - **Wide-band experiment on `temporal_graph_mamba` -- ABANDONED,
   negative.** Widening 8-40->8-124 Hz (nfreqs=15/tds=32, then
   nfreqs=10/tds=16) made fold 1_03 AP collapse 0.792->0.307 then
   ->0.236. The wide band dilutes the 8-40 signal through
   `temporal_edge_proj`'s `4*nfreqs->edge_dim` mix. Reverted; kept as a
   comment in `PREDICTION_TEMPORAL_GRAPH_MAMBA_PARAMS`.
-- **`temporal_graph_aggregate="post"` A/B running** (2026-08-28, on the
-  8-40/nfreqs=8 baseline, only that knob changed): Mamba over the ~253
-  edge sequences first, aggregate to nodes after -- keeps the full edge
-  graph instead of a per-timestep 23-node average. ~11x slower/epoch.
-  Baseline to beat: "pre" = AP 0.674. Result not in yet.
+- **`temporal_graph_aggregate="post"` A/B -- DONE, a wash, not adopted**
+  (2026-08-28, 8-40/nfreqs=8 baseline, only that knob changed): Mamba
+  over the ~253 edge sequences first, aggregate to nodes after -- keeps
+  the full edge graph. Full 6-fold: mean AP **0.639 vs "pre" 0.674**
+  (gap is entirely fold 1_03), ROC-AUC **0.970 vs 0.94** (slightly
+  better global ranker), hit rate 6/6 raw+sm vs 6/6 raw / 5/6 sm.
+  4/6 folds >= pre. ~11x compute for a tie -> **default stays "pre"**,
+  knob parked in code. CSVs `*20260828-161354*`. See
+  `Session_notes/2026_08_28/temporal_graph_aggregate_post_6fold.md`.
+- **Negative/null-results pattern (2026-08-28):** attempts to improve
+  `temporal_graph_mamba` by adding capacity/richness: wide-band (NEG,
+  0.79->0.24 fold 1), reg-tuning 2026-08-27 (NEG), "post" (WASH on full
+  6-fold, looked NEG on fold 1). Bottleneck is not capacity -- it's ~30
+  preictal windows/fold on chb01-only, and partial-run reads are
+  actively misleading (the "post" fold-1 "regression" was fold variance).
+  Next levers: decision-threshold calibration (not the model),
+  seed-repeating the 0.674 baseline for an error bar. Full writeup:
+  `Session_notes/2026_08_28/negative_results_roundup_and_fragility.md`.
 Session notes: `Session_notes/2026_08_28/`.
 
 Prior entry, still current: 2026-08-26, by Claude (ran the planned next
@@ -472,9 +572,41 @@ read off a continuous timeline). See "Open threads" below.
   once. Full numbers:
   `Session_notes/2026_08_26/cg_mambanet_architecture_and_mambapy_scaling_wall.md`.
   The fused `mamba-ssm` CUDA kernel (RunPod image) is a different code path
-  (a real kernel, not chained PyTorch ops) and is expected to sidestep this
-  -- not yet confirmed, no kernel-vs-pscan parity check run for this
-  specific encoder shape yet.
+  (a real kernel, not chained PyTorch ops) and does sidestep this --
+  confirmed 2026-08-29 on a RunPod RTX 4090:
+  `scripts/dense_edge_mamba_cuda_kernel_parity.py` passed
+  (max|kernel-pscan|=1.2e-7) and a full 6-fold chb01 LOSO `cg_mambanet`
+  prediction run completed in minutes. Results are weak (mean AP 0.127,
+  AUC 0.797, worst of 5 pipelines compared) -- see
+  `pipeline_comparison_gru_mamba_dbconformer_slimseiz.md`'s CG-MambaNet
+  addendum -- but that's the architecture underperforming, not a
+  scaling-wall or kernel-correctness issue; the wall itself is resolved.
+- **RunPod pods: ALWAYS terminate (`delete-pod`) as soon as a run
+  finishes or is confirmed dead-ended -- do not wait for the user to say
+  so.** They're not always around to give that go-ahead and a pod left up
+  just burns their money on idle GPU time. This applies even to pods hit
+  mid-diagnosis (rate-limit loops, CUDA-driver-too-old boot failures,
+  etc.) -- delete and recreate rather than leaving a stuck one running
+  while you investigate.
+- **A `dataCenterIds` pin does NOT guarantee driver/CUDA version --
+  that's per physical host, not per datacenter (2026-08-29).** A pod
+  pinned to EU-RO-1 that had previously booted fine on `cuda>=12.8` later
+  got a different EU-RO-1 host reporting driver `12.4` and failed to boot
+  (`nvidia-container-cli: requirement error: unsatisfied condition:
+  cuda>=12.8`) on two separate re-creates. There's no way surfaced by
+  these tools to request a minimum driver version directly -- if a pod's
+  container is stuck retry-looping on this error, delete and recreate
+  (whichever datacenter) rather than waiting; a different host usually
+  has a current-enough driver within one or two tries.
+- **RunPod's fused-kernel image (`Dockerfile.mamba`) needed two more
+  runtime deps beyond torch/mamba-ssm/causal-conv1d, found live on
+  2026-08-29: `huggingface_hub` and `transformers`** (mamba_ssm's
+  `mamba2.py` -> `generation.py` import chain pulls both in, but they're
+  runtime, not build, deps -- the `--no-deps` pip flag added earlier to
+  fix the torch-ABI-mismatch incident skips them too). Fixed in the
+  Dockerfile (commit `3382187`) by installing them in their own layer,
+  separately from the `--no-deps` mamba-ssm/causal-conv1d install, so the
+  ABI-safety property that flag exists for isn't reopened.
 - **`--pipeline slimseiz` (non-smoke) once blew up memory/crashed this
   Mac; root cause NOT cleanly pinned down despite real profiling; a
   hardening fix is in place but is a mitigation, not a proven fix.**
@@ -793,9 +925,15 @@ read off a continuous timeline). See "Open threads" below.
   instead of a per-timestep 23-node average. ~11x more Mamba rows
   (n_rows=B*E >> chunk_size so it gradient-checkpoints, memory bounded);
   cache `[B,4,E,T,F]` unchanged. Guard: requires
-  `temporal_graph_mode="mamba"`. A 6-fold "post" A/B is running
-  2026-08-28 (only this knob changed). Flip `temporal_graph_aggregate=
-  "post"` in `PREDICTION_TEMPORAL_GRAPH_MAMBA_PARAMS` to reproduce.
+  `temporal_graph_mode="mamba"`. 6-fold "post" A/B (2026-08-28, only this
+  knob changed): **DONE, a wash.** Full 6-fold mean AP 0.639 vs "pre"
+  0.674 (gap = fold 1_03 alone: 0.407 vs 0.792), ROC-AUC 0.970 vs 0.94,
+  4/6 folds >= pre. Per-fold post AP: 0.407 / 0.837 / 0.487 / 0.994 /
+  0.854 / 0.257. ~11x compute for a tie -> PARKED, default stays "pre".
+  To reproduce, flip `temporal_graph_aggregate="post"` in
+  `PREDICTION_TEMPORAL_GRAPH_MAMBA_PARAMS`. CSVs `*20260828-161354*`. See
+  `Session_notes/2026_08_28/temporal_graph_aggregate_post_6fold.md`
+  and the roundup note in that dir.
 - **`temporal_graph_mamba` neck is width-8, never swept.**
   `temporal_edge_proj` (`Linear(4*nfreqs -> temporal_graph_edge_dim=8)`)
   then everything at `hidden_dim=8` including the Mamba's `d_model` --
@@ -825,10 +963,12 @@ read off a continuous timeline). See "Open threads" below.
   `run_pipelines.py`, `scripts/hermitian_ssm_{numerical_validation,smoke}.py`.
   Full build writeup + locked decisions: `Session_notes/2026_08_27/
   hermitian_ssm_pipeline_built.md`.
-  Config: 8-124 Hz, nfreqs=60 -> freq-decimated to 30 bins post-smoothing,
-  time_downsample=16, k=2, 57-63/117-123 Hz mains notch, **d_model=64**
-  (was 256; cut 2026-08-28, cost nothing -- see status),
-  **eigenvector_storage="float16"**.
+  Config (2026-08-29 band-match): **8-40 Hz, nfreqs=16 -> 8 bins**
+  post-smoothing, time_downsample=16, **k=6**, **diagonal="zero"**,
+  mains notch now a no-op (highest=40), **d_model=64**
+  (was 256; cut 2026-08-28), **eigenvector_storage="float16"**.
+  (Old 8-124 Hz / nfreqs=60->30 / k=2 / diagonal="power" config: the
+  three PARKED runs on `main`, mean AP <=0.253.)
   Cache: per-recording `.npy` dir keyed by `HermitianSpectralConfig.
   cache_key()`, windowing-independent (any window/step re-slices it),
   mmap'd during training. ~0.65 GB / 1h recording, ~24 GB projected for
@@ -845,23 +985,26 @@ read off a continuous timeline). See "Open threads" below.
   `HermitianSSMClassifier`, `False` for ablation. Not built: per-frequency
   Mamba lanes (`E=F` instead of `E=1`) -- discussed, left as a future
   config switch, see the session note.
-  **Status (2026-08-28): three real 6-fold LOSO runs done, then PARKED**
-  (on `main`, not deleted). d_model=256 (`*_20260827-231141.csv`): AP
-  0.237. d_model=64 complex64 (`*_20260828-055322.csv`): AP 0.241.
-  **d_model=64 + float16 (`*_20260828-091710.csv`, the current config):
-  mean AP 0.253, AUC 0.888, FAR/h 12.5->5.0, hits 5/6 raw / 4/6 k-of-n.**
-  **Weakest full-6-fold pipeline** (temporal_graph_mamba 0.674,
-  dense_edge_gru k=20 0.567, dense_edge_mamba 0.42/0.50, dbconformer 0.44)
-  -- AUC 0.88 vs temporal_graph_mamba's 0.94 = a worse *ranker*, not just
-  badly thresholded. Diagnosed why (2026-08-28, off the real cache): the
-  eigen-features collapse to ~1 effective dim -- corr(lambda1,lambda2)
-  =0.93, top eigenvector near-uniform (participation ratio ~19/23, i.e.
-  it's just global synchrony), ~12% of slices near-degenerate. Coherence
-  normalization also strips per-channel power. Candidate fixes (untried):
-  `diagonal="zero"` + explicit per-channel log-power feature stream;
-  per-channel coherence-strength `sum_j coh_ij` instead of / alongside
-  the rank-2 truncation; per-frequency Mamba lanes. See
-  `Session_notes/2026_08_28/`.
+  **Status (2026-08-29): band-match 6-fold is now the current run --
+  mean AP 0.436, ROC-AUC 0.947, hit 6/6 raw+sm, FAR/h sm 8.0**
+  (`*_20260829-111904.csv`; config: 8-40 Hz, nfreqs=16->8 bins,
+  `diagonal="zero"`, k=6, d_model=64, float16). Competitive with
+  `temporal_graph_mamba` on every metric except AP (0.436 vs 0.674).
+  `diag="zero"` is the likely main lever of the +0.18 vs the old config.
+  Prior PARKED runs (8-124 Hz, on `main`): d_model=256
+  (`*_20260827-231141.csv`) AP 0.237; d_model=64 complex64
+  (`*_20260828-055322.csv`) AP 0.241; d_model=64 float16
+  (`*_20260828-091710.csv`) mean AP 0.253, AUC 0.888.
+  The 2026-08-28 diagnosis (off the old cache) that drove the band-match
+  config: eigen-features collapsed to ~1 effective dim -- corr(l1,l2)=0.93,
+  top eigenvector near-uniform (participation ~19/23 = global synchrony),
+  ~12% near-degenerate slices; the power diagonal dominated the
+  eigenstructure (l1 median 14, max 3210). `diagonal="zero"` + k=6
+  addressed the last two. Still untried: projector encoder (gauge-invariant
+  `P = Sum l_r u_r u_r^H` node summaries -- kills the sign-flip / mode-
+  crossing churn), Mamba-3 (complex state, tracks cross-spectral phase),
+  explicit per-channel log-power stream. See
+  `Session_notes/2026_08_29/hermitian_ssm_bandmatch_6fold.md`.
   **DONE this session:** (1) eigh-convergence fix -- `torch.linalg.eigh`
   (LAPACK syevd) fails on flatlined CHB-MIT segments (LinAlgError code
   22); `nan_to_num` + fall back to `torch.linalg.eig` (geev) per freq
@@ -875,20 +1018,17 @@ read off a continuous timeline). See "Open threads" below.
   Still IO-bound at ~120 s/epoch (`num_workers=0`) -- float16 didn't fix
   that (was never swap, just serialized reads); DataLoader `num_workers`
   is the remaining speed lever if this thread resumes.
-  **Also not done:** frequency-band sweep (the whole benchmark runs
-  8-40 Hz / nfreqs=8, picked for *disk budget* not accuracy -- see
-  `_SHARED_ARCH_PARAMS` comment; hermitian_ssm's 8-124 / 30-bin input is a
-  different regime, so hermitian_ssm-vs-others is not yet a clean
-  architecture comparison), GPU precompute path, Mamba-3, per-frequency
-  Mamba lanes.
-  Disk (as of 2026-08-28, ~40 GB free on the Mac): `~/mne_data/
-  dense_edge_cache` + `cwt_window_cache` deleted and rebuilding cold for
-  the running `temporal_graph_mamba` "post" A/B (~70 GB at 8-40/nfreqs=8/
-  tds=16; both scale ~linearly in nfreqs -- the wide-band experiment's
-  nfreqs=10/15 caches were bigger and are gone). `~/mne_data/
-  hermitian_ssm_cache` deleted (all keys orphaned by the float16 field;
-  the last hermitian result CSV is committed, so the cache is disposable
-  -- rebuild ~40 min if that thread resumes).
+  **Also not done:** GPU precompute path, Mamba-3, per-frequency Mamba
+  lanes, projector encoder. (Band-match DONE 2026-08-29 -- hermitian_ssm
+  now runs the same 8-40 Hz band as `temporal_graph_*`, so the
+  cross-architecture comparison is finally apples-to-apples.)
+  Disk (as of 2026-08-29): **`~/mne_data/dense_edge_cache` DELETED**
+  (freed 63 GB -> 68 GB free, for swap headroom during the heavier encoder
+  experiments; the 2026-08 Mac hard-crash was disk/compute exhaustion).
+  Rebuild ~2-4 h cold if `temporal_graph_*` is run again; its 0.674 result
+  CSVs are on disk. `~/mne_data/hermitian_ssm_cache/9d6ad0d850b8b8f0` =
+  9.8 GB (band-match config, all 41 recordings, warm) -- the encoder
+  experiments (#2/#3/#4/#6) all reuse it unchanged, no new cache writes.
 - **STG-Mamba Design A (topology modulates the SSM delta) -- still
   unbuilt.** See `Epilepsy/graph_state_space_mamba_design.md`; the
   `hermitian_ssm` pipeline above deliberately took the simpler
