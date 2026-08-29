@@ -58,25 +58,22 @@ ENCODERS (``encoder_mode``):
     "projector" underperformed it (0.273); see Session_notes/2026_08_29/.
 
 =========================================================================
-MAMBA-3 INTEGRATION POINT (next step -- not done here, see design doc):
-The temporal head is still a standard (Mamba-2 style) real recurrence.
-Mamba-3 (arXiv 2603.15569) adds a genuinely
-complex-valued diagonal state, losslessly carried as a 2N real state, with
-per-dimension 2x2 rotation blocks and a "RoPE trick" that folds the
-rotation into the B/C projections *before* the scan (so it still runs on
-real kernels/pscan -- no custom CUDA kernel).
+TEMPORAL BACKEND (``mamba_backend``):
+  "mamba"  -- mambapy real-diagonal selective SSM (Mamba-1/2). Default.
+  "mamba3" -- ``Epilepsy/pipelines/mamba3.py``: complex-diagonal state,
+    lambda = -exp(a) + i*omega, so each state channel has a decay rate AND
+    a rotation frequency and can integrate the Hermitian graph's phase
+    evolving over time rather than treating it as a number a dense layer
+    must interpret. Complex Blelloch pscan with a conjugation-correct
+    backward (gradchecked fp64), ~2x a real pscan.
+  Both share the ``[B, C_in, E, T] -> [B, out, E, 1]`` contract; swap is a
+  head-constructor arg, cache and encoders unchanged.
 
-To adopt it here:
-  * ``_ProjectorEncoder`` already emits a per-frequency real feature vector
-    whose ``c_i`` block (node net coupling) is an interleaved complex
-    quantity -- keep it complex into the recurrence instead of splitting
-    Re/Im into unrelated channels.
-  * Replace ``_DenseEdgeMambaTemporal`` with a Mamba-3 block whose state
-    transition factors into (magnitude decay) x (rotation); the rotation is
-    where the Hermitian graph's phase belongs, handled as an actual
-    rotation operator rather than a number a dense layer must interpret.
-  * The encoder and ``_MambaTemporalHead`` are the two seams to change;
-    the cache format and everything left of it stays fixed.
+TEMPORAL LAYOUT (``temporal_mode``):
+  "fused"    -- encoder fuses F frequencies into one token, one Mamba over T.
+  "per_freq" -- encoder skips freq_fuse; one (weight-shared) Mamba lane per
+    frequency over T, fuse the F band-summaries after. BUILT; ~8x slower,
+    no epoch-1 advantage -- parked.
 =========================================================================
 """
 
@@ -95,6 +92,24 @@ from Epilepsy.pipelines.hermitian_ssm_cache import (
     HermitianSpectralCache,
     HermitianSpectralConfig,
 )
+from Epilepsy.pipelines.mamba3 import _Mamba3Temporal
+
+
+def _build_temporal_backend(backend: str, in_ch: int, out_ch: int, *, d_model: int,
+                            d_state: int, d_conv: int, expand: int, n_layers: int,
+                            dropout: float, chunk_size: int) -> nn.Module:
+    """[B, C_in, E, T] -> [B, out_ch, E, 1]. "mamba" = real-diagonal
+    (mambapy, Mamba-1/2); "mamba3" = complex-diagonal selective SSM."""
+    if backend == "mamba3":
+        return _Mamba3Temporal(
+            in_ch, out_ch, d_model=d_model, d_state=d_state, d_conv=d_conv,
+            expand=expand, n_layers=n_layers, dropout=dropout,
+        )
+    return _DenseEdgeMambaTemporal(
+        in_channels=in_ch, out_channels=out_ch, d_model=d_model, d_state=d_state,
+        d_conv=d_conv, expand=expand, n_layers=n_layers, dropout=dropout,
+        chunk_size=chunk_size, use_cuda_kernel=None,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -134,6 +149,7 @@ class _ProjectorEncoder(nn.Module):
         d_freq: int,
         *,
         freqs: "np.ndarray | None" = None,
+        fuse_freq: bool = True,   # False -> return per-freq [B,T,F,d_freq] for _PerFreqMambaHead
     ) -> None:
         super().__init__()
         self.n_channels = n_channels
@@ -157,7 +173,9 @@ class _ProjectorEncoder(nn.Module):
         feat_width = k + 4 * n_channels + n_ff
         self.norm = nn.LayerNorm(feat_width)          # features are O(1) but heavy-tailed; cheap insurance
         self.freq_proj = nn.Linear(feat_width, d_freq)
-        self.freq_fuse = nn.Linear(n_freqs * d_freq, d_model)
+        self.fuse_freq = fuse_freq
+        if fuse_freq:
+            self.freq_fuse = nn.Linear(n_freqs * d_freq, d_model)
         self.act = nn.GELU()
 
     def forward(self, eigvals: torch.Tensor, eigvecs: torch.Tensor) -> torch.Tensor:
@@ -179,8 +197,9 @@ class _ProjectorEncoder(nn.Module):
             feat = torch.cat([feat, ff], dim=-1)
         feat = self.norm(feat)
         freq_emb = self.act(self.freq_proj(feat))                # [B,T,F,d_freq]
-        token = self.freq_fuse(freq_emb.reshape(b, t, -1))       # [B,T,d_model]
-        return token
+        if not self.fuse_freq:
+            return freq_emb                                      # [B,T,F,d_freq] -> _PerFreqMambaHead
+        return self.freq_fuse(freq_emb.reshape(b, t, -1))        # [B,T,d_model]
 
 
 class _GraphEncoder(nn.Module):
@@ -221,6 +240,7 @@ class _GraphEncoder(nn.Module):
         d_freq: int,
         *,
         freqs: "np.ndarray | None" = None,
+        fuse_freq: bool = True,   # False -> return per-freq [B,T,F,d_freq] for _PerFreqMambaHead
     ) -> None:
         super().__init__()
         self.n_channels = n_channels
@@ -241,7 +261,9 @@ class _GraphEncoder(nn.Module):
         feat_width = n_channels + 2 * n_edges + n_ff               # C + 2*C(C-1)/2 (+2) = C^2 (+2)
         self.norm = nn.LayerNorm(feat_width)
         self.freq_proj = nn.Linear(feat_width, d_freq)
-        self.freq_fuse = nn.Linear(n_freqs * d_freq, d_model)
+        self.fuse_freq = fuse_freq
+        if fuse_freq:
+            self.freq_fuse = nn.Linear(n_freqs * d_freq, d_model)
         self.act = nn.GELU()
 
     def forward(self, p_diag: torch.Tensor, p_upper: torch.Tensor) -> torch.Tensor:
@@ -254,8 +276,9 @@ class _GraphEncoder(nn.Module):
             feat = torch.cat([feat, ff], dim=-1)
         feat = self.norm(feat)
         freq_emb = self.act(self.freq_proj(feat))                 # [B,T,F,d_freq]
-        token = self.freq_fuse(freq_emb.reshape(b, t, -1))        # [B,T,d_model]
-        return token
+        if not self.fuse_freq:
+            return freq_emb                                       # [B,T,F,d_freq] -> _PerFreqMambaHead
+        return self.freq_fuse(freq_emb.reshape(b, t, -1))         # [B,T,d_model]
 
 
 class _EvolutionEncoder(nn.Module):
@@ -291,6 +314,7 @@ class _EvolutionEncoder(nn.Module):
         d_freq: int,
         *,
         freqs: "np.ndarray | None" = None,
+        fuse_freq: bool = True,   # False -> return per-freq [B,T,F,d_freq] for _PerFreqMambaHead
     ) -> None:
         super().__init__()
         self.n_freqs = n_freqs
@@ -309,7 +333,9 @@ class _EvolutionEncoder(nn.Module):
         feat_width = k + 3 * k * k + n_ff
         self.norm = nn.LayerNorm(feat_width)
         self.freq_proj = nn.Linear(feat_width, d_freq)
-        self.freq_fuse = nn.Linear(n_freqs * d_freq, d_model)
+        self.fuse_freq = fuse_freq
+        if fuse_freq:
+            self.freq_fuse = nn.Linear(n_freqs * d_freq, d_model)
         self.act = nn.GELU()
 
     def forward(self, lam: torch.Tensor, m: torch.Tensor) -> torch.Tensor:
@@ -323,8 +349,9 @@ class _EvolutionEncoder(nn.Module):
             feat = torch.cat([feat, ff], dim=-1)
         feat = self.norm(feat)
         freq_emb = self.act(self.freq_proj(feat))                 # [B,T,F,d_freq]
-        token = self.freq_fuse(freq_emb.reshape(b, t, -1))        # [B,T,d_model]
-        return token
+        if not self.fuse_freq:
+            return freq_emb                                       # [B,T,F,d_freq] -> _PerFreqMambaHead
+        return self.freq_fuse(freq_emb.reshape(b, t, -1))         # [B,T,d_model]
 
 
 class _SpectralEncoder(nn.Module):
@@ -346,6 +373,7 @@ class _SpectralEncoder(nn.Module):
         freqs: "np.ndarray | None" = None,
         mode_feature: bool = True,
         d_mode_id: int = 4,
+        fuse_freq: bool = True,   # False -> return per-freq [B,T,F,d_freq] for _PerFreqMambaHead
     ) -> None:
         super().__init__()
         self.n_channels = n_channels
@@ -395,7 +423,9 @@ class _SpectralEncoder(nn.Module):
         self.vec_proj = nn.Linear(2 * n_channels + n_ff + n_mf, d_mode)
         self.val_proj = nn.Linear(1, d_mode)
         self.mode_fuse = nn.Linear(k * d_mode, d_freq)
-        self.freq_fuse = nn.Linear(n_freqs * d_freq, d_model)
+        self.fuse_freq = fuse_freq
+        if fuse_freq:
+            self.freq_fuse = nn.Linear(n_freqs * d_freq, d_model)
         self.act = nn.GELU()
 
     def forward(self, eigvals: torch.Tensor, eigvecs: torch.Tensor) -> torch.Tensor:
@@ -415,8 +445,9 @@ class _SpectralEncoder(nn.Module):
         val_emb = self.val_proj(eigvals.unsqueeze(-1))                 # [B,T,F,k,d_mode]
         mode_emb = self.act(vec_emb + val_emb)                        # [B,T,F,k,d_mode]
         freq_emb = self.act(self.mode_fuse(mode_emb.reshape(b, t, f, -1)))  # [B,T,F,d_freq]
-        token = self.freq_fuse(freq_emb.reshape(b, t, -1))            # [B,T,d_model]
-        return token
+        if not self.fuse_freq:
+            return freq_emb                                           # [B,T,F,d_freq] -> _PerFreqMambaHead
+        return self.freq_fuse(freq_emb.reshape(b, t, -1))             # [B,T,d_model]
 
 
 class _MambaTemporalHead(nn.Module):
@@ -439,19 +470,13 @@ class _MambaTemporalHead(nn.Module):
         dropout: float,
         chunk_size: int,
         head_hidden: int,
+        backend: str = "mamba",
     ) -> None:
         super().__init__()
-        self.mamba = _DenseEdgeMambaTemporal(
-            in_channels=d_model,
-            out_channels=head_hidden,
-            d_model=d_model,
-            d_state=d_state,
-            d_conv=d_conv,
-            expand=expand,
-            n_layers=n_layers,
-            dropout=dropout,
+        self.mamba = _build_temporal_backend(
+            backend, d_model, head_hidden, d_model=d_model, d_state=d_state,
+            d_conv=d_conv, expand=expand, n_layers=n_layers, dropout=dropout,
             chunk_size=chunk_size,
-            use_cuda_kernel=None,  # auto: fused only on Linux/CUDA + mamba-ssm
         )
         self.head = nn.Sequential(nn.GELU(), nn.Linear(head_hidden, 2))
 
@@ -462,8 +487,53 @@ class _MambaTemporalHead(nn.Module):
         return self.head(pooled)                          # [B, 2]
 
 
+class _PerFreqMambaHead(nn.Module):
+    """Per-frequency temporal head (2026-08-29, ``temporal_mode="per_freq"``).
+
+    Encoder returns ``[B, T, F, d_freq]`` (its ``freq_fuse`` skipped). This
+    runs ``_DenseEdgeMambaTemporal`` with the edge axis set to ``F`` -- so
+    each frequency band gets its own Mamba lane over T (weight-shared across
+    the F lanes, like the edge axis in ``temporal_graph_mamba``; same param
+    count as the fused head, NOT a capacity bump). The F per-band summaries
+    are then fused (``freq_fuse``) and classified. Rationale: the fused head
+    collapses all F bands into one token *before* any temporal modelling, so
+    the Mamba never sees band-specific dynamics (theta rhythms and gamma
+    bursts evolve on different timescales); this defers the fusion to after.
+    """
+
+    def __init__(
+        self,
+        d_freq: int,
+        n_freqs: int,
+        *,
+        d_state: int,
+        d_conv: int,
+        expand: int,
+        n_layers: int,
+        dropout: float,
+        chunk_size: int,
+        head_hidden: int,
+        backend: str = "mamba",
+    ) -> None:
+        super().__init__()
+        self.mamba = _build_temporal_backend(
+            backend, d_freq, head_hidden, d_model=d_freq, d_state=d_state,
+            d_conv=d_conv, expand=expand, n_layers=n_layers, dropout=dropout,
+            chunk_size=chunk_size,
+        )
+        self.freq_fuse = nn.Linear(n_freqs * head_hidden, head_hidden)
+        self.head = nn.Sequential(nn.GELU(), nn.Linear(head_hidden, 2))
+
+    def forward(self, freq_tokens: torch.Tensor) -> torch.Tensor:
+        b, t, f, d = freq_tokens.shape
+        conv_in = freq_tokens.permute(0, 3, 2, 1)            # [B, d_freq, F, T]
+        pooled = self.mamba(conv_in).squeeze(-1)             # [B, head_hidden, F]
+        fused = self.freq_fuse(pooled.reshape(b, -1))        # [B, head_hidden]
+        return self.head(fused)                              # [B, 2]
+
+
 class _HermitianSSMNet(nn.Module):
-    def __init__(self, encoder: nn.Module, temporal: _MambaTemporalHead) -> None:
+    def __init__(self, encoder: nn.Module, temporal: nn.Module) -> None:
         super().__init__()
         self.encoder = encoder
         self.temporal = temporal
@@ -505,6 +575,8 @@ class HermitianSSMClassifier:
         # encoder
         encoder_mode: str = "eigenvector",  # "eigenvector" (best, 0.436) | "projector" (neg, 0.273) | "graph" | "evolution"
         canonicalize_eigenvectors: bool = False,  # phase-fix each u_r; auto-on for "evolution"
+        temporal_mode: str = "fused",  # "fused" (one Mamba over the F-fused token) | "per_freq" (one Mamba lane per frequency, fuse after)
+        mamba_backend: str = "mamba",  # "mamba" (real diag, mambapy) | "mamba3" (complex diag state -- tracks coherence phase over time)
         d_model: int = 64,   # 2026-08-28: was 256 (doc default); see run_pipelines HERMITIAN_SSM_PARAMS
         d_mode: int = 32,    # "eigenvector" mode only
         d_freq: int = 64,
@@ -538,6 +610,12 @@ class HermitianSSMClassifier:
                              f"'evolution', got {encoder_mode!r}")
         self.encoder_mode = encoder_mode
         self.canonicalize_eigenvectors = bool(canonicalize_eigenvectors)
+        if temporal_mode not in ("fused", "per_freq"):
+            raise ValueError(f"temporal_mode must be 'fused' or 'per_freq', got {temporal_mode!r}")
+        self.temporal_mode = temporal_mode
+        if mamba_backend not in ("mamba", "mamba3"):
+            raise ValueError(f"mamba_backend must be 'mamba' or 'mamba3', got {mamba_backend!r}")
+        self.mamba_backend = mamba_backend
         self.d_model = d_model
         self.d_mode = d_mode
         self.d_freq = d_freq
@@ -650,28 +728,38 @@ class HermitianSSMClassifier:
         n_val = int(round(self.validation_split * len(index))) if self.validation_split else 0
         val_idx, tr_idx = perm[:n_val].tolist(), perm[n_val:].tolist()
 
+        fuse_freq = self.temporal_mode == "fused"
         if self.encoder_mode == "projector":
             encoder = _ProjectorEncoder(
-                n_channels, n_freqs, k, self.d_model, self.d_freq, freqs=freqs,
+                n_channels, n_freqs, k, self.d_model, self.d_freq, freqs=freqs, fuse_freq=fuse_freq,
             )
         elif self.encoder_mode == "graph":
             encoder = _GraphEncoder(
-                n_channels, n_freqs, k, self.d_model, self.d_freq, freqs=freqs,
+                n_channels, n_freqs, k, self.d_model, self.d_freq, freqs=freqs, fuse_freq=fuse_freq,
             )
         elif self.encoder_mode == "evolution":
             encoder = _EvolutionEncoder(
-                n_channels, n_freqs, k, self.d_model, self.d_freq, freqs=freqs,
+                n_channels, n_freqs, k, self.d_model, self.d_freq, freqs=freqs, fuse_freq=fuse_freq,
             )
         else:
             encoder = _SpectralEncoder(
                 n_channels, n_freqs, k, self.d_model, self.d_mode, self.d_freq,
-                freqs=freqs, mode_feature=self.mode_feature,
+                freqs=freqs, mode_feature=self.mode_feature, fuse_freq=fuse_freq,
             )
-        temporal = _MambaTemporalHead(
-            self.d_model, d_state=self.mamba_d_state, d_conv=self.mamba_d_conv,
-            expand=self.mamba_expand, n_layers=self.mamba_n_layers, dropout=self.mamba_dropout,
-            chunk_size=self.mamba_chunk_size, head_hidden=self.head_hidden,
-        )
+        if self.temporal_mode == "per_freq":
+            temporal = _PerFreqMambaHead(
+                self.d_freq, n_freqs, d_state=self.mamba_d_state, d_conv=self.mamba_d_conv,
+                expand=self.mamba_expand, n_layers=self.mamba_n_layers, dropout=self.mamba_dropout,
+                chunk_size=self.mamba_chunk_size, head_hidden=self.head_hidden,
+                backend=self.mamba_backend,
+            )
+        else:
+            temporal = _MambaTemporalHead(
+                self.d_model, d_state=self.mamba_d_state, d_conv=self.mamba_d_conv,
+                expand=self.mamba_expand, n_layers=self.mamba_n_layers, dropout=self.mamba_dropout,
+                chunk_size=self.mamba_chunk_size, head_hidden=self.head_hidden,
+                backend=self.mamba_backend,
+            )
         self.model_ = _HermitianSSMNet(encoder, temporal).to(self.device_)
 
         y_tr = y[tr_idx]

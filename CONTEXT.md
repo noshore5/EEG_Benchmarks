@@ -9,23 +9,32 @@ Claude/Grok shells that don't share context with each other, and this is
 the one file meant to catch a new shell up without it re-reading
 everything.
 
-**Last updated:** 2026-08-29, by Claude (Mac shell). Branch is
-`graph-state-mamba` (working tree; uncommitted: `run_pipelines.py`
-`HERMITIAN_SSM_PARAMS`, and `hermitian_ssm_classifier.py` -- now carries 4
-`encoder_mode`s. See the hermitian thread.). Earlier `graph-state-mamba`
-was merged to `main` + deleted 2026-08-28; it had carried the
-`temporal_graph_gru`/`temporal_graph_mamba` `--pipeline` wiring, the whole
-`hermitian_ssm` pipeline, and the `temporal_graph_aggregate` pre/post knob.
+**Last updated:** 2026-08-29, by Claude (Mac shell). On `main` (another
+shell switched off `graph-state-mamba`; hermitian work committed straight
+to `main` -- `68dd589`, pushed). Working tree: `hermitian_ssm_classifier.py`,
+`run_pipelines.py`, new `Epilepsy/pipelines/mamba3.py` uncommitted (this
+turn's per-freq + Mamba-3 wiring).
 
-**Active state 2026-08-29 EOD:** no runs in flight. hermitian encoder-
-variant investigation CLOSED NEGATIVE (see hermitian thread): the
-eigenvector encoder (band-match, **mean AP 0.436**) is the hermitian
-ceiling; every alternative that abstracts away channel identity
-(projector #2 = 0.273, graph #3 fold-1 = 0.169, evolution #6 = ~chance)
-does worse, monotonically. `temporal_graph_mamba` "pre" (**mean AP
-0.674**) remains the prediction leader. Only untried hermitian lever is
-Mamba-3 on the eigenvector encoder (low expected value). Nothing
-committed.
+**Active state 2026-08-29 EOD:** hermitian_ssm eigenvector encoder +
+**`mamba_backend="mamba3"` 6-fold RUNNING** (`herm_m3.log`). Status of the
+architecture search:
+- **encoder variants CLOSED NEGATIVE** (eigenvector 0.436 is the ceiling;
+  projector 0.273, graph 0.169 fold-1, evolution ~chance -- worse the more
+  channel identity dropped).
+- **`temporal_mode="per_freq"`** (one Mamba lane per frequency, fuse after)
+  BUILT -- NOT a bug (epoch-1 val_auc 0.77 is normal) but ~8x slower
+  (~831 s/epoch), no epoch-1 advantage. Parked.
+- **`mamba_backend="mamba3"`** (`Epilepsy/pipelines/mamba3.py`) -- BUILT +
+  VERIFIED: complex-diagonal selective SSM, lambda = -exp(a)+i*omega.
+  Complex Blelloch pscan (`_ComplexPScan`) with a conjugation-correct
+  backward, gradchecked fp64, ~2x a real pscan (~200 s/epoch expected).
+  This is the graph-native temporal model -- it integrates the coherence
+  PHASE over time instead of a dense layer interpreting a number.
+User's position: `temporal_graph_mamba` "pre" (0.674) is NOT an acceptable
+deliverable -- it collapses 253 edges -> 23 nodes before the temporal model,
+failing the graph-native requirement regardless of the number. Deliverable
+must be hermitian_ssm (eigenvector encoder; 0.436 with real Mamba, mamba3
+result pending). Real ceiling lever is more CHB-MIT subjects.
 
 Also 2026-08-29 (separate thread, `main`, not this branch): stood up
 `cg_mambanet` on a RunPod GPU end-to-end -- fixed a GHCR pull-rate-limit

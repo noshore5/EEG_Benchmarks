@@ -649,6 +649,19 @@ HERMITIAN_SSM_PARAMS: dict[str, object] = dict(
     # ("projector" 0.273, "graph" fold1 0.169, "evolution" ~chance).
     # "eigenvector" (mean AP 0.436) is the hermitian ceiling for this config.
     encoder_mode="eigenvector",
+    # temporal_mode: "fused" = one Mamba over the F-fused token (original).
+    # "per_freq" = one weight-shared Mamba lane per frequency over T, fuse
+    # the F band-summaries after. per_freq NOT a bug but ~8x slower
+    # (~831 s/epoch) and epoch-1 no better than fused -- parked.
+    temporal_mode="fused",
+    # mamba_backend: "mamba" = real-diagonal state (mambapy). "mamba3" =
+    # complex-diagonal selective SSM (Epilepsy/pipelines/mamba3.py): each
+    # state channel has a decay rate AND a rotation frequency omega, so it
+    # can integrate the cross-spectral coherence PHASE evolving over time
+    # -- the graph-native temporal model for this pipeline. Complex Blelloch
+    # pscan with a conjugation-correct backward (gradchecked fp64), ~2x a
+    # real pscan. 2026-08-29.
+    mamba_backend="mamba3",
     d_model=64,
     d_mode=32,           # "eigenvector" encoder only
     d_freq=64,
