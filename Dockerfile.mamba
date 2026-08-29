@@ -69,20 +69,24 @@ RUN set -euo pipefail; \
 # sm_80 / sm_90 = A100 / H100 if a larger pod is used later.
 ENV MAX_JOBS=4
 ENV TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0"
-# Versions pinned to an exact known-good pair for this image's torch
-# (2.8.0+cu128), NOT a floor. 2026-08-29 incident: an unbounded
-# `mamba-ssm>=2.2.2` resolved to the newest release (2.3.2.post1) at
-# build time, whose own install_requires silently pulled a torch upgrade
-# (2.8.0+cu128 -> 2.13.0+cu130) mid-`pip install`, leaving the compiled
+# Versions: floor-only again (NOT an exact pin -- tried that 2026-08-29,
+# broke the build a different way: causal-conv1d==1.4.0's PyPI sdist is
+# missing csrc/causal_conv1d.cpp, so pinning forces a source build that
+# can't even compile. The floor + a matching prebuilt wheel is what
+# actually works). `--no-deps` is the real fix for the incident this
+# comment used to describe in more detail: an unbounded
+# `mamba-ssm>=2.2.2` resolved to the newest release (2.3.2.post1), whose
+# own install_requires silently pulled a torch upgrade (2.8.0+cu128 ->
+# 2.13.0+cu130) mid-`pip install`, leaving the compiled
 # selective_scan_cuda .so linked against the OLD torch's C++ ABI while
 # the python-side torch package was the NEW one -- `import mamba_ssm`
-# then fails with `undefined symbol: ...c10_cuda_check_implementation...`
-# (found the hard way on a live RunPod pod). `--no-deps` added so this
-# class of bug can't recur even if the pin below ever needs bumping
-# without noticing a co-required torch bump.
+# then failed with `undefined symbol: ...c10_cuda_check_implementation...`
+# (found on a live RunPod pod). `--no-deps` blocks pip from ever
+# resolving/touching torch here again, regardless of which mamba-ssm
+# release the floor picks up.
 RUN set -euo pipefail; \
     pip install --break-system-packages --no-build-isolation --no-deps \
-        "causal-conv1d==1.4.0" "mamba-ssm==2.2.2"; \
+        "causal-conv1d>=1.4.0" "mamba-ssm>=2.2.2"; \
     python3 -c "import torch; assert torch.__version__.startswith('2.8.0'), torch.__version__"; \
     so_count=$(find /usr -name 'selective_scan_cuda*.so' 2>/dev/null | wc -l); \
     echo "selective_scan_cuda .so files found: $so_count"; \
