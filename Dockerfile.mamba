@@ -92,6 +92,17 @@ RUN set -euo pipefail; \
     echo "selective_scan_cuda .so files found: $so_count"; \
     [ "$so_count" -ge 1 ]
 
+# --no-deps above also skips mamba-ssm's own runtime (not build) deps, so
+# `import mamba_ssm` still failed on a live pod (2026-08-29) walking its
+# mamba2.py -> generation.py import chain: ModuleNotFoundError for
+# huggingface_hub, then transformers. Installed separately (not via
+# mamba-ssm's own requires) so we don't reopen the --no-deps hole -- these
+# two are pure-Python, no torch/ABI exposure. Can't add a build-time
+# `import mamba_ssm` check here for the same libcuda-needs-a-driver reason
+# as the .so-file-exists check above; verified on a live pod instead.
+RUN pip install --break-system-packages huggingface_hub transformers; \
+    python3 -c "import torch; assert torch.__version__.startswith('2.8.0'), torch.__version__"
+
 # Repo code. Listed explicitly so Epilepsy/results, exports, BCI, .git
 # never land in the image.
 COPY datasets/ /workspace/datasets/
