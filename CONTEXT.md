@@ -30,11 +30,21 @@ architecture search:
   backward, gradchecked fp64, ~2x a real pscan (~200 s/epoch expected).
   This is the graph-native temporal model -- it integrates the coherence
   PHASE over time instead of a dense layer interpreting a number.
-User's position: `temporal_graph_mamba` "pre" (0.674) is NOT an acceptable
-deliverable -- it collapses 253 edges -> 23 nodes before the temporal model,
-failing the graph-native requirement regardless of the number. Deliverable
-must be hermitian_ssm (eigenvector encoder; 0.436 with real Mamba, mamba3
-result pending). Real ceiling lever is more CHB-MIT subjects.
+User's position (2026-08-29): `temporal_graph_mamba` "pre" (0.674) is NOT
+an acceptable deliverable -- it collapses 253 edges -> 23 nodes *before*
+the temporal model, failing the graph-native requirement regardless of the
+number. Acceptable deliverables, in preference order:
+  1. hermitian_ssm (eigenvector encoder; 0.436 real Mamba, mamba3 pending).
+  2. **`temporal_graph_aggregate="post"`** -- FALLBACK if the hermitian +
+     mamba3 experiments all fail. "post" runs Mamba over each of the ~253
+     EDGE sequences first, aggregates to nodes *after* -> the graph flows
+     through the temporal model, which meets the graph-native bar. Its
+     6-fold was a near-wash (mean AP 0.639 vs "pre" 0.674, ROC-AUC 0.970
+     vs 0.94; see the post A/B thread below) and the user prefers it to
+     "pre" on architecture despite the ~11x compute. Revert to it (flip
+     `temporal_graph_aggregate="post"` in `PREDICTION_TEMPORAL_GRAPH_MAMBA_
+     PARAMS`) if hermitian doesn't pan out.
+Real ceiling lever is more CHB-MIT subjects, not architecture.
 
 Also 2026-08-29 (separate thread, `main`, not this branch): stood up
 `cg_mambanet` on a RunPod GPU end-to-end -- fixed a GHCR pull-rate-limit
@@ -129,9 +139,13 @@ Prior (2026-08-28) session work:
   the full edge graph. Full 6-fold: mean AP **0.639 vs "pre" 0.674**
   (gap is entirely fold 1_03), ROC-AUC **0.970 vs 0.94** (slightly
   better global ranker), hit rate 6/6 raw+sm vs 6/6 raw / 5/6 sm.
-  4/6 folds >= pre. ~11x compute for a tie -> **default stays "pre"**,
-  knob parked in code. CSVs `*20260828-161354*`. See
+  4/6 folds >= pre. ~11x compute for a tie -> **committed default stays
+  "pre"**, knob parked in code. CSVs `*20260828-161354*`. See
   `Session_notes/2026_08_28/temporal_graph_aggregate_post_6fold.md`.
+  **2026-08-29: "post" is now the FALLBACK deliverable** -- the graph
+  flows through the temporal model (edge Mambas, aggregate after), which
+  meets the user's graph-native bar; "pre" does not. If hermitian_ssm +
+  mamba3 all fail, revert to "post" (see the User's-position note at top).
 - **Negative/null-results pattern (2026-08-28):** attempts to improve
   `temporal_graph_mamba` by adding capacity/richness: wide-band (NEG,
   0.79->0.24 fold 1), reg-tuning 2026-08-27 (NEG), "post" (WASH on full
