@@ -1006,39 +1006,55 @@ PREDICTION_SLIMSEIZ_PARAMS: dict[str, object] = dict(
 
 # 2026-08-26: CGMambaNetClassifier, run under THIS REPO'S OWN protocol (not
 # a paper-exact reproduction -- see cg_mambanet_classifier.py's module
-# docstring for every deviation). Hyperparameters below are the paper's own
-# stated architecture numbers (12 Mamba layers, d_state=64, d_conv=4, 2 GCN
-# layers, BiLSTM hidden=128/direction, dropout=0.3) where the paper gives
-# them; training-dynamics knobs (batch_size, learning_rate, validation_
-# split, early_stopping_patience) match DBConformer/SlimSeiz's own matched-
-# protocol values, not tuned separately. patch_size=256 = 1 patch/second at
-# this repo's native 256Hz (7680/256=30 patches for the 30s prediction
-# window, 1024/256=4 for the 4s detection window -- both divide evenly).
+# docstring for every deviation).
+#
+# 2026-08-29 CAPACITY CUT (post-first-real-run diagnosis, see
+# pipeline_comparison_gru_mamba_dbconformer_slimseiz.md's CG-MambaNet
+# addendum): the paper's literal architecture numbers (12 Mamba layers,
+# d_state=64, BiLSTM hidden=128/2 layers -- kept as the original values
+# below in comments) were trained on the paper's own pooled cross-patient
+# dataset (their AUC 0.8152 uses ~12+ patients' data at once). This repo's
+# protocol is per-subject LOSO on ONE patient (~900-3500 training windows
+# per fold) -- 2-3 orders of magnitude less data than the paper's own
+# training regime for the SAME parameter count. The first real 6-fold run
+# (20260829-114933) showed exactly the signature of that mismatch on every
+# fold: train roc_auc -> ~1.0 by epoch 6-9, val_loss then rising sharply,
+# early-stopping's restored checkpoint sitting at epoch 3-8 of 20. Cutting
+# capacity to roughly match this data scale, plus real regularization
+# (grad clipping wasn't even on):
+#   mamba_n_layers   12 -> 3   (was matching paper's cross-patient scale)
+#   mamba_d_state    64 -> 16  (matches dense_edge_mamba's own d_state=16)
+#   mamba_expand_factor 2 -> 1
+#   d_embed          64 -> 32
+#   lstm_hidden     128 -> 64
+#   lstm_layers       2 -> 1   (drops lstm_dropout, PyTorch ignores it at 1 layer anyway)
+#   head_dropout    0.3 -> 0.5
+#   weight_decay   1e-4 -> 3e-3
+#   grad_clip_norm None -> 1.0  (wasn't set at all before -- pure oversight)
+#   early_stopping_patience 5 -> 3 (every fold overfit well inside 5 already)
+# This is a data-scale-matched variant, not a claim that it's the paper's
+# architecture -- if/when the deferred cross-patient reproduction (see
+# module docstring) happens, go back to the paper-literal numbers in the
+# comments above, not these.
 _CG_MAMBANET_SHARED_PARAMS: dict[str, object] = dict(
     seed=42,
     device="mps",
     patch_size=256,
-    # d_embed=64: decouples the GCN/Mamba/BiLSTM embedding width from
-    # patch_size -- see cg_mambanet_classifier.py's "CNN front-end -> GCN
-    # handoff" docstring entry. Set to None (paper-literal d=patch_size)
-    # once this runs on the RunPod CUDA image with the fused mamba-ssm
-    # kernel; on this Mac's portable mambapy pscan, d_embed=None measured
-    # ~93s/batch at SMOKE scale (2026-08-26) -- impractical to train.
-    d_embed=64,
+    d_embed=32,  # was 64 (paper's d=patch_size reading only reachable on CUDA anyway)
     gcn_layers=2,
-    mamba_n_layers=12,
-    mamba_d_state=64,
+    mamba_n_layers=3,  # was 12
+    mamba_d_state=16,  # was 64
     mamba_d_conv=4,
-    mamba_expand_factor=2,
-    lstm_hidden=128,
-    lstm_layers=2,
-    lstm_dropout=0.3,
-    head_dropout=0.3,
+    mamba_expand_factor=1,  # was 2
+    lstm_hidden=64,  # was 128
+    lstm_layers=1,  # was 2
+    lstm_dropout=0.3,  # inert at lstm_layers=1, left as a value for when it isn't
+    head_dropout=0.5,  # was 0.3
     normalize_input=True,
     channel_select_fixed_indices=CG_MAMBANET_CHANNEL_INDICES,
-    weight_decay=1e-4,
-    grad_clip_norm=None,
-    early_stopping_patience=5,
+    weight_decay=3e-3,  # was 1e-4
+    grad_clip_norm=1.0,  # was None
+    early_stopping_patience=3,  # was 5
     use_class_weights=True,
     verbose=1,
 )

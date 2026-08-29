@@ -761,6 +761,33 @@ read off a continuous timeline). See "Open threads" below.
 
 ## Open threads
 
+- **`cg_mambanet` capacity cut (2026-08-29, uncommitted-until-now change in
+  `run_pipelines.py`'s `_CG_MAMBANET_SHARED_PARAMS`), not yet re-run.** The
+  first real 6-fold run (`20260829-114933`, on RunPod CUDA) was well
+  behind every other pipeline in the comparison table (AP 0.127 vs.
+  0.42-0.50) with an overfitting signature on every fold (train roc_auc ->
+  ~1.0 by epoch 6-9, val_loss spiking right after, best checkpoint at
+  epoch 3-8 of 20) -- diagnosed as the paper's cross-patient-scale
+  architecture (12 Mamba layers, d_state=64, BiLSTM hidden=128x2) massively
+  overparameterized for this repo's per-subject LOSO protocol (~900-3500
+  training windows/fold vs. the paper's own pooled ~12+-patient training
+  set). Cut to mamba_n_layers=3, d_state=16, expand_factor=1, d_embed=32,
+  lstm_hidden=64/1-layer, head_dropout=0.5, weight_decay=3e-3,
+  grad_clip_norm=1.0 (was unset -- pure oversight), early_stopping_
+  patience=3. Original paper-literal values kept as comments for the
+  still-deferred cross-patient reproduction. **Next step: re-run the
+  6-fold chb01 prediction LOSO test with this smaller config** -- likely
+  runnable locally now (no RunPod needed) since the cut takes the
+  bidirectional Mamba stack from 24 to 6 total directional instances at
+  1/4 the d_state, well below the `mambapy` CPU/MPS pscan scaling-wall
+  regime measured 2026-08-26, but this hasn't actually been timed yet --
+  do a `--smoke` timing check before committing to a full run. See
+  `pipeline_comparison_gru_mamba_dbconformer_slimseiz.md`'s CG-MambaNet
+  addendum for the full diagnosis and the two other latent issues flagged
+  but not yet fixed (unconstrained/unsquashed learnable adjacency in
+  `_LearnableGCN` -- no NaN observed yet but no softmax/ReLU guards it
+  either; weight_decay applied uniformly including Mamba's own SSM params
+  A_log/D/dt_bias, which most Mamba training recipes exclude).
 - **CWT frequency band (`lowest=8.0, highest=40.0, nfreqs=8`) is an
   untuned motor-imagery-BCI leftover, never revisited for epilepsy
   (traced 2026-08-27).** `Session_notes/2026_08_15/chb_mit_dataset_and_
