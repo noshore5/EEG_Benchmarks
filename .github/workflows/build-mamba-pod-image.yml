@@ -37,6 +37,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Mirror to Docker Hub too -- GHCR's anonymous per-IP pull rate limit
+      # was blocking RunPod pod boots outright (2026-08-29, ~1hr stuck in a
+      # toomanyrequests retry loop pulling ghcr.io from a RunPod host).
+      # Docker Hub's anonymous limit is more generous and RunPod's own base
+      # images already pull from Docker Hub, so that path is well-trodden.
+      - uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Compute image tag
         id: tag
         run: echo "tag=$(date -u +%Y%m%d)-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
@@ -52,5 +63,7 @@ jobs:
           tags: |
             ghcr.io/noshore5/eeg_benchmarks-mamba:${{ steps.tag.outputs.tag }}
             ghcr.io/noshore5/eeg_benchmarks-mamba:latest
+            docker.io/noshore5/eeg_benchmarks-mamba:${{ steps.tag.outputs.tag }}
+            docker.io/noshore5/eeg_benchmarks-mamba:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
