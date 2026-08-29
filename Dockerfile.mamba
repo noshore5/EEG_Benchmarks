@@ -69,14 +69,21 @@ RUN set -euo pipefail; \
 # sm_80 / sm_90 = A100 / H100 if a larger pod is used later.
 ENV MAX_JOBS=4
 ENV TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0"
-# Versions: not pinned to a patch -- mamba-ssm wheels/sdists track the
-# torch in the environment when --no-build-isolation is set. Brief asked
-# not to copy a version number from an old blog post. Both packages are
-# installed from PyPI at image-build time; the resulting versions are
-# visible in `pip show mamba-ssm causal-conv1d` inside the image.
+# Versions pinned to an exact known-good pair for this image's torch
+# (2.8.0+cu128), NOT a floor. 2026-08-29 incident: an unbounded
+# `mamba-ssm>=2.2.2` resolved to the newest release (2.3.2.post1) at
+# build time, whose own install_requires silently pulled a torch upgrade
+# (2.8.0+cu128 -> 2.13.0+cu130) mid-`pip install`, leaving the compiled
+# selective_scan_cuda .so linked against the OLD torch's C++ ABI while
+# the python-side torch package was the NEW one -- `import mamba_ssm`
+# then fails with `undefined symbol: ...c10_cuda_check_implementation...`
+# (found the hard way on a live RunPod pod). `--no-deps` added so this
+# class of bug can't recur even if the pin below ever needs bumping
+# without noticing a co-required torch bump.
 RUN set -euo pipefail; \
-    pip install --break-system-packages --no-build-isolation \
-        "causal-conv1d>=1.4.0" "mamba-ssm>=2.2.2"; \
+    pip install --break-system-packages --no-build-isolation --no-deps \
+        "causal-conv1d==1.4.0" "mamba-ssm==2.2.2"; \
+    python3 -c "import torch; assert torch.__version__.startswith('2.8.0'), torch.__version__"; \
     so_count=$(find /usr -name 'selective_scan_cuda*.so' 2>/dev/null | wc -l); \
     echo "selective_scan_cuda .so files found: $so_count"; \
     [ "$so_count" -ge 1 ]
