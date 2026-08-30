@@ -9,36 +9,80 @@ Claude/Grok shells that don't share context with each other, and this is
 the one file meant to catch a new shell up without it re-reading
 everything.
 
-**Last updated:** 2026-08-30, by Claude (Mac shell). On `main` (another
-shell switched off `graph-state-mamba`; hermitian work committed straight
-to `main` -- `68dd589`, `7d672e1`, `a799a57`, all pushed). Working tree:
-`run_pipelines.py` uncommitted (the `spectral_k` change for the k-axis run
-below, PLUS an unrelated `_CG_MAMBANET_SHARED_PARAMS` capacity cut that is
-another shell's cg_mambanet work -- don't commit that one).
+**Last updated:** 2026-08-30, by Claude (Mac shell). On `main`. Uncommitted
+working tree (all this session, all smoke-tested, commit once the running/
+queued results land):
+- `run_pipelines.py`: `HERMITIAN_SSM_PARAMS` only -- `encoder_mode` ->
+  `"complex"`, `mamba_backend` -> `"mamba"` (mamba3 revert), `spectral_k`
+  comment. (The old `_CG_MAMBANET_SHARED_PARAMS` other-shell edit is NO
+  LONGER in the tree.)
+- `hermitian_ssm_classifier.py`: +`_ComplexSpectralEncoder`
+  (`encoder_mode="complex"`), +`_ComplexMatrixEncoder` (`encoder_mode="matrix"`).
+- `cwt_gnn_classifiers.py`: +`_ComplexLinear`, +`temporal_graph_edge_complex`
+  knob (built genuinely last in `SparseEvidenceGNNCore.__init__` -- flag-off
+  RNG is bit-identical, verified).
+- Queued runs use scratchpad monkeypatch wrappers (`run_post.py`,
+  `run_matrix.py`, `run_edge_complex.py`) -- NO further source edits needed.
 
-**Active state 2026-08-30:** hermitian architecture search -- temporal-model
-levers exhausted, moving to the k (eigenpair count) axis.
+**RUN DISCIPLINE (2026-08-30, user directive):** running on this Mac is
+free. There must ALWAYS be a job queued/running -- do NOT stop and idle
+waiting for the user's approval on "what's next" (that wasted ~6h of
+overnight compute once). Queue the next experiment and start it; the user
+will stop it if they don't want it. Keep `scratchpad/queue_runner.sh`
+topped up.
+
+**Active state 2026-08-30:** the supervised hermitian architecture search
+is effectively DONE (every lever negative-to-wash). Live direction: the
+task **reframed as graph-state anomaly detection** -- train on interictal
+only, flag preictal as departure from normal. Early smoke is the best
+signal the direction has produced (see below).
 - **encoder variants CLOSED NEGATIVE** (eigenvector 0.436 is the ceiling;
-  projector 0.273, graph 0.169 fold-1, evolution ~chance -- worse the more
-  channel identity dropped). `Session_notes/2026_08_29/hermitian_ssm_bandmatch_6fold.md`.
-- **`temporal_mode="per_freq"`** (one Mamba lane per frequency, fuse after)
-  BUILT -- NOT a bug (epoch-1 val_auc 0.77 is normal) but ~8x slower
-  (~831 s/epoch), no epoch-1 advantage. Parked.
-- **`mamba_backend="mamba3"`** (`Epilepsy/pipelines/mamba3.py`, complex-
-  diagonal selective SSM, lambda=-exp(a)+i*omega, `_ComplexPScan` complex
-  Blelloch pscan w/ conjugation-correct backward, gradchecked fp64) --
-  BUILT + VERIFIED, 6-fold done: **NEGATIVE, mean AP 0.408 vs real-Mamba
-  0.436** (worse ROC-AUC + k-of-n hits too). Fold 1 the only win; folds
-  3-6 gave it back. Healthy internal curves every fold, no held-out gain
-  -- fragility thesis confirmed from the temporal side.
-  `Session_notes/2026_08_29/mamba3_and_perfreq.md`.
-- **k axis (NEXT, RUNNING):** k=2->6 was +0.18 AP (biggest jump found),
-  k=6->23 never measured. Rebuilding spectral cache at **k=12** (real-Mamba
-  backend, clean A/B vs 0.436). If 6->12 moves AP -> k=23; if flat, the
-  hermitian ceiling is confirmed and deliverable reverts to "post".
-- **`mamba_backend` committed default is still `"mamba3"`** (`7d672e1`, set
-  before the negative result) -- revert to `"mamba"`, doing it with the
-  k-axis commit.
+  projector 0.273, graph 0.169, evolution ~chance). `Session_notes/2026_08_29/`.
+- **`mamba_backend="mamba3"`** (complex-diagonal SSM) -- 6-fold **NEGATIVE
+  0.408 vs 0.436**. `Session_notes/2026_08_29/mamba3_and_perfreq.md`.
+- **k axis CLOSED NEGATIVE:** k=6->12 6-fold **0.390 vs 0.436** (lost 5/6
+  folds). k=6 cache key `9d6ad0d850b8b8f0`. k=12 cache was `293ac41c6e53675f`
+  -- **deleted** (20 GB freed).
+- **`encoder_mode="complex"` (`_ComplexSpectralEncoder`) -- KILLED at 3/6.**
+  De-engineered eigenvector encoder (`_ComplexLinear`, lambda-scaled,
+  mean-pool, flatten once at end; 3.35x fewer params). Trailing:
+  0.291/0.318/0.312 vs 0.254/0.324/0.414. Same wash-to-worse as every
+  lever. Methods story ("matches baseline, far less engineering") is the
+  user's call; not a win on the number.
+- **`encoder_mode="matrix"` -- KILLED at 3/6, NEGATIVE.** 0.213 / 0.290 /
+  0.349 vs eigenvector 0.254 / 0.324 / 0.414. Consistently ~0.06 under
+  eigenvector but well above `graph` (0.169): the complex channel-mix
+  beats the flatten hack, but the **rank-6 truncation is the binding
+  ceiling** -- no encoding trick on 6 modes reaches 0.436. High FAR.
+- **`HermitianSSMAnomaly` v1 -- FAILED, fold 1 AP 0.029.** Next-token MSE
+  collapsed to persistence (val MSE 0.0009, score had no spread). The
+  smoke's ROC-AUC 0.80 was an artifact of stopping at 2 epochs pre-collapse.
+  **v2 fix:** predict the *direction* of the h-step (h=8) token change,
+  not the next token -- persistence now costs a real error of 1.0.
+  Re-queued as `anomaly_v2`. `Epilepsy/pipelines/hermitian_ssm_anomaly.py`.
+- **`ChannelCWTMambaClassifier`** (`Epilepsy/pipelines/channel_cwt_mamba.py`,
+  NEW): the missing null -- per-channel CWT (no coherence at all) ->
+  z-scored [Re w, Im w] -> per-channel Linear -> ONE weight-shared Mamba
+  over each channel's T sequence -> mean over channels -> 2 logits.
+  Band-matched to the k=6 hermitian cache (8-40 Hz, F_out=8, td=16). Own
+  small per-recording CWT cache (reuses `_MorletCWT`). Drops "pre"'s
+  n-hop message passing. Smoke (2 epochs, degraded): fold 1 AP 0.501,
+  hit=True. Answers: does coherence buy anything over raw per-channel
+  spectra + a shared-weight temporal model? Queued as `channel_cwt`.
+- **THE QUEUE** (`queue_runner3.sh` pid ~62767 + `queue_runner6.sh` pid
+  ~65970; monitor via `scratchpad/queue_runner.log`):
+  1. `continuous_cwt_mamba` 6-fold on CPU -- **RUNNING** (smoke passed;
+     the 2026-08-26 CUDA "illegal memory access" did NOT reproduce on CPU).
+  2. `run_edge_complex.py` -- "post" + `temporal_graph_edge_complex=True`
+     (fixed: the edge stack is `[coh, sinφ, cosφ, sig]`, so
+     `coh = mag·(cosφ + i·sinφ)`). ~11 h.
+  3. `run_channel_cwt.py` -- `ChannelCWTMambaClassifier` 6-fold (~1 h).
+  4. `run_anomaly.py` -- `HermitianSSMAnomaly` **v2** 6-fold (~3-4 h).
+  5. `run_post.py` -- fresh "post" 0.639 baseline. ~11 h.
+- **Commit pending** (once queued results land): `run_pipelines.py`
+  (`HERMITIAN_SSM_PARAMS` comments + `encoder_mode` + `mamba_backend`
+  revert from stale `"mamba3"` `7d672e1`), `hermitian_ssm_classifier.py`,
+  `cwt_gnn_classifiers.py`, `hermitian_ssm_anomaly.py`, `channel_cwt_mamba.py`.
 User's position (2026-08-29): `temporal_graph_mamba` "pre" (0.674) is NOT
 an acceptable deliverable -- it collapses 253 edges -> 23 nodes *before*
 the temporal model, failing the graph-native requirement regardless of the
@@ -772,33 +816,34 @@ read off a continuous timeline). See "Open threads" below.
 
 ## Open threads
 
-- **`cg_mambanet` capacity cut (2026-08-29, uncommitted-until-now change in
-  `run_pipelines.py`'s `_CG_MAMBANET_SHARED_PARAMS`), not yet re-run.** The
-  first real 6-fold run (`20260829-114933`, on RunPod CUDA) was well
-  behind every other pipeline in the comparison table (AP 0.127 vs.
-  0.42-0.50) with an overfitting signature on every fold (train roc_auc ->
-  ~1.0 by epoch 6-9, val_loss spiking right after, best checkpoint at
-  epoch 3-8 of 20) -- diagnosed as the paper's cross-patient-scale
-  architecture (12 Mamba layers, d_state=64, BiLSTM hidden=128x2) massively
-  overparameterized for this repo's per-subject LOSO protocol (~900-3500
-  training windows/fold vs. the paper's own pooled ~12+-patient training
-  set). Cut to mamba_n_layers=3, d_state=16, expand_factor=1, d_embed=32,
-  lstm_hidden=64/1-layer, head_dropout=0.5, weight_decay=3e-3,
-  grad_clip_norm=1.0 (was unset -- pure oversight), early_stopping_
-  patience=3. Original paper-literal values kept as comments for the
-  still-deferred cross-patient reproduction. **Next step: re-run the
-  6-fold chb01 prediction LOSO test with this smaller config** -- likely
-  runnable locally now (no RunPod needed) since the cut takes the
-  bidirectional Mamba stack from 24 to 6 total directional instances at
-  1/4 the d_state, well below the `mambapy` CPU/MPS pscan scaling-wall
-  regime measured 2026-08-26, but this hasn't actually been timed yet --
-  do a `--smoke` timing check before committing to a full run. See
-  `pipeline_comparison_gru_mamba_dbconformer_slimseiz.md`'s CG-MambaNet
-  addendum for the full diagnosis and the two other latent issues flagged
-  but not yet fixed (unconstrained/unsquashed learnable adjacency in
-  `_LearnableGCN` -- no NaN observed yet but no softmax/ReLU guards it
-  either; weight_decay applied uniformly including Mamba's own SSM params
-  A_log/D/dt_bias, which most Mamba training recipes exclude).
+- **`cg_mambanet` capacity cut (2026-08-29, `run_pipelines.py` commit
+  `b4ee0db`) re-run 2026-08-30 (RunPod, `-135306`) -- DID NOT FIX IT,
+  basically a wash.** The first real 6-fold run (`20260829-114933`) was
+  well behind every other pipeline in the comparison table (AP 0.127 vs.
+  0.42-0.50) with an overfitting signature (train roc_auc -> ~1.0 by
+  epoch 6-9, val_loss spiking, best checkpoint epoch 3-8/20) --
+  diagnosed as the paper's cross-patient-scale architecture (12 Mamba
+  layers, d_state=64, BiLSTM 128x2) overparameterized for this repo's
+  per-subject LOSO protocol (~900-3500 windows/fold vs. the paper's own
+  pooled ~12+-patient set). Cut to mamba_n_layers=3, d_state=16,
+  expand_factor=1, d_embed=32, lstm_hidden=64/1-layer, head_dropout=0.5,
+  weight_decay=3e-3, grad_clip_norm=1.0 (was unset), early_stopping_
+  patience=3 and re-ran the same protocol: AP ticked up marginally
+  (0.127->0.139) but accuracy/precision/recall/f1/AUC/FAR-h all got
+  *worse* (e.g. AUC 0.797->0.774, FAR/h-smoothed 1.50->2.62), k-of-n hit
+  rate unchanged at 3/6. Per-epoch train/val gap WAS visibly healthier
+  this run (confirms the overfitting diagnosis wasn't wrong), but that
+  didn't translate into better held-out numbers -- so capacity wasn't the
+  whole story, or the cut cost more useful capacity than overfitting
+  margin. See `pipeline_comparison_gru_mamba_dbconformer_slimseiz.md`'s
+  CG-MambaNet addendum ("Capacity-cut follow-up") for the full before/
+  after table. **Not resolved -- next step (if pursued further) would be
+  a capacity SWEEP (a few sizes between the two extremes already tried),
+  not another single before/after point.** Two other latent issues still
+  flagged, not yet fixed: unconstrained/unsquashed learnable adjacency in
+  `_LearnableGCN` (no NaN observed yet but no softmax/ReLU guards it
+  either); weight_decay applied uniformly including Mamba's own SSM
+  params A_log/D/dt_bias, which most Mamba training recipes exclude.
 - **CWT frequency band (`lowest=8.0, highest=40.0, nfreqs=8`) is an
   untuned motor-imagery-BCI leftover, never revisited for epilepsy
   (traced 2026-08-27).** `Session_notes/2026_08_15/chb_mit_dataset_and_

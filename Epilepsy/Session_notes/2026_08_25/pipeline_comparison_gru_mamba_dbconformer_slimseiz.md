@@ -243,6 +243,50 @@ verdict on the paper's own architecture until that's tried, but on this
 protocol, as reconstructed and run once, it underperforms every pipeline
 already in this repo.
 
+### Capacity-cut follow-up (2026-08-30) -- did NOT fix it
+
+Diagnosed the above as overfitting from running the paper's cross-patient-
+scale architecture (12 Mamba layers, d_state=64, BiLSTM 128x2) on a
+single-patient LOSO fold (~900-3500 training windows, vs. the paper's own
+pooled ~12+-patient training set). Cut capacity accordingly
+(`run_pipelines.py` commit `b4ee0db`: mamba_n_layers 12->3, d_state 64->16,
+expand_factor 2->1, d_embed 64->32, lstm_hidden 128->64/1-layer,
+head_dropout 0.3->0.5, weight_decay 1e-4->3e-3, grad_clip_norm None->1.0,
+early_stopping_patience 5->3) and re-ran the same 6-fold protocol
+(`prediction_leave_one_seizure_out_20260830-135306.csv` -- per-fold CSV
+not saved locally this run, pod was terminated before it was pulled down;
+numbers below are from the run log's printed summary, which is complete
+for the aggregate row and the per-seizure FAR/h-precision-recall-f1-hit
+line but doesn't have per-fold accuracy/AP/AUC/n_train):
+
+| metric | full-capacity (`-114933`) | capacity-cut (`-135306`) |
+|---|---|---|
+| accuracy | 0.837 | 0.806 |
+| precision | 0.124 | 0.103 |
+| recall | 0.516 | 0.472 |
+| f1 | 0.197 | 0.167 |
+| AP | 0.127 | 0.139 (marginal +) |
+| AUC | 0.797 | 0.774 (worse) |
+| FAR/h raw | 17.90 | 21.57 (worse) |
+| FAR/h smoothed | 1.50 | 2.62 (worse) |
+| hit rate, raw | 6/6 | 6/6 |
+| hit rate, k-of-n | 3/6 | 3/6 (unchanged) |
+
+**Basically a wash, slightly worse on most metrics.** Per-epoch logs did
+show a healthier train/val gap this run (val_roc_auc tracked train roc_auc
+much more closely before diverging, vs. the original run's near-1.0
+train-roc_auc-by-epoch-6 collapse), so the overfitting diagnosis itself
+wasn't wrong -- fixing it just didn't translate into better held-out
+performance. Two readings, not distinguished by this one run: (a) capacity
+wasn't actually this architecture's dominant bottleneck on this protocol
+-- something else (the CNN-front-end/GCN/Mamba/BiLSTM stack itself,
+labeling, or negative-sampling ratio) is capping it lower than the other
+four pipelines regardless of size, or (b) the cut removed genuinely useful
+capacity along with the overfitting-prone excess, landing at a worse
+point on the capacity/generalization curve rather than a better one. Not
+resolved -- would need a capacity sweep (try a few sizes between the two
+extremes) to tell which, not a single before/after pair.
+
 ## Caveats
 
 - Four different training runs, four different random seeds/environments
