@@ -157,6 +157,7 @@ from Epilepsy.pipelines.truong_stft_cnn_classifier import TruongSTFTCNNClassifie
 from Epilepsy.pipelines.dbconformer_classifier import DBConformerClassifier
 from Epilepsy.pipelines.slimseiz_classifier import SlimSeizClassifier
 from Epilepsy.pipelines.cg_mambanet_classifier import CGMambaNetClassifier
+from Epilepsy.pipelines.godoy_tmc_classifier import GodoyTMCClassifier
 
 
 def resolve_disable_disk_cache(device, explicit: bool | None) -> bool:
@@ -1073,18 +1074,61 @@ PREDICTION_CG_MAMBANET_PARAMS: dict[str, object] = dict(
     validation_split=0.2,
 )
 
+# 2026-08-30: GodoyTMCClassifier (TMC-T), built from arXiv:2209.11172 --
+# see godoy_tmc_classifier.py's module docstring for the full reasoning
+# (found while looking for a per-subject-LOSO-comparable SOTA benchmark
+# after CG-MambaNet's cross-patient evaluation turned out not to be one).
+# Hyperparameters below are the paper's own stated TMC-T numbers (8
+# attention heads, ffn_hidden=64, d_model=32, dropout=0.1) where the paper
+# gives them; training-dynamics knobs not stated by the paper
+# (batch_size, learning_rate, validation_split, early_stopping_patience)
+# match DBConformer/SlimSeiz/CG-MambaNet's own matched-protocol values.
+_GODOY_TMC_SHARED_PARAMS: dict[str, object] = dict(
+    seed=42,
+    device="mps",
+    d_model=32,
+    n_heads=8,
+    ffn_hidden=64,
+    n_encoder_layers=1,
+    dropout=0.1,
+    head_hidden=128,
+    head_dropout=0.5,
+    normalize_input=True,
+    weight_decay=1e-4,
+    grad_clip_norm=1.0,
+    early_stopping_patience=5,
+    use_class_weights=True,
+    verbose=1,
+)
+
+GODOY_TMC_PARAMS: dict[str, object] = dict(
+    _GODOY_TMC_SHARED_PARAMS,
+    batch_size=32,
+    learning_rate=1e-3,
+    validation_split=0.2,
+)
+
+PREDICTION_GODOY_TMC_PARAMS: dict[str, object] = dict(
+    _GODOY_TMC_SHARED_PARAMS,
+    batch_size=32,
+    learning_rate=1e-3,
+    validation_split=0.2,
+)
+
 
 def _raw_classifier_family_params(pipeline: str, label_mode: str) -> dict:
-    """Param dict for --pipeline dbconformer / slimseiz / cg_mambanet x
-    --label-mode -- mirrors `_dense_family_params` above for the raw-EEG
-    classifier family. Returns the module-level dict itself (caller must
-    `dict(...)` copy before overlaying CLI overrides)."""
+    """Param dict for --pipeline dbconformer / slimseiz / cg_mambanet /
+    godoy_tmc x --label-mode -- mirrors `_dense_family_params` above for
+    the raw-EEG classifier family. Returns the module-level dict itself
+    (caller must `dict(...)` copy before overlaying CLI overrides)."""
     if pipeline == "dbconformer":
         return PREDICTION_DBCONFORMER_PARAMS if label_mode == "prediction" else DBCONFORMER_PARAMS
     if pipeline == "slimseiz":
         return PREDICTION_SLIMSEIZ_PARAMS if label_mode == "prediction" else SLIMSEIZ_PARAMS
     if pipeline == "cg_mambanet":
         return PREDICTION_CG_MAMBANET_PARAMS if label_mode == "prediction" else CG_MAMBANET_PARAMS
+    if pipeline == "godoy_tmc":
+        return PREDICTION_GODOY_TMC_PARAMS if label_mode == "prediction" else GODOY_TMC_PARAMS
     raise ValueError(f"not a raw-classifier-family pipeline: {pipeline!r}")
 
 
@@ -2661,7 +2705,7 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         "--pipeline",
         choices=[
             "dense_edge_gru", "dense_edge", "dense_edge_mamba", "continuous_cwt_mamba",
-            "truong_stft_cnn", "dbconformer", "slimseiz", "cg_mambanet",
+            "truong_stft_cnn", "dbconformer", "slimseiz", "cg_mambanet", "godoy_tmc",
             "temporal_graph_gru", "temporal_graph_mamba", "hermitian_ssm",
         ],
         default="dense_edge_gru",
@@ -2740,6 +2784,18 @@ def _build_argument_parser() -> argparse.ArgumentParser:
             "fixed 16-channel montage (CG_MAMBANET_CHANNEL_INDICES) -- chb01-only "
             "(--subjects must be [1]). Respects --label-mode; results go under "
             "results/cg_mambanet/. "
+            "'godoy_tmc' (2026-08-30): TMC-T, a conv-tokenizer + Transformer-encoder "
+            "architecture built from Godoy et al.'s seizure-prediction paper "
+            "(arXiv:2209.11172 -- no public code; see "
+            "Epilepsy/pipelines/godoy_tmc_classifier.py's module docstring for every "
+            "interpretive choice/deviation). Found while looking for a SOTA benchmark "
+            "closer to this repo's own per-subject LOSO protocol than CG-MambaNet's "
+            "cross-patient evaluation -- Godoy et al. IS patient-specific, but their own "
+            "evaluation is a random 80/20 split (not LOSO), a known leakage risk for "
+            "seizure-prediction windows; running it here under this repo's strict LOSO "
+            "protocol is the actual point, not reproducing their (likely leakage-inflated) "
+            "chb01 number. No fixed channel montage -- runs on any --subjects. Respects "
+            "--label-mode; results go under results/godoy_tmc/. "
             "'hermitian_ssm' (2026-08-27): the 'Graph Spectral Mamba-3' design "
             "(Epilepsy/hermitian_ssm.md). A deterministic per-recording precompute "
             "(CWT -> wavelet coherence -> complex Hermitian channel graph A(f,t) -> "
@@ -3534,11 +3590,12 @@ def main(args: argparse.Namespace) -> None:
         print(means.to_string())
         print(f"event-level hit rate (raw):    {n_hits}/{n_seizures} ({100 * n_hits / n_seizures:.1f}%)")
         print(f"event-level hit rate (k-of-n): {n_hits_smoothed}/{n_seizures} ({100 * n_hits_smoothed / n_seizures:.1f}%)")
-    elif pipeline in ("dbconformer", "slimseiz", "cg_mambanet"):
+    elif pipeline in ("dbconformer", "slimseiz", "cg_mambanet", "godoy_tmc"):
         classifier_cls = {
             "dbconformer": DBConformerClassifier,
             "slimseiz": SlimSeizClassifier,
             "cg_mambanet": CGMambaNetClassifier,
+            "godoy_tmc": GodoyTMCClassifier,
         }[pipeline]
 
         if label_mode == "prediction":
