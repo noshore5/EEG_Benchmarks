@@ -62,23 +62,61 @@ signal the direction has produced (see below).
   Re-queued as `anomaly_v2`. `Epilepsy/pipelines/hermitian_ssm_anomaly.py`.
 - **`ChannelCWTMambaClassifier`** (`Epilepsy/pipelines/channel_cwt_mamba.py`,
   NEW): the missing null -- per-channel CWT (no coherence at all) ->
-  z-scored [Re w, Im w] -> per-channel Linear -> ONE weight-shared Mamba
-  over each channel's T sequence -> mean over channels -> 2 logits.
-  Band-matched to the k=6 hermitian cache (8-40 Hz, F_out=8, td=16). Own
-  small per-recording CWT cache (reuses `_MorletCWT`). Drops "pre"'s
-  n-hop message passing. Smoke (2 epochs, degraded): fold 1 AP 0.501,
-  hit=True. Answers: does coherence buy anything over raw per-channel
-  spectra + a shared-weight temporal model? Queued as `channel_cwt`.
-- **THE QUEUE** (`queue_runner3.sh` pid ~62767 + `queue_runner6.sh` pid
-  ~65970; monitor via `scratchpad/queue_runner.log`):
-  1. `continuous_cwt_mamba` 6-fold on CPU -- **RUNNING** (smoke passed;
-     the 2026-08-26 CUDA "illegal memory access" did NOT reproduce on CPU).
+  per-channel Linear -> ONE weight-shared Mamba over each channel's T
+  sequence -> mean over channels -> 2 logits. **Per-channel feature is
+  pre-matched (2026-08-30): raw power `|w|**2`, z-scored per freq, plain
+  real Linear, NO phase, NO log.** Rationale: "pre" only ever feeds the
+  model a normalized magnitude-derived quantity (coherence in [0,1]),
+  never a per-channel phase or complex value; per-channel absolute phase
+  is meaningless (only cross-pair relative phase is, and this model has
+  no pair); "pre" doesn't log either. Band-matched to the k=6 hermitian
+  cache (8-40 Hz, F_out=8, td=16). Own per-recording complex-CWT cache
+  (reuses `_MorletCWT`; unchanged by the feature rewrite -- feature is
+  derived downstream, no recompute). Drops "pre"'s n-hop message passing.
+  Component-checked; not yet smoked end-to-end with the new feature.
+  Queued as `channel_cwt`.
+- **THE QUEUE** (`queue_runner7.sh` pid ~66428; monitor via
+  `scratchpad/queue_runner.log`). `queue_runner3` + `queue_runner6` were
+  killed 2026-08-30 to jump `channel_cwt` ahead of `edge_complex`:
+  1. `run_channel_cwt.py` -- `ChannelCWTMambaClassifier` 6-fold, revised
+     pre-matched feature (~1 h). **NEXT** (machine free now).
   2. `run_edge_complex.py` -- "post" + `temporal_graph_edge_complex=True`
      (fixed: the edge stack is `[coh, sinφ, cosφ, sig]`, so
      `coh = mag·(cosφ + i·sinφ)`). ~11 h.
-  3. `run_channel_cwt.py` -- `ChannelCWTMambaClassifier` 6-fold (~1 h).
-  4. `run_anomaly.py` -- `HermitianSSMAnomaly` **v2** 6-fold (~3-4 h).
-  5. `run_post.py` -- fresh "post" 0.639 baseline. ~11 h.
+  3. `run_anomaly.py` -- `HermitianSSMAnomaly` **v2** 6-fold (~3-4 h).
+  4. `run_post.py` -- fresh "post" 0.639 baseline. ~11 h.
+  5. **ADDED 2026-08-30 (separate thread):** `godoy_tmc` real 6-fold chb01
+     prediction LOSO run -- plain CLI, no scratchpad wrapper needed (no
+     source patching involved, unlike 1-4 above). See
+     `Epilepsy/pipelines/godoy_tmc_classifier.py` (TMC-T, built from
+     arXiv:2209.11172, commit `8e3945d`) and its addition to
+     `_build_argument_parser`'s `--pipeline` help text for the full
+     reasoning. Small model (1 Transformer layer, d_model=32) --
+     expected fast on CPU/MPS, comparable to `dbconformer`/`slimseiz`'s
+     own per-fold wall-clock, nowhere near `continuous_cwt_mamba`'s or
+     `hermitian_ssm`'s. Run command:
+     ```
+     python3 Epilepsy/run_pipelines.py --pipeline godoy_tmc --label-mode prediction --device mps
+     ```
+     (swap `--device cpu` if MPS is busy with another queue item at the
+     time). No `--subjects` override needed -- unlike `cg_mambanet`,
+     `godoy_tmc` has no fixed channel montage, defaults to subject 1
+     already matching this repo's other single-subject LOSO rows anyway.
+     Results land under `Epilepsy/results/godoy_tmc/prediction/`. Once
+     it completes, add its row to `pipeline_comparison_gru_mamba_
+     dbconformer_slimseiz.md` next to the CG-MambaNet addendum -- same
+     table, same protocol, same "not the paper's own reported number"
+     framing (Godoy et al.'s own eval was a random 80/20 split, not
+     LOSO -- see the classifier's module docstring).
+- **`continuous_cwt_mamba` 6-fold -- NOT to be launched (user, 2026-08-30);
+  kept in context only.** CPU smoke (subject 1, 1 fold) ran clean into
+  training -- epoch 1 `loss=0.708 val_loss=0.743` at ~29 min (incl. one-time
+  dense-edge CWT cache build), ~15-20 min/epoch steady-state -- then killed
+  by hand at epoch 2 (rc=143, log's "smoke FAILED ... needs the bug fixed"
+  is the script's generic message, not a real failure). Takeaway: the
+  2026-08-26 CUDA "illegal memory access" during validation does NOT
+  reproduce on CPU; the pipeline trains. A full CPU 6-fold is just too slow
+  to be worth the machine time right now.
 - **Commit pending** (once queued results land): `run_pipelines.py`
   (`HERMITIAN_SSM_PARAMS` comments + `encoder_mode` + `mamba_backend`
   revert from stale `"mamba3"` `7d672e1`), `hermitian_ssm_classifier.py`,
