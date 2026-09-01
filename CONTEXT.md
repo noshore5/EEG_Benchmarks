@@ -14,8 +14,10 @@ everything.
 before re-running an experiment; add a row when you kill or conclude one.
 
 **`AWS_INFRA.md`** -- shared AWS cloud state (S3 bucket, EC2 boxes, IAM).
-**Only read it if your shell is running on an AWS instance** -- Mac / local
-shells can ignore it; nothing in the pipelines depends on it yet.
+Read it before touching the AWS account from **any** shell -- on-box or
+driving remotely from a local Mac / Grok shell (the Mac has admin creds).
+Skip it if you're only editing code / running tests; nothing in the
+pipelines depends on it yet.
 2026-09-01: `eeg-box` role now has EC2 launch/terminate + SSM perms
 (verified). GPU box still **not launched** -- setup only, no runs started.
 2026-09-01: **`eeg-cpu-box`** (`i-0a6100d4c303f52a2`, c7i.2xlarge, 8 vCPU/
