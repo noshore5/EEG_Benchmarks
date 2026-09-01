@@ -20,7 +20,7 @@
 #                        is LLM-written from the run log + context; otherwise it
 #                        falls back to the deterministic template. Note failure
 #                        never blocks the commit.
-#   GEMINI_MODEL         (default gemini-2.0-flash)
+#   GEMINI_MODEL         (default gemini-flash-latest)
 #   GIT_REMOTE_SSH       (default git@github.com:noshore5/EEG_Benchmarks.git)
 #
 # Exit codes: 0 promoted (or nothing to promote / rc!=0 -> deliberate no-op),
@@ -37,7 +37,7 @@ RUN_STARTED_UTC=${RUN_STARTED_UTC:-}
 SESSION_NOTE=${SESSION_NOTE:-}
 DEPLOY_KEY_SSM=${DEPLOY_KEY_SSM:-/eeg/github-deploy-key}
 GEMINI_KEY_SSM=${GEMINI_KEY_SSM:-/eeg/gemini-api-key}
-GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.0-flash}
+GEMINI_MODEL=${GEMINI_MODEL:-gemini-flash-latest}
 GIT_REMOTE_SSH=${GIT_REMOTE_SSH:-git@github.com:noshore5/EEG_Benchmarks.git}
 
 WL_RE='^(Epilepsy/results/|Epilepsy/Session_notes/)'   # promote whitelist
@@ -140,7 +140,8 @@ url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generate
 body = json.dumps({"contents": [{"parts": [{"text": prompt}]}]}).encode()
 req = urllib.request.Request(url, body, {"Content-Type": "application/json"})
 r = json.load(urllib.request.urlopen(req, timeout=60))
-print(r["candidates"][0]["content"]["parts"][0]["text"].strip())
+parts = r["candidates"][0]["content"]["parts"]
+print("".join(p["text"] for p in parts if "text" in p).strip())
 PY
 )
   fi
