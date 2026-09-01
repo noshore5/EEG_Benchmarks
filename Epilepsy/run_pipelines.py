@@ -120,6 +120,7 @@ prediction scores are not directly comparable.
 from __future__ import annotations
 
 import argparse
+import gc as _gc
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -1855,6 +1856,24 @@ def leave_one_seizure_out_prediction(
             f"precision={row['precision']:.3f} recall={row['recall']:.3f} "
             f"f1={row['f1']:.3f} auc_pr={row['average_precision']:.3f}"
         )
+
+        # Per-fold teardown. Without this, each fold's classifier (model
+        # weights, optimizer state, per-batch feature tensors) stays
+        # reachable through reference cycles until the cyclic GC happens to
+        # run -- on a 16GB machine the footprint climbed monotonically
+        # across the LOSO loop (fold 1 ~50s/epoch, fold 4 ~4000s/epoch as
+        # the machine started swapping). Explicit del + collect + MPS pool
+        # release keeps the working set flat fold-to-fold.
+        del clf, proba, y_score, y_pred, y_pred_smoothed
+        del X_train, y_train, X_test, y_test, meta_test
+        _gc.collect()
+        try:
+            import torch as _torch
+
+            if _torch.backends.mps.is_available():
+                _torch.mps.empty_cache()
+        except Exception:
+            pass
 
     # Cluster/timing context for the per-seizure log: gap (seconds) to the
     # nearest OTHER seizure in the same recording, directly computable from

@@ -581,10 +581,31 @@ signal the direction has produced (see below).
         *-fp16.npz` (~31 GB), then forever fp32 seed sweep (Phase B,
         `run_pre_fp32_emptycache.py`) for matched fp16-vs-fp32 rows.
         Full write-up: `Epilepsy/Session_notes/2026_09_01/fp16_dense_edge_cache_seed_sweep.md`.
-        Phase B (`_to_delete/phaseB_fp32_sweep.sh`) now sweeping matched
-        fp32 seeds 42,43,44,... for paired fp16-vs-fp32. `-fp16` cache
+        Phase B fp32 sweep: DONE at seeds 42/43/44/45 (fp16-vs-fp32 =
+        NULL, split-noise not a real dtype effect). `-fp16` cache
         deleted 09-01 (~31 GB freed); fp32 no-suffix files kept.
-        NEGATIVES.md seed-exposure row still TODO.
+        30-epoch hypothesis = NEGATIVE. NEGATIVES.md seed-exposure row
+        still TODO.
+      - **PER-FOLD MEMORY LEAK FOUND + FIXED 09-01.** `temporal_graph_mamba`
+        prediction (`leave_one_seizure_out_prediction`, run_pipelines.py
+        ~L1672 loop) never released a fold's `clf` (model/optim/feature
+        tensors) before the next fold -- footprint climbed monotonically
+        across the 6-fold LOSO loop (fold 1 ~50s/epoch -> fold 4
+        ~4000s/epoch as the 16 GB Mac hit swap; `footprint <pid>` showed
+        phys_footprint 25 GB / peak 28 GB with RSS only 289 MB). Fix:
+        explicit `del clf,...; _gc.collect(); torch.mps.empty_cache()` at
+        end of each fold (committed on `main`). This was the real cause of
+        every "page-cache thrash on folds 2-6" note above -- NOT just
+        cache size. fp32 seed-43 job (pid 34495) + old val0 driver
+        (41150) KILLED mid-fold-5 09-01 16:34; seed-43 fp32 partial
+        discarded (fp16-vs-fp32 already null).
+      - **val=0 sweep RUNNING** (driver pid 50829, `_to_delete/val0_sweep.sh`,
+        stock `run_pre_val0.py`, picks up the leak fix). epochs {12,20} x
+        seeds {42..46}, `--validation-split 0` (train 100% each fold, no
+        early stop, no ckpt restore) to kill the val-split variance
+        driver. One MPS job at a time; auto git add/commit/push per run.
+        First job: ep12 seed42 pid 50842. Watch fold-4 epoch time to
+        confirm the leak fix holds (should stay ~flat, not blow to 4000s).
       - fp16 `_load` upcasts to fp32 on load, so fp16 halves DISK + the
         DataLoader re-stream READ but NOT the resident fp32 edge tensor.
       - NEXT (user priority): AWS S3 upload of `~/mne_data/dense_edge_cache`
