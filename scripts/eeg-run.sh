@@ -117,6 +117,10 @@ mkdir -p /root/mne_data
 aws s3 sync "s3://$BUCKET/datasets" /root/mne_data || true
 export MNE_DATA=/root/mne_data PYTHONPATH=/root/repo
 
+# prefetch chb01 (S3 datasets/ is empty -> pull from PhysioNet once, outside the
+# timed run) so run.log timing reflects compute, not download
+python3 -c "import sys; sys.path.insert(0,'.'); from datasets.epilepsy import CHBMIT; CHBMIT().get_data(subjects=[1])" || true
+
 ( while true; do aws s3 cp /root/run.log "\$PFX/run.log" 2>/dev/null; sleep 20; done ) &
 TAILER=\$!
 
