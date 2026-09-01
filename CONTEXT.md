@@ -38,10 +38,13 @@ board number). Peak RSS 14.1/16 GB -- the raw-classifier LOSO path leaks
 per-fold, don't shrink the box below 16 GB. See `AWS_INFRA.md` "eeg-cpu-box
 job runner" + `Session_notes/2026_09_01/aws_cpu_box_first_run_godoy_tmc.md`.
 GPU run blocked: on-demand G quota `L-DB2E81BA` = 0 and spot G quota
-`L-3819A6DF` = 0 (both increase-requests PENDING since ~14:03 UTC); EC2-Spot
-SLR now exists (admin created it); `g5` spot capacity is out region-wide in
-us-east-1. One-shot `gpu_userdata.sh` staged at `.../_setup/` for when a
-quota clears.
+`L-3819A6DF` = 0 (both increase-requests now `CASE_OPENED` -- AWS support
+queue, not auto-approved; hours-to-days). EC2-Spot SLR exists; `g5` spot
+capacity was out region-wide in us-east-1. One-shot `gpu_userdata.sh`
+staged at `.../_setup/` for when a quota clears. eeg-box role got inline
+policy `eeg-box-extra` 2026-09-01 (servicequotas read+request, spot-SLR
+create, `ec2:CreateImage`/`ModifyInstanceAttribute`) -- eeg-box shell can
+now check quota status itself.
 
 **`Epilepsy/temporal_graph_mamba_math.md`** -- `pre` written as matrix
 operations (Hermitian coherence matrix `Gamma(f,t)` -> off-diag ->

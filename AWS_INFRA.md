@@ -28,7 +28,11 @@ it.
 **Last verified:** 2026-09-01, by Claude (eeg-box shell) -- `eeg-cpu-box`
 stood up + bootstrapped + ran its first job (`godoy_tmc` 6-fold), then
 stopped; gotchas below all hit and confirmed. Spot SLR created by admin.
-GPU quota-increase requests filed (PENDING).
+GPU quota-increase requests filed -> now `CASE_OPENED` (AWS support queue,
+not auto-approved; effective quota still 0). Admin added inline policy
+`eeg-box-extra` to the `eeg-box` role (servicequotas read + request,
+spot-SLR create, `ec2:CreateImage`/`ModifyInstanceAttribute`) -- so the
+eeg-box shell can now check quota status and bake an AMI itself.
 
 ## Where to run cloud ops from
 
@@ -215,13 +219,15 @@ cycles.
    1a `subnet-057fcd8e8ed1ec050`, 1b `subnet-07cdbc1058cf4f752`,
    1c `subnet-021f5ceeb4af26220`, 1d `subnet-00252702f59bac48f`,
    1e `subnet-0d55ae5c23cf61927`, 1f `subnet-0090cef9098097cb0`.
-5. **`eeg-box` role CANNOT:** `ec2:CreateImage` (no AMI baking),
-   `ec2:ModifyInstanceAttribute` (no termination protection, no
-   instance-type change on a stopped box -- pick the type you want up
-   front), `ssm:SendCommand` / `ssm:GetCommandInvocation` (only
-   `StartSession`), `ssm:GetParameter` (can't resolve the Canonical AMI
-   SSM alias -- use `describe-images --owners 099720109477` or the pinned
-   id above), any `iam:*`, `iam:ListInstanceProfiles`.
+5. **`eeg-box` role CANNOT:** `ssm:SendCommand` / `ssm:GetCommandInvocation`
+   (only `StartSession`), `ssm:GetParameter` (can't resolve the Canonical
+   AMI SSM alias -- use `describe-images --owners 099720109477` or the
+   pinned id above), most `iam:*`, `iam:ListInstanceProfiles`.
+   `ec2:CreateImage` + `ec2:ModifyInstanceAttribute` were **granted
+   2026-09-01** via the `eeg-box-extra` inline policy (so AMI baking and
+   instance-type change on a stopped box now work); `iam:CreateService
+   LinkedRole` for `spot.amazonaws.com` and `servicequotas:*` (read +
+   request) are in that policy too.
 6. **Tag `Project=eeg` at launch** (`--tag-specifications
    'ResourceType=instance,Tags=[{Key=Project,Value=eeg}]'`) or you can't
    stop/terminate it afterward -- those perms are tag-gated.
@@ -292,6 +298,16 @@ Old bucket `s3://coheriq-eeg-dense-edge-cache/` (referenced in
     and SSM into it. Source: `scripts/eeg-box-ec2-policy.json`.
     **Always tag launched instances `Project=eeg`** or you can't
     terminate them from here.
+  - inline policy `eeg-box-extra` (added 2026-09-01 by admin `claude`):
+    `servicequotas:GetServiceQuota` / `ListServiceQuotas` /
+    `ListRequestedServiceQuotaChangeHistory*` / `RequestServiceQuota
+    Increase` (all `*`); `iam:CreateServiceLinkedRole` gated to
+    `iam:AWSServiceName=spot.amazonaws.com`; `ec2:CreateImage` /
+    `RegisterImage` / `ModifyInstanceAttribute` / `DescribeImages` (all
+    `*`). Rationale: stop bouncing quota checks / SLR creation / AMI
+    baking through the Mac. Deliberately NOT included: unrestricted
+    `RunInstances` (the `Project=eeg` tag gate stays), `iam:*` beyond the
+    one SLR, billing.
 - **Instance profile `eeg-gpu`** -> role `eeg-gpu` (created 2026-09-01),
   same `s3-eeg-bucket` policy, plus managed policy
   `AmazonSSMManagedInstanceCore` (added 2026-09-01) so the GPU box
@@ -312,17 +328,23 @@ Old bucket `s3://coheriq-eeg-dense-edge-cache/` (referenced in
 **First read "Launching an EC2 box from eeg-box" above** -- the awscli,
 spot-SLR, vCPU-limit and tag gotchas all apply here too.
 
-**GPU quota status (2026-09-01):** on-demand G/VT (`L-DB2E81BA`) = **0**,
-spot G/VT (`L-3819A6DF`) = **0**. Both increase-requests to 8 filed
-2026-09-01 ~14:03 UTC by user `claude`, **PENDING**. Until one clears,
-*no* GPU instance launches (`VcpuLimitExceeded` on-demand /
-`MaxSpotInstanceCountExceeded` spot). Also `g5`/`g6`/`g4dn` **spot capacity
-was out region-wide** in us-east-1 that day -- us-east-1 is the most
-GPU-contended AWS region; if capacity stays dry after the quota clears,
-fall back to firing the same two requests in `us-east-2` and running there
-(pulls chb01 from the us-east-1 bucket, ~$0.14 egress). Check status:
+**GPU quota status (2026-09-01, late):** effective quotas on-demand G/VT
+(`L-DB2E81BA`) = **0**, spot G/VT (`L-3819A6DF`) = **0**. Both
+increase-requests to 8 (filed ~14:03 UTC by user `claude`) moved
+`PENDING` -> **`CASE_OPENED`** -- AWS routed them to a human support
+queue rather than auto-approving (normal for GPU-from-zero; hours to
+~2 business days). Until one clears, *no* GPU instance launches
+(`VcpuLimitExceeded` on-demand / `MaxSpotInstanceCountExceeded` spot).
+Also `g5`/`g6`/`g4dn` **spot capacity was out region-wide** in us-east-1
+that day -- us-east-1 is the most GPU-contended AWS region; if capacity
+stays dry after the quota clears, fall back to firing the same two
+requests in `us-east-2` and running there (pulls chb01 from the us-east-1
+bucket, ~$0.14 egress). Check status **from eeg-box directly** now (the
+`eeg-box-extra` policy grants it):
 `aws service-quotas list-requested-service-quota-change-history
---service-code ec2 --region us-east-1`.
+--service-code ec2 --region us-east-1` and `get-service-quota
+--service-code ec2 --quota-code L-DB2E81BA --region us-east-1` for the
+effective value.
 
 **A one-shot GPU runner is staged:**
 `s3://noshore-eeg-benchmarks-827938107865/exports/eeg_box/gpu_run/` is the
