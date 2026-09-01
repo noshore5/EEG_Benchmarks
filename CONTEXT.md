@@ -16,6 +16,8 @@ before re-running an experiment; add a row when you kill or conclude one.
 **`AWS_INFRA.md`** -- shared AWS cloud state (S3 bucket, EC2 boxes, IAM).
 **Only read it if your shell is running on an AWS instance** -- Mac / local
 shells can ignore it; nothing in the pipelines depends on it yet.
+2026-09-01: `eeg-box` role now has EC2 launch/terminate + SSM perms
+(verified). GPU box still **not launched** -- setup only, no runs started.
 
 **`Epilepsy/temporal_graph_mamba_math.md`** -- `pre` written as matrix
 operations (Hermitian coherence matrix `Gamma(f,t)` -> off-diag ->

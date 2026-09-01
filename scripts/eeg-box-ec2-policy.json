@@ -1,0 +1,24 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    { "Sid": "DescribeForLaunch", "Effect": "Allow", "Action": [
+        "ec2:DescribeInstances","ec2:DescribeInstanceStatus","ec2:DescribeInstanceTypes",
+        "ec2:DescribeInstanceTypeOfferings","ec2:DescribeImages","ec2:DescribeSubnets",
+        "ec2:DescribeSecurityGroups","ec2:DescribeVpcs","ec2:DescribeKeyPairs",
+        "ec2:DescribeVolumes","ec2:DescribeAvailabilityZones","ec2:DescribeSpotPriceHistory"
+      ], "Resource": "*" },
+    { "Sid": "RunAndTag", "Effect": "Allow", "Action": [
+        "ec2:RunInstances","ec2:CreateTags" ], "Resource": "*" },
+    { "Sid": "ManageOwnInstances", "Effect": "Allow",
+      "Action": ["ec2:TerminateInstances","ec2:StopInstances","ec2:StartInstances"],
+      "Resource": "*",
+      "Condition": { "StringEquals": { "ec2:ResourceTag/Project": "eeg" } } },
+    { "Sid": "PassGpuRole", "Effect": "Allow", "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::827938107865:role/eeg-gpu",
+      "Condition": { "StringEquals": { "iam:PassedToService": "ec2.amazonaws.com" } } },
+    { "Sid": "SsmToGpuBox", "Effect": "Allow", "Action": [
+        "ssm:StartSession","ssm:TerminateSession","ssm:ResumeSession",
+        "ssm:DescribeSessions","ssm:DescribeInstanceInformation" ],
+      "Resource": "*" }
+  ]
+}
