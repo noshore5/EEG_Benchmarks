@@ -618,7 +618,8 @@ HERMITIAN_SSM_PARAMS: dict[str, object] = dict(
     spectral_mains_notch=True,
     spectral_diagonal="zero",   # was "power"; power now enters only via eigenstructure, not the diagonal
     spectral_eigenvalue_sort="abs",
-    spectral_k=6,               # was 2; top-2 were near-redundant
+    spectral_k=6,               # k=2->6 gave +0.18 AP; k=6->12 tested 2026-08-30 = NEGATIVE
+                                # (0.390 vs 0.436), reverted. cache key 9d6ad0d850b8b8f0.
     # eigenvectors stored as float16 re/im (4 B/component vs complex64's 8):
     # halves the cache (~24->12 GB) and the training mmap so a full fold's
     # eigenvectors fit in 16 GB RAM. ~1e-3 error on unit-norm components,
@@ -649,7 +650,9 @@ HERMITIAN_SSM_PARAMS: dict[str, object] = dict(
     # lose ground monotonically with how much channel identity they drop
     # ("projector" 0.273, "graph" fold1 0.169, "evolution" ~chance).
     # "eigenvector" (mean AP 0.436) is the hermitian ceiling for this config.
-    encoder_mode="eigenvector",
+    encoder_mode="complex",   # 2026-08-30: de-engineered eigenvector encoder
+                              # (_ComplexSpectralEncoder). "eigenvector" (0.436) is the
+                              # baseline to match with ~3x fewer params + no hand-built feats.
     # temporal_mode: "fused" = one Mamba over the F-fused token (original).
     # "per_freq" = one weight-shared Mamba lane per frequency over T, fuse
     # the F band-summaries after. per_freq NOT a bug but ~8x slower
@@ -662,7 +665,8 @@ HERMITIAN_SSM_PARAMS: dict[str, object] = dict(
     # -- the graph-native temporal model for this pipeline. Complex Blelloch
     # pscan with a conjugation-correct backward (gradchecked fp64), ~2x a
     # real pscan. 2026-08-29.
-    mamba_backend="mamba3",
+    mamba_backend="mamba",   # 2026-08-30: mamba3 (complex-diagonal) 6-fold was NEGATIVE
+                             # (0.408 vs 0.436), reverted. See mamba3_and_perfreq.md.
     d_model=64,
     d_mode=32,           # "eigenvector" encoder only
     d_freq=64,

@@ -77,6 +77,8 @@ def dense_edge_cache_key(
     cwt_backend: str = "fcwt",
     channel_subset_k: int | None = None,
     channel_subset_metric: str = "abs_cosine",
+    dense_edge_source: str = "disk_cache",
+    dense_edge_ch3: str = "significance",
 ) -> str:
     """`raw_trial` is one trial's FULL [n_channels, n_time] raw (pre-
     normalization, post-channel-subset) window -- the whole trial in one
@@ -115,6 +117,15 @@ def dense_edge_cache_key(
         None if channel_subset_k is None else int(channel_subset_k),
         str(channel_subset_metric),
     )
+    # Only extend the tuple for non-default provenance, so existing
+    # "disk_cache" on-disk entries keep hashing identically to before this
+    # param existed (a running job depends on that cache).
+    if str(dense_edge_source) != "disk_cache":
+        config_tuple = config_tuple + (str(dense_edge_source),)
+    # Same non-default-only discipline: "coi_mask" changes stack channel 3,
+    # so it must not collide with a "significance" entry for the same bytes.
+    if str(dense_edge_ch3) != "significance":
+        config_tuple = config_tuple + (f"ch3={dense_edge_ch3}",)
     hasher.update(repr(config_tuple).encode("utf-8"))
     return hasher.hexdigest()
 

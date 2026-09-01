@@ -57,6 +57,26 @@ ENCODERS (``encoder_mode``):
     ``canonicalize_eigenvectors=True`` (#4) phase-fixes u_r first.
     "projector" underperformed it (0.273); see Session_notes/2026_08_29/.
 
+  "complex" (2026-08-30) -- ``_ComplexSpectralEncoder``. The *less*-
+    engineered "eigenvector": same k=6 eigenpairs, but processed by
+    complex-weight linear layers (``_ComplexLinear`` -- Re/Im blocks tied
+    to complex multiplication) instead of a free ``Linear`` on
+    ``[Re u, Im u]``; scaled by ``lambda_r``; pooled by plain ``mean`` over
+    modes then frequencies; flattened to reals once, at the end. No
+    ``mode_id``, no freq feature, no learned concat-fuse. ~3x fewer params.
+    Goal is a defensible minimal architecture, not a higher number (the
+    ~0.44 ceiling is a data-budget wall). Session_notes/2026_08_30/.
+
+  "matrix" (2026-08-30) -- ``_ComplexMatrixEncoder``. The *less*-engineered
+    "graph": same rank-k Hermitian ``A = sum_r lambda_r u_r u_r^H`` that
+    "graph" (0.169) feeds, but instead of flattening all ``C^2`` entries
+    into one real ``Linear``, a complex channel map ``W`` (``_ComplexLinear``)
+    contracts ``M = W A W^H`` (still Hermitian, ``d_ch x d_ch``), computed
+    as ``sum_r lambda_r (W u_r)(W u_r)^H`` with no ``C x C`` materialised.
+    Flatten happens once, on ``M``'s diag+triangle in the learned basis,
+    after the complex contraction. Tests whether "graph" failed on the
+    flatten hack or on the rank-k bottleneck itself. Session_notes/2026_08_30/.
+
 =========================================================================
 TEMPORAL BACKEND (``mamba_backend``):
   "mamba"  -- mambapy real-diagonal selective SSM (Mamba-1/2). Default.
@@ -84,6 +104,7 @@ import time
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from sklearn.metrics import roc_auc_score
 
 from Epilepsy.pipelines.common import resolve_torch_device, set_seed
@@ -450,6 +471,156 @@ class _SpectralEncoder(nn.Module):
         return self.freq_fuse(freq_emb.reshape(b, t, -1))             # [B,T,d_model]
 
 
+class _ComplexLinear(nn.Module):
+    """``y = W x`` with ``W``, ``x`` complex -- two real ``nn.Linear``s
+    (``W = W_re + i W_im``). The four Re/Im blocks are *tied* to complex
+    multiplication (``Re(Wx) = W_re x_re - W_im x_im``, ``Im(Wx) = W_re
+    x_im + W_im x_re``), not four free blocks like ``Linear(2*in -> out)``
+    on ``[Re x, Im x]``. Half the free parameters; the inductive bias
+    "this is a complex number" is built in rather than learned."""
+
+    def __init__(self, in_features: int, out_features: int, bias: bool = True) -> None:
+        super().__init__()
+        self.re = nn.Linear(in_features, out_features, bias=bias)
+        self.im = nn.Linear(in_features, out_features, bias=bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.complex(
+            self.re(x.real) - self.im(x.imag),
+            self.re(x.imag) + self.im(x.real),
+        )
+
+
+class _ComplexSpectralEncoder(nn.Module):
+    """Minimal, de-engineered eigenvector encoder (2026-08-30,
+    ``encoder_mode="complex"``).
+
+    Strips every hand-built part of ``_SpectralEncoder``: no ``[Re u, Im u]``
+    flatten at the front, no per-mode-slot ``mode_id`` embedding, no
+    normalised-Hz frequency feature, no learned concat-``Linear`` fusing all
+    modes / all frequencies. The complex eigenvector ``u_r`` is processed by
+    *complex-weight* layers (``_ComplexLinear``), scaled by its eigenvalue
+    ``lambda_r`` (its literal weight in ``P = sum_r lambda_r u_r u_r^H``),
+    pooled by plain ``mean`` over modes then frequencies, and flattened to
+    reals exactly once at the very end -- after the complex layers have done
+    their work, not before. ~3x fewer parameters than ``_SpectralEncoder``.
+    """
+
+    def __init__(
+        self,
+        n_channels: int,
+        n_freqs: int,
+        k: int,
+        d_model: int,
+        d_mode: int,
+        d_freq: int,
+        *,
+        fuse_freq: bool = True,
+        **_ignored: object,
+    ) -> None:
+        super().__init__()
+        self.n_channels = n_channels
+        self.n_freqs = n_freqs
+        self.k = k
+        self.fuse_freq = fuse_freq
+        self.cvec_proj = _ComplexLinear(n_channels, d_mode)
+        self.cmode_proj = _ComplexLinear(d_mode, d_freq)
+        self.to_real = nn.Linear(2 * d_freq, d_model if fuse_freq else d_freq)
+
+    @staticmethod
+    def _cgelu(z: torch.Tensor) -> torch.Tensor:
+        """GELU on the real and imaginary parts separately (standard
+        split-activation for complex nets -- the minimal nonlinearity, no
+        magnitude/phase transform)."""
+        return torch.complex(F.gelu(z.real), F.gelu(z.imag))
+
+    def forward(self, eigvals: torch.Tensor, eigvecs: torch.Tensor) -> torch.Tensor:
+        """eigvals: [B, T, F, k] real. eigvecs: [B, T, F, k, C] complex.
+        Returns [B, T, d_model] (fuse_freq) or [B, T, F, d_freq] (per-freq)."""
+        z = self.cvec_proj(eigvecs)                       # [B,T,F,k,d_mode] complex
+        z = z * eigvals.unsqueeze(-1)                     # weight by lambda_r (signed)
+        z = self._cgelu(z)
+        z = self._cgelu(self.cmode_proj(z))               # [B,T,F,k,d_freq] complex
+        z = z.mean(dim=3)                                 # mean over modes -> [B,T,F,d_freq]
+        if not self.fuse_freq:
+            return self.to_real(torch.view_as_real(z).flatten(-2))   # [B,T,F,d_freq]
+        z = z.mean(dim=2)                                 # mean over freqs -> [B,T,d_freq]
+        return self.to_real(torch.view_as_real(z).flatten(-2))       # [B,T,d_model]
+
+
+class _ComplexMatrixEncoder(nn.Module):
+    """De-engineered graph encoder (2026-08-30, ``encoder_mode="matrix"``).
+
+    Same object ``_GraphEncoder`` (0.169) consumes -- the rank-k Hermitian
+    reconstruction of the coherence graph
+
+        A(f,t) = sum_{r=1..k} lambda_r u_r u_r^H        in  C^{C x C}
+
+    -- but where ``_GraphEncoder`` *flattens* every entry
+    (``cat([diag(A), Re triu(A), Im triu(A)])``) and lets one real
+    ``Linear`` mix all C^2 of them (losing which channel is which), this
+    keeps the Hermitian-operator structure. A single complex channel map
+    ``W`` (``_ComplexLinear``, ``C -> d_ch``, complex-multiplication-tied
+    Re/Im blocks) contracts
+
+        M(f,t) = W A W^H = sum_r lambda_r (W u_r)(W u_r)^H   in C^{d_ch x d_ch}
+
+    -- ``d_ch`` learned channel combinations, still Hermitian. Computed
+    straight from the eigenpairs (no C x C matrix ever materialised). The
+    only flatten is of ``M``'s own real diagonal + complex upper triangle,
+    in the *learned* ``d_ch`` basis, after the complex contraction -- not
+    of the raw 23-channel matrix in native coordinates. No mode_id, no
+    frequency feature; mean-pool over frequency (fuse_freq) or hand each
+    band to ``_PerFreqMambaHead``.
+    """
+
+    def __init__(
+        self,
+        n_channels: int,
+        n_freqs: int,
+        k: int,
+        d_model: int,
+        d_freq: int,
+        *,
+        d_ch: int = 12,
+        fuse_freq: bool = True,
+        **_ignored: object,
+    ) -> None:
+        super().__init__()
+        self.n_channels = n_channels
+        self.n_freqs = n_freqs
+        self.d_ch = d_ch
+        self.fuse_freq = fuse_freq
+        self.chan_map = _ComplexLinear(n_channels, d_ch, bias=False)
+        n_up = d_ch * (d_ch - 1) // 2
+        feat_width = d_ch + 2 * n_up                      # diag(M) real + Re/Im triu(M)
+        self.norm = nn.LayerNorm(feat_width)
+        self.freq_proj = nn.Linear(feat_width, d_freq)
+        self.act = nn.GELU()
+        if fuse_freq:
+            self.freq_fuse = nn.Linear(n_freqs * d_freq, d_model)
+        iu, ju = torch.triu_indices(d_ch, d_ch, offset=1)
+        self.register_buffer("iu", iu, persistent=False)
+        self.register_buffer("ju", ju, persistent=False)
+
+    def forward(self, eigvals: torch.Tensor, eigvecs: torch.Tensor) -> torch.Tensor:
+        """eigvals: [B, T, F, k] real. eigvecs: [B, T, F, k, C] complex.
+        Returns [B, T, d_model] (fuse_freq) or [B, T, F, d_freq] (per-freq)."""
+        b, t, f, _ = eigvals.shape
+        v = self.chan_map(eigvecs)                        # [B,T,F,k,d_ch] complex (W u_r)
+        # M = sum_r lambda_r v_r v_r^H  -- fuse the mode sum into the einsum
+        # so the only [d_ch, d_ch] tensor built is M itself.
+        lam = eigvals.to(v.dtype)                         # [B,T,F,k] complex
+        M = torch.einsum("btfk,btfkd,btfke->btfde", lam, v, v.conj())  # [B,T,F,d_ch,d_ch]
+        diag_m = M.diagonal(dim1=-2, dim2=-1).real        # [B,T,F,d_ch]
+        up_m = M[..., self.iu, self.ju]                   # [B,T,F,n_up] complex
+        feat = torch.cat([diag_m, up_m.real, up_m.imag], dim=-1)       # [B,T,F,d_ch^2]
+        emb = self.act(self.freq_proj(self.norm(feat)))   # [B,T,F,d_freq]
+        if not self.fuse_freq:
+            return emb                                    # -> _PerFreqMambaHead
+        return self.freq_fuse(emb.reshape(b, t, -1))      # [B,T,d_model]
+
+
 class _MambaTemporalHead(nn.Module):
     """Spectral tokens [B, T, d_model] -> 2-class logits. Reuses
     ``_DenseEdgeMambaTemporal`` with the edge axis set to 1 (its
@@ -605,9 +776,9 @@ class HermitianSSMClassifier:
         self.cfg = spectral_config or HermitianSpectralConfig()
         self.cache_root = cache_root
         self.precompute_device = precompute_device
-        if encoder_mode not in ("projector", "eigenvector", "graph", "evolution"):
-            raise ValueError("encoder_mode must be 'eigenvector', 'projector', 'graph' or "
-                             f"'evolution', got {encoder_mode!r}")
+        if encoder_mode not in ("projector", "eigenvector", "complex", "matrix", "graph", "evolution"):
+            raise ValueError("encoder_mode must be 'eigenvector', 'complex', 'matrix', "
+                             f"'projector', 'graph' or 'evolution', got {encoder_mode!r}")
         self.encoder_mode = encoder_mode
         self.canonicalize_eigenvectors = bool(canonicalize_eigenvectors)
         if temporal_mode not in ("fused", "per_freq"):
@@ -705,7 +876,7 @@ class HermitianSSMClassifier:
         uniq = np.unique(y)
         self.classes_ = uniq if len(uniq) > 1 else np.array([0, 1])
         self._val_norm = self._eigenvalue_norm(recs_by_key)
-        if self.encoder_mode in ("projector", "graph"):
+        if self.encoder_mode in ("projector", "graph", "matrix"):
             # These encoders multiply lambda into u u^H, so a mean SHIFT of
             # lambda would corrupt P. Scale-only (mean forced to 0) is a
             # harmless global gain on P and on the standalone lambda block.
@@ -740,6 +911,14 @@ class HermitianSSMClassifier:
         elif self.encoder_mode == "evolution":
             encoder = _EvolutionEncoder(
                 n_channels, n_freqs, k, self.d_model, self.d_freq, freqs=freqs, fuse_freq=fuse_freq,
+            )
+        elif self.encoder_mode == "complex":
+            encoder = _ComplexSpectralEncoder(
+                n_channels, n_freqs, k, self.d_model, self.d_mode, self.d_freq, fuse_freq=fuse_freq,
+            )
+        elif self.encoder_mode == "matrix":
+            encoder = _ComplexMatrixEncoder(
+                n_channels, n_freqs, k, self.d_model, self.d_freq, fuse_freq=fuse_freq,
             )
         else:
             encoder = _SpectralEncoder(
