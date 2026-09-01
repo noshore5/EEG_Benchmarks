@@ -18,6 +18,13 @@ Read it before touching the AWS account from **any** shell -- on-box or
 driving remotely from a local Mac / Grok shell (the Mac has admin creds).
 Skip it if you're only editing code / running tests; nothing in the
 pipelines depends on it yet.
+2026-09-01: **`scripts/eeg-run.sh`** -- fire-and-forget a run on an
+on-demand box; on `rc==0` it commits the new result CSV(s) (+ optional
+`--session-note`) straight to `origin/main` via `scripts/promote_results.sh`
+and self-terminates; SNS email only on failure. Needs one-time
+`scripts/setup_autorun_infra.sh` (deploy key in SSM, IAM, SNS topic).
+`--cpu` works now; `--gpu` blocked on the pending quota bump. See
+`AWS_INFRA.md` "Autonomous runs".
 2026-09-01: `eeg-box` role now has EC2 launch/terminate + SSM perms
 (verified). GPU box still **not launched** -- setup only, no runs started.
 2026-09-01: **`eeg-cpu-box`** (`i-0a6100d4c303f52a2`, c7i.2xlarge, 8 vCPU/
@@ -616,13 +623,25 @@ signal the direction has produced (see below).
         cache size. fp32 seed-43 job (pid 34495) + old val0 driver
         (41150) KILLED mid-fold-5 09-01 16:34; seed-43 fp32 partial
         discarded (fp16-vs-fp32 already null).
-      - **val=0 sweep RUNNING** (driver pid 50829, `_to_delete/val0_sweep.sh`,
-        stock `run_pre_val0.py`, picks up the leak fix). epochs {12,20} x
-        seeds {42..46}, `--validation-split 0` (train 100% each fold, no
-        early stop, no ckpt restore) to kill the val-split variance
-        driver. One MPS job at a time; auto git add/commit/push per run.
-        First job: ep12 seed42 pid 50842. Watch fold-4 epoch time to
-        confirm the leak fix holds (should stay ~flat, not blow to 4000s).
+      - **val=0 sweep** -- epochs {12,20} x seeds {42..46},
+        `--validation-split 0` (train 100% each fold, no early stop, no
+        ckpt restore) to kill the val-split variance driver. Leak fix
+        confirmed holding (flat ~55s/epoch through all 6 folds).
+        Job def: `temporal_graph_mamba` "pre" prediction, chb01 LOSO,
+        `--epochs <N> --validation-split 0 --seed <S>` (+ `--device mps`
+        on Mac / `--device cpu` on AWS). Mac wrapper `_to_delete/run_pre_val0.py
+        <seed> <epochs>` (MPS-only monkeypatch -- do NOT use on AWS; call
+        run_pipelines directly with --device cpu there).
+        STATUS:
+          - ep12 seed42: DONE, 6-fold mean AP **0.627** (commit 88aff75).
+          - ep12 seed43: RUNNING on Mac 09-01 (pid 54986).
+          - ep12 seed{44,45,46}: Mac, queued.
+          - **ep20 seed{42..46}: UNCLAIMED -> AWS cpu box to run.**
+        Per job: 6-fold mean AP over the `average_precision` column of
+        `prediction_leave_one_seizure_out_*.csv`; commit both prediction
+        CSVs. Compare 6-fold-mean spread across seeds vs the val-split=0.2
+        sweep's ~0.05-0.13; ep20 rows are the fair comparison to the
+        fp32 seed-42 ~0.64 anchor.
       - fp16 `_load` upcasts to fp32 on load, so fp16 halves DISK + the
         DataLoader re-stream READ but NOT the resident fp32 edge tensor.
       - NEXT (user priority): AWS S3 upload of `~/mne_data/dense_edge_cache`
