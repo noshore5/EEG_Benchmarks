@@ -13,6 +13,10 @@ everything.
 *tried* and shelved (early-killed or run to negative/wash) -- check it
 before re-running an experiment; add a row when you kill or conclude one.
 
+**`AWS_INFRA.md`** -- shared AWS cloud state (S3 bucket, EC2 boxes, IAM).
+**Only read it if your shell is running on an AWS instance** -- Mac / local
+shells can ignore it; nothing in the pipelines depends on it yet.
+
 **`Epilepsy/temporal_graph_mamba_math.md`** -- `pre` written as matrix
 operations (Hermitian coherence matrix `Gamma(f,t)` -> off-diag ->
 incidence-average -> per-channel selective SSM -> flatten -> logits),
