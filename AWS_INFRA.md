@@ -8,7 +8,9 @@ yet.
 
 **Account:** `827938107865` &nbsp; **Region:** `us-east-1`
 **Last verified:** 2026-09-01, by Claude (eeg-box shell) -- `eeg-cpu-box`
-stood up + bootstrapped end-to-end; gotchas below all hit and confirmed.
+stood up + bootstrapped + ran its first job (`godoy_tmc` 6-fold), then
+stopped; gotchas below all hit and confirmed. Spot SLR created by admin.
+GPU quota-increase requests filed (PENDING).
 
 ---
 
@@ -17,7 +19,7 @@ stood up + bootstrapped end-to-end; gotchas below all hit and confirmed.
 | Box | Instance | Spec | State | Address | Notes |
 |---|---|---|---|---|---|
 | **eeg-box** | `i-083e3b55993a13c13` | t3.small, 30 GB EBS (`vol-0812ddb8bac762447`) | running | public `54.236.223.15`, private `172.31.22.104` | the box this agent usually lives on. 2 vCPU / 2 GB RAM -- too small to run pipelines (no deps installed) |
-| **eeg-cpu-box** | `i-0a6100d4c303f52a2` | c7i.2xlarge (8 vCPU / 16 GB), 50 GB gp3, us-east-1a | **stop/start** (persistent) | -- | on-demand CPU worker for pipeline runs. Bootstrapped 2026-09-01 (pip env + chb01 data on the volume). `--instance-initiated-shutdown-behavior stop`. Idle ~$4/mo (volume only); ~$0.36/hr when running. See "eeg-cpu-box job runner" below. |
+| **eeg-cpu-box** | `i-0a6100d4c303f52a2` | c7i.2xlarge (8 vCPU / 16 GB), 50 GB gp3, us-east-1a | **stopped** (persistent stop/start) | -- | on-demand CPU worker for pipeline runs. Bootstrapped 2026-09-01 (pip env + chb01 data on the volume). `--instance-initiated-shutdown-behavior stop`. Idle ~$4/mo (volume only); ~$0.36/hr when running. First job: `godoy_tmc` 6-fold, ~41.5 s/epoch, 58 min wall (see session note 2026_09_01). NB: only ~3 of 8 cores used, but peak RSS 14/16 GB (raw-classifier LOSO path leaks per-fold) -- don't downsize below 16 GB. See "eeg-cpu-box job runner" below. |
 | GPU box | -- | -- | **not launched** | -- | IAM/instance-profile staged (`eeg-gpu`), nothing running |
 
 ## Launching an EC2 box from eeg-box -- read before `run-instances`
@@ -38,13 +40,14 @@ Skipping this list cost ~40 min of terminate/relaunch cycles.
    Symptom if you forget: user-data half-runs, nothing ever appears in
    S3, `describe-instances` just says `running`. (eeg-box's own `aws` was
    hand-installed to `/usr/local/bin/aws`, so it's misleading.)
-2. **Spot is not available to this role.** `RunInstances` with
-   `--instance-market-options MarketType=spot` fails
-   `AuthFailure.ServiceLinkedRoleCreationNotPermitted` -- the
-   `AWSServiceRoleForEC2Spot` SLR doesn't exist and `eeg-box` has neither
-   `iam:CreateServiceLinkedRole` nor `CreateSpot...`. **Use on-demand**
-   until an admin creates that SLR once (`aws iam
-   create-service-linked-role --aws-service-name spot.amazonaws.com`).
+2. **Spot SLR: FIXED 2026-09-01.** An admin (user `claude`) ran `aws iam
+   create-service-linked-role --aws-service-name spot.amazonaws.com`, so
+   `AWSServiceRoleForEC2Spot` now exists and spot `RunInstances` no longer
+   fails `AuthFailure.ServiceLinkedRoleCreationNotPermitted`. **But** the
+   spot *quota* for GPU (`L-3819A6DF`, "All G and VT Spot Instance
+   Requests") is still ~0 -> spot GPU now fails `MaxSpotInstanceCount
+   Exceeded` instead. Increase-request to 8 filed 2026-09-01 ~14:03 UTC,
+   PENDING. (Non-GPU spot families have their own separate quotas.)
 3. **On-demand vCPU limit is 16** (Standard family: C/D/H/I/M/R/T/Z).
    `eeg-box` (t3.small) already burns 2 -> **<=14 free**. So:
    `c7i.2xlarge` (8) fine; `c7i.4xlarge` (16) -> `VcpuLimitExceeded`.
@@ -148,8 +151,28 @@ Old bucket `s3://coheriq-eeg-dense-edge-cache/` (referenced in
 ## If you're bringing up the GPU box
 
 **First read "Launching an EC2 box from eeg-box" above** -- the awscli,
-spot-SLR, vCPU-limit and tag gotchas all apply here too (a GPU instance
-family has its own separate on-demand vCPU limit, likely 0 until raised).
+spot-SLR, vCPU-limit and tag gotchas all apply here too.
+
+**GPU quota status (2026-09-01):** on-demand G/VT (`L-DB2E81BA`) = **0**,
+spot G/VT (`L-3819A6DF`) = **0**. Both increase-requests to 8 filed
+2026-09-01 ~14:03 UTC by user `claude`, **PENDING**. Until one clears,
+*no* GPU instance launches (`VcpuLimitExceeded` on-demand /
+`MaxSpotInstanceCountExceeded` spot). Also `g5`/`g6`/`g4dn` **spot capacity
+was out region-wide** in us-east-1 that day -- us-east-1 is the most
+GPU-contended AWS region; if capacity stays dry after the quota clears,
+fall back to firing the same two requests in `us-east-2` and running there
+(pulls chb01 from the us-east-1 bucket, ~$0.14 egress). Check status:
+`aws service-quotas list-requested-service-quota-change-history
+--service-code ec2 --region us-east-1`.
+
+**A one-shot GPU runner is staged:**
+`s3://noshore-eeg-benchmarks-827938107865/exports/eeg_box/gpu_run/` is the
+output prefix; `.../exports/eeg_box/_setup/gpu_userdata.sh` is the
+user-data -- launches `g5.2xlarge` on the Deep Learning OSS Nvidia Driver
+AMI (`ami-012ba162b9cd2729c`, PyTorch 2.7 / Ubuntu 22.04), installs
+`requirements.txt` (re-pulls `torch==2.8.0+cu128` ~2.5 GB), prefetches
+chb01, runs `godoy_tmc --device cuda`, uploads results, **self-terminates**.
+Est. bootstrap ~6-8 min (heavier AMI + EBS lazy-load).
 
 1. Launch from eeg-box into `us-east-1`, attach instance profile
    **`eeg-gpu`** and SG **`eeg-ssh`**, key pair **`eeg-box`**, and tag

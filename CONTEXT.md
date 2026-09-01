@@ -22,8 +22,17 @@ shells can ignore it; nothing in the pipelines depends on it yet.
 16 GB) stood up as a persistent stop/start CPU worker -- bootstrapped pip
 env + chb01 data on its 50 GB volume, driven via an S3 job-runner (drop a
 script at `s3://.../exports/eeg_box/jobs/next.sh`), self-stops after 30 min
-idle. First job: `godoy_tmc` prediction 6-fold on CPU (in flight). See
-`AWS_INFRA.md` "eeg-cpu-box job runner".
+idle. **Currently STOPPED** (~$4/mo volume only). First job done:
+`godoy_tmc` prediction 6-fold CPU -- **~41.5 s/epoch on 8 vCPU, 58 min
+wall**, mean AP 0.535 (within the MPS 5-seed band; timing run, not a new
+board number). Peak RSS 14.1/16 GB -- the raw-classifier LOSO path leaks
+per-fold, don't shrink the box below 16 GB. See `AWS_INFRA.md` "eeg-cpu-box
+job runner" + `Session_notes/2026_09_01/aws_cpu_box_first_run_godoy_tmc.md`.
+GPU run blocked: on-demand G quota `L-DB2E81BA` = 0 and spot G quota
+`L-3819A6DF` = 0 (both increase-requests PENDING since ~14:03 UTC); EC2-Spot
+SLR now exists (admin created it); `g5` spot capacity is out region-wide in
+us-east-1. One-shot `gpu_userdata.sh` staged at `.../_setup/` for when a
+quota clears.
 
 **`Epilepsy/temporal_graph_mamba_math.md`** -- `pre` written as matrix
 operations (Hermitian coherence matrix `Gamma(f,t)` -> off-diag ->
