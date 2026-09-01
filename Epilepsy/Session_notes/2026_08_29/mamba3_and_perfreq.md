@@ -10,13 +10,13 @@ made it the `HERMITIAN_SSM_PARAMS` default. Also built + verified +
 frequency; not a bug, just ~8x slower with no epoch-1 advantage). All in
 commit `7d672e1` on `main` (pushed).
 
-**Result: mamba3 is NEGATIVE.** 6-fold mean AP **0.408 vs real-Mamba
-0.436** (also worse ROC-AUC 0.939 vs 0.947, k-of-n hits 4/6 vs 6/6). The
-complex-diagonal state does not help at this data budget. The committed
-`mamba_backend="mamba3"` default should revert to `"mamba"` (doing it
-with the k-axis work below). Next lever: rebuild the spectral cache at
-**k=12** (then maybe k=23) -- the one untried point on the axis that gave
-the only big jump (k=2->6 = +0.18 AP).
+**Result: mamba3 is NEGATIVE** (6-fold mean AP 0.408 vs real-Mamba 0.436).
+**Follow-up k=6->k=12 also NEGATIVE** (0.390 vs 0.436). All three hermitian
+levers (encoders, mamba3, k axis) now closed negative -- the pipeline's
+~0.44 AP ceiling on chb01 is a data-budget wall. Deliverable is
+`temporal_graph_aggregate="post"` (0.639). `mamba_backend` reverted to
+`"mamba"` in the working tree; `spectral_k` needs to go 12 -> 6 to restore
+the 0.436 baseline (cache `9d6ad0d850b8b8f0` still on disk).
 
 Follow-on to `2026_08_29/hermitian_ssm_bandmatch_6fold.md`, whose
 conclusion was: encoder-variant search CLOSED NEGATIVE, **only untried
@@ -196,27 +196,61 @@ not enough data here for the extra expressiveness to pay for itself.
 CSVs: `Epilepsy/results/hermitian_ssm/prediction/*_20260829-2*.csv`
 (mamba3 6-fold). Real-Mamba baseline: `*_20260829-111904.csv`.
 
+## k axis (k=6 -> k=12) -- NEGATIVE
+
+User call 2026-08-30: with both temporal-model levers spent, test the one
+untried knob on the axis that gave the only big jump (k=2->6 = +0.18 AP).
+Rebuilt the spectral cache at **k=12** (new key `293ac41c6e53675f`,
+21 GB), real-Mamba backend, everything else = the 0.436 config. Clean
+A/B: k is the only variable.
+
+| fold | k=6 (real Mamba) | **k=12 (real Mamba)** |
+|---|---|---|
+| `1_03_0` | 0.254 | 0.255 |
+| `1_04_0` | 0.324 | 0.254 |
+| `1_15_0` | 0.414 | 0.405 |
+| `1_16_0` | 0.279 | 0.162 |
+| `1_18_0` | 0.788 | 0.712 |
+| `1_26_0` | 0.556 | 0.551 |
+| **mean AP** | **0.436** | **0.390** |
+| ROC-AUC | 0.947 | 0.940 |
+| k-of-n hits | 6/6 | 5/6 |
+
+**k=12 loses on 5 of 6 folds** (only `1_03` flat), mean AP -0.046. Two
+folds materially worse (`1_16` -0.12, `1_04` -0.07), none better. The
+k=12 training curves were also visibly noisier (val_loss bouncing
+0.3<->1.9 epoch to epoch vs k=6's steadier descent).
+
+Read: **k=6 is the right truncation.** k=2->6 helped because modes 3-6
+carry real coupling structure that `diagonal="zero"` freed from under the
+power floor; modes 7-12 are estimation noise on ~30 preictal windows and
+the encoder cannot learn to ignore them (mode_id + lambda-embed give it
+the machinery in principle, not the data). k=23 is off the table -- the
+trend is monotone the wrong way. CSV `*_20260830-005015.csv`.
+
 ## Where this leaves the deliverable
 
-Both hermitian temporal-model levers now tried:
-- `mamba_backend="mamba3"` -- NEGATIVE (0.408 vs 0.436), this note.
-- `temporal_mode="per_freq"` -- parked (not a bug, 8x slower, no gain).
+All three hermitian levers tried, all NEGATIVE:
+- **encoder variants** -- `hermitian_ssm_bandmatch_6fold.md` (eigenvector
+  0.436 is the ceiling; projector/graph/evolution worse).
+- **`mamba_backend="mamba3"`** -- 0.408 vs 0.436, this note.
+- **k axis (k=12)** -- 0.390 vs 0.436, this note.
+- (`temporal_mode="per_freq"` -- parked, not a bug, 8x slower, no gain.)
 
-Plus the encoder-variant search closed NEGATIVE in
-`hermitian_ssm_bandmatch_6fold.md`. The remaining untried hermitian lever
-is the **k axis** (top-k eigenpairs): k=2->6 was +0.18 AP, the single
-biggest jump in the whole investigation, and k=6->23 (full eigenbasis,
-zero truncation) has never been measured -- the note only *assumed*
-diminishing returns. Next step (user call 2026-08-30): rebuild the
-spectral cache at **k=12** as a direction check (real-Mamba backend, clean
-A/B vs the 0.436 baseline). If 6->12 moves AP, go to k=23; if flat, the
-axis is done and the deliverable reverts to
-`temporal_graph_aggregate="post"` (see CONTEXT.md).
+hermitian_ssm's ceiling on chb01 is **~0.44 mean AP** and that is a
+data-budget wall, not an architecture one -- every lever that added
+representational power (complex state, more modes, richer encoders) came
+back flat-to-negative while the internal val metrics stayed healthy. Per
+the user's standing call, the deliverable is now
+**`temporal_graph_aggregate="post"`** (mean AP 0.639, graph flows through
+the temporal model). Real ceiling lever is more CHB-MIT subjects.
 
-Revert note: `HERMITIAN_SSM_PARAMS` currently has `mamba_backend="mamba3"`
-as the committed default (from `7d672e1`, set before this result). Given
-the negative, it should go back to `"mamba"` -- doing that with the k-axis
-work rather than as a standalone flip.
+Revert note: `HERMITIAN_SSM_PARAMS` in the working tree already has
+`mamba_backend` back to `"mamba"` and `spectral_k=12` (the k-axis run
+config). To restore the 0.436 baseline: `spectral_k` -> 6 (cache key
+reverts to `9d6ad0d850b8b8f0`, still on disk), `mamba_backend` stays
+`"mamba"`. These live in `run_pipelines.py` alongside another shell's
+`_CG_MAMBANET_SHARED_PARAMS` edit -- commit with `git add -p`.
 
 ## Code / repo status
 

@@ -9,6 +9,16 @@ Claude/Grok shells that don't share context with each other, and this is
 the one file meant to catch a new shell up without it re-reading
 everything.
 
+**`Epilepsy/NEGATIVES.md`** is the running ledger of every lever we've
+*tried* and shelved (early-killed or run to negative/wash) -- check it
+before re-running an experiment; add a row when you kill or conclude one.
+
+**`Epilepsy/temporal_graph_mamba_math.md`** -- `pre` written as matrix
+operations (Hermitian coherence matrix `Gamma(f,t)` -> off-diag ->
+incidence-average -> per-channel selective SSM -> flatten -> logits),
+plus how `hermitian_ssm` (eigendecomp of `Gamma`) and the `channel_cwt`
+ablations relate to it. Written 2026-08-31 for the linear-algebra view.
+
 **Last updated:** 2026-08-30, by Claude (Mac shell). On `main`. Uncommitted
 working tree (all this session, all smoke-tested, commit once the running/
 queued results land):
@@ -73,21 +83,515 @@ signal the direction has produced (see below).
   cache (8-40 Hz, F_out=8, td=16). Own per-recording complex-CWT cache
   (reuses `_MorletCWT`; unchanged by the feature rewrite -- feature is
   derived downstream, no recompute). Drops "pre"'s n-hop message passing.
-  Component-checked; not yet smoked end-to-end with the new feature.
-  Queued as `channel_cwt`.
-- **THE QUEUE** (`queue_runner7.sh` pid ~66428; monitor via
-  `scratchpad/queue_runner.log`). `queue_runner3` + `queue_runner6` were
-  killed 2026-08-30 to jump `channel_cwt` ahead of `edge_complex`:
-  1. `run_channel_cwt.py` -- `ChannelCWTMambaClassifier` 6-fold, revised
-     pre-matched feature (~1 h). **NEXT** (machine free now).
-  2. `run_edge_complex.py` -- "post" + `temporal_graph_edge_complex=True`
-     (fixed: the edge stack is `[coh, sinφ, cosφ, sig]`, so
-     `coh = mag·(cosφ + i·sinφ)`). ~11 h.
-  3. `run_anomaly.py` -- `HermitianSSMAnomaly` **v2** 6-fold (~3-4 h).
-  4. `run_post.py` -- fresh "post" 0.639 baseline. ~11 h.
-  5. **ADDED 2026-08-30 (separate thread):** `godoy_tmc` real 6-fold chb01
-     prediction LOSO run -- plain CLI, no scratchpad wrapper needed (no
-     source patching involved, unlike 1-4 above). See
+- **`channel_cwt` OOM'd 16 GB (rc=137) at training entry, 2026-08-30.**
+  `batch_size=32` x 23 channels = 736 sequences all through the mambapy
+  pure-PyTorch pscan at once. (A concurrent "Godoy" smoke in another shell
+  likely added pressure.) **Fix in `channel_cwt_mamba.py`:** `batch_size`
+  default 32->8; freq-axis chunking in `_ChannelCWTCache.ensure`
+  (`_MorletCWT.transform` has no internal chunking -> `[C, nfreqs,
+  n_padded]` blows up at nfreqs=60); new `store_dtype` kwarg (fp16 cache
+  option). Numerically identical for the existing nfreqs=16 log cache.
+- **`channel_cwt_broadband`** (`scratchpad/run_channel_cwt_broadband.py`,
+  NEW; was briefly named "truong"): same classifier, broad evenly-spaced
+  spectral grid -- **LINEAR** freq spacing (not log), 2-124 Hz, **60
+  output bins**, 60/120 Hz mains notch kept. `freq_spacing="linear"` added
+  to `_freq_grid` / `_ChannelCWTCache` (in the cache-key hash). Disk
+  safety: linear-60 at td=16/fp32 projected ~79 GB with <60 GB free ->
+  forced `td=64` (~4 Hz frames) + `store_dtype="float16"` -> ~3 GB.
+- **Swap thrash 2026-08-30 -- CAUSE: too many GUI apps on 16 GB, not a
+  leak.** After the day's jetsam kills, baseline commit (Chrome many
+  tabs ~2.7 GB, Pylance 1.2 GB, Slack, Claude.app, several claude CLIs)
+  sat near 16 GB, so every training job instantly avalanched into swap
+  (peaked 35 GB). User is remote (phone, Claude Code only -- no terminal,
+  cannot `sudo reboot`). **Fix without reboot:** quit Chrome/Slack/
+  Claude.app/Spotify via `osascript -e 'quit app "X"'` -> swap 29 -> 6 GB,
+  ~5.7 GB RAM free. If this recurs, quit GUI apps first.
+- **Machine REBOOTED 2026-08-30 ~19:06** to clear the swap thrash (user
+  did it from physical access). `/private/tmp` scratchpad was wiped by the
+  reboot -- all wrapper scripts + queue runners + logs GONE. **Wrappers
+  recreated in `_to_delete/` (gitignored, survives reboot):**
+  `_to_delete/run_channel_cwt.py` so far; `run_channel_cwt_broadband.py`,
+  `run_edge_complex.py`, `run_anomaly.py`, `run_post.py` still need
+  recreating from CONTEXT descriptions / the transcript if used.
+- **channel_cwt memory: ROOT CAUSE #2 FOUND (2026-08-30).** The pipeline
+  itself is light; the waste was in data handling. `_build_continuous_
+  dataset` loads all 41 chb01 raw recordings as float64 = **7 GB**, held
+  by the LOSO loop for the whole run. The *real* `HermitianSSMClassifier`
+  never touches `raw_x` (reads the prebuilt eigenpair cache off disk) so
+  it's just dead weight it survives; `ChannelCWTMambaClassifier` *uses*
+  `raw_x` then stacks its feat-stats + model on top of the resident 7 GB
+  -> ~12 GB -> swap avalanche (killed 5x). Probe confirmed the CWT is
+  cheap (+87 MB, 3 s/rec). **Fixes in `channel_cwt_mamba.py`:**
+  (a) `_build_index` sets `rec["raw_x"] = None` right after each recording
+  is cached -- frees the 7 GB progressively; nothing downstream of `fit`
+  reads it (all 41 caches built during fold 1, folds 2-7 then run tiny).
+  (b) CWT freq-chunk `fchunk = 1` (was 16 = whole grid = no-op; the ifft
+  on a ~2^20-padded hour-long recording was ~7 GB by itself). Plus the
+  earlier mmap-leak LRU (`_ram_cap = 8`) and `batch_size` 8.
+- **channel_cwt memory: REAL ROOT CAUSE (2026-08-30) + config bug the
+  user caught.** Instrumented trace showed it always died in the FIRST
+  training batch with `xb=(64, 23, 480, 8)`. Two problems: (1) my
+  `_ChannelCWTNet` used `mambapy.mamba.Mamba` DIRECTLY (naive full pscan,
+  no row-chunking) -- NOT "pre"'s Mamba. `batch_size=64` (from
+  HERMITIAN_SSM_PARAMS, passed into the ctor) x 23 channels folded into
+  the batch axis = 1472 sequences -> `[1472, 512, 128, 16]` f32 = 6 GB
+  per SSM tensor -> 25 GB swap avalanche. (2) even the hyperparams were
+  wrong (d_model=64 vs "pre"'s 16). **Fix: `_ChannelCWTNet` now uses
+  `cwt_gnn_classifiers._DenseEdgeMambaTemporal` -- "pre"'s EXACT temporal
+  block** (d_model=16, d_state=16, d_conv=4, expand=2, n_layers=1,
+  chunk_size=128), which row-chunks at 128 + gradient-checkpoints. Now a
+  clean coherence-ablation of "pre": each channel = its own weight-shared
+  sequence in the node-axis slot, CWT power replaces the scatter-meaned
+  edge messages, graph message-passing dropped (mean over 23 node
+  embeddings -> 2-class head). Component test: `[32,23,480,8]` fwd+bwd,
+  maxrss 2.2 GB (was ~25 GB), 4010 params. Also fixed earlier this
+  session: raw_x=None after caching (frees the 7 GB float64 dataset
+  load), fchunk=1 in the CWT (ifft on ~2^20-padded recording was ~7 GB),
+  mmap-leak LRU. Debug instrumentation stripped.
+- **ALWAYS DEFAULT TO `--device mps` ON THIS MACHINE.** It's Apple
+  Silicon; `_SHARED_ARCH_PARAMS` / all the pipeline param dicts already
+  default `device="mps"`, and that's what every past "pre"/hermitian
+  timing (e.g. "pre" ~60 s/epoch) was measured on. `--device cpu` is
+  ~10x slower here (mambapy pure-PyTorch pscan over T=480). Only fall
+  back to cpu for a specific MPS bug, and say so explicitly.
+- **channel_cwt equivalence to "pre" -- 2 more gaps found & fixed
+  (2026-08-30), both making epochs ~4x "pre"'s 60 s/epoch-on-MPS:**
+  (a) wrapper forced `--device cpu` -> `--device mps` (see MPS rule
+  above); (b) the `hermitian_ssm` LOSO loop does NOT subsample training
+  negatives, but "pre"/dense-family do (5:1,
+  `DEFAULT_NEGATIVE_TO_POSITIVE_RATIO`). Added
+  `negative_to_positive_ratio=5.0` to `ChannelCWTMambaClassifier.fit`
+  (interictal TRAIN windows only; predict_proba untouched) -> ~830
+  train windows/fold instead of ~2800. Also bumped `_ram_cap` 16 -> 48
+  (f16) so a shuffled epoch does zero redundant disk reads.
+  First MPS run (pid 2734, cpu->mps only): epoch 1 219 s, epoch 2 241 s,
+  val_auc ~0.86 -- killed to add the subsampling fix.
+- **`_to_delete/run_channel_cwt.py` 6-fold RUNNING (pid ~3102) on MPS +
+  5:1 subsample**, pre-matched temporal block (`_DenseEdgeMambaTemporal`,
+  d_model=16, chunk=128), bs 64. Epochs 49-59 s (matched "pre").
+  **RESULT: NEGATIVE, killed at 2 folds (2026-08-30).** fold 1_03_0
+  auc_pr 0.149, fold 1_04_0 0.263 -- vs "pre" 0.792 / 0.830. ~0.6 AP
+  below "pre" on both; healthy training curves that don't transfer.
+  Clean one-var ablation (both use aggregate-to-23 + `_DenseEdgeMambaTemporal`,
+  neither has message-passing at n_hops=1) -> the coherence edge
+  representation carries essentially all the signal. Full writeup:
+  `Session_notes/2026_08_30/channel_cwt_null_baseline_equivalence.md`.
+- **`pre` reproduction RUNNING (pid 5562, MPS, monitor `bku1i61m0`)** --
+  `_to_delete/run_pre_repro.py`, `temporal_graph_mamba --label-mode
+  prediction`, untuned params. Clean same-machine baseline for the
+  channel_cwt collapse + the next ablation. Judge on the 6-fold MEAN vs
+  0.674, NOT per-fold (fold 1_03 AP swings 0.29-1.00 on unchanged config).
+  - **run1 (pid 4938) killed at fold 1** by my monitor's swap watchdog
+    (13GB line, too low -- raised to 26GB for run2). fold 1_03_0 came in
+    **auc_pr 0.560** (MPS) vs historical 0.792 -- within fold-1 variance,
+    not conclusive.
+  - **fold 1 = 44s/epoch (matches "fast" memory). folds 2+ = ~95s/epoch,
+    IO-bound** (CPU 77% idle, RAM full). NOT a misconfig -- config is
+    identical (nfreqs=8, tds=16, 8-40Hz). The `event_mode="temporal_graph"`
+    dense_edge cache is ~15 MB/trial (raw `[4,253,480,8]` edge stack, needed
+    for the learned `temporal_edge_proj`); a full 6-fold = ~70 GB (2026-08-27
+    note), exceeds 16 GB RAM -> page-cache thrash on folds 2-6. The
+    original 0.674 was itself an overnight run stitched across 3 process
+    restarts -- never a fast clean 6-fold. run2 grinding to completion
+    (~4-5h) to match config exactly. fold 1_03_0 = **0.560** (both runs,
+    reproducible on MPS) vs historical 0.792.
+  - **PERF PATH (same model, worth doing): don't cache the [4,E,T,F] edge
+    stack -- cache only the per-channel CWT (~1 MB/trial, fits RAM) and
+    regenerate edges on MPS each forward.** In `coherence_threshold_mode=
+    "fixed"` (what "pre" uses) all 4 edge components -- coherence, sinphi,
+    cosphi, AND significance (a deterministic threshold indicator on
+    |coh|, NOT a surrogate test; surrogates are a separate opt-in mode) --
+    are deterministic functions of `(raw window, config)` per
+    `dense_edge_cache.py`'s docstring. `compute_dense_edge_input` /
+    `_build_dense_edge_input` is already device-agnostic torch (no numpy,
+    no RNG). Recompute == same result (bit-identical at matched dtype/
+    device; ~1e-6 drift if cache built on CPU). 2026-08-27 note found
+    recompute FASTER than cache-load on CUDA (10s vs 26s epochs). This
+    fixes the >RAM cache IO wall on the 16 GB machine. Not done tonight
+    (run2 grinds as-is to match config); real TODO.
+  - **QUEUED ablation: drop edge component 3 (significance).** Feed
+    `temporal_edge_proj` only `[coh, sinphi, cosphi]` (3 not 4). Tests
+    whether the fixed-threshold significance channel carries anything.
+    Distinct from `temporal_graph_edge_complex` (which drops it AND swaps
+    in `_ComplexLinear`) -- this is the clean 3-vs-4 ablation.
+- **ablation 1 BUILT + smoke-passed, QUEUED behind pre_repro**
+  (`_to_delete/run_channel_cwt_hops.py`, MPS). `channel_cwt_mamba.py`:
+  `_HopMessagePassing` (replicates `SparseEvidenceGNNCore._propagate_hops`
+  -- MLP msg on [h_dst,h_src] + scatter-add + GRUCell, complete graph
+  23*22=506 directed edges), `_ChannelCWTNet` gains `n_hops` (1=off,
+  bit-identical A/B for 1 vs 2), classifier gains `mamba_n_hops` (wrapper
+  sets =2). Per-channel CWT power + 1 round cross-channel mixing, still NO
+  coherence. Isolates "cross-channel info in general" from "coherence
+  math specifically". n_hops=1/2 nets are RNG-identical to each other;
+  both differ by a tiny RNG shift from the already-run channel_cwt
+  (0.149/0.263) which had no `self.hops` -- immaterial vs the 0.6 gap +
+  fold variance. Runs one-at-a-time on MPS after pre_repro.
+  **Wrappers in `_to_delete/` (gitignored)** -- scratchpad wiped by the
+  reboot; only `run_channel_cwt.py` + `probe_ensure.py` recreated.
+  No queue runner.
+  (channel_cwt OOM history -- all fixed, run completed NEGATIVE, see
+  above + the session note. Superseded paragraphs removed 2026-08-30.)
+- **QUEUE (2026-08-30, one MPS job at a time -- 16 GB RAM OOMs (rc=137)
+  any two heavy jobs at once):**
+  1. **pre_repro -- DONE 2026-08-31 05:40. REPRODUCES.** 6-fold mean AP
+     **0.644** vs historical 0.674, ROC-AUC **0.973** vs ~0.94 (better
+     global ranker). Per-fold (this / historical): 1_03 .560/.792,
+     1_04 .811/.830, 1_15 .416/.331, 1_16 .985/.996, 1_18 .811/.802,
+     1_26 .283/~.29. Entire 0.03 gap = fold 1_03 variance; every other
+     fold matches or beats. -> 0.674 is real, "pre" sits ~0.64-0.67.
+     Confirms channel_cwt (0.149/0.263) collapsed ~0.5 below a clean
+     same-machine baseline: coherence carries the signal.
+     CSV: `results/temporal_graph_mamba/prediction/*_20260830-211240.csv`.
+     LOG (this shell's scratchpad): `.../pre_repro.log`. MPS. Took ~8.5 h
+     (IO-bound folds 2-6, see below). Full writeup:
+     `Session_notes/2026_08_31/pre_repro_6fold.md`.
+  2. **ablation 1 hops** -- `_to_delete/run_channel_cwt_hops.py`, built +
+     smoke-passed. per-channel CWT power + `mamba_n_hops=2` cross-channel
+     mixing, no coherence. Tests cross-channel-info-in-general vs coherence.
+     **RUNNING 2026-08-31 05:41, pid 29039, MPS**, monitor `bkg4aeuk6`.
+     LOG `scratchpad/channel_cwt_hops_20260831-054113.log`. The armed
+     `queue_runner.sh` DID fire at pre_repro exit but launched WITHOUT
+     `PYTHONPATH` -> `ModuleNotFoundError: No module named 'Epilepsy'`,
+     died instantly (log `channel_cwt_hops_20260831-045945.log`).
+     Relaunched by hand with `PYTHONPATH=. ... --label-mode prediction`.
+     **FIXED 2026-08-31 (shell "The Que"):** all `_to_delete/run_*.py`
+     wrappers now `sys.path.insert(0, <repo root>)` at the top;
+     `queue_runner.sh` rewritten (generic `<pid> <wrapper> [args]`, no
+     PYTHONPATH needed). "The Que" briefly double-launched a 2nd hops
+     (pid 29317) before seeing this shell's note -- killed it + its
+     watcher; **only pid 29039 runs.** A fresh watcher (pid 29471) polls
+     29039 and fires the item-2b SMOKE (`run_temporal_graph_recompute.py
+     --smoke --max-folds 1`) on exit -- do not double-arm.
+     **DONE 2026-08-31 08:06. NEGATIVE.** 6-fold mean AP **0.173**
+     (ROC-AUC 0.878), per-fold .150/.190/.180/.185/.189/.147 -- DEAD FLAT
+     ~0.18 every fold regardless of pre's fold difficulty. At/below the
+     no-hops channel_cwt (.149/.263 on its 2 folds). vs pre_repro 0.644.
+     -> learned complete-graph message passing on per-channel spectral
+     summaries recovers NOTHING; extra params marginally hurt on the ~30-
+     window budget. **CONCLUSION: it's coherence specifically -- the
+     cross-spectrum `S_ij = w_i conj(w_j)` and its phase `arg S_ij` --
+     not cross-channel info in general.** CSV
+     `results/hermitian_ssm/prediction/*_20260831-054118.csv`. Added to
+     NEGATIVES.md + `Session_notes/2026_08_30/channel_cwt_null_baseline_
+     equivalence.md` + `temporal_graph_mamba_math.md` sec 5.
+  2b. **CWT-recompute perf change -- BUILT 2026-08-31 (Mac shell "The Que"),
+      smoke ARMED behind hops (watcher pid 29471). Slotted after item 2.**
+      Wrapper: `_to_delete/run_temporal_graph_recompute.py` (monkeypatches
+      `PREDICTION_TEMPORAL_GRAPH_MAMBA_PARAMS["dense_edge_source"]=
+      "recompute"`). Code: `dense_edge_source="disk_cache"|"recompute"` on
+      `SparseEvidenceGNNClassifier` (+ `Literal`, __init__ validation
+      scoping it to fixed / tds>1 / no time_avg / no cwt_encoder / no
+      channel_subset_k); `dense_edge_cwt_predownsample` on
+      `SparseEvidenceGNNCore` (baked in by `_build_model` when recompute);
+      `_coi_valid_mask` gains `time_stride`; `_build_dense_edge_input`
+      honours predownsample (skip `_downsample_dense_edge_time`, native
+      `n_time_in`); new `_prepare_features_recompute` +
+      `_predownsample_cwt` / `_expand_pooled_cwt_to_edges` /
+      `_recompute_dense_edge_helper` / `_pooled_cwt_cache_dir`
+      (`<dense_edge_cache_dir>/recompute_pooled_cwt`);
+      `dense_edge_cache_key` gains `dense_edge_source` -- appended to the
+      config tuple ONLY when != "disk_cache" so existing on-disk entries
+      (pre_repro's cache) hash identically. CPU unit checks pass
+      (`scratchpad/test_recompute_paths.py`): key namespacing, __init__
+      guards, pooling math, edge rebuild `[B,4,E,T',F]` finite + coh in
+      [0,1], COI stride. NEXT: watcher 29471 auto-runs the smoke on hops
+      exit -> check its log (`run_temporal_graph_recompute_*.log`), then if
+      clean launch the full `python3 _to_delete/run_temporal_graph_recompute.py`
+      6-fold; judge mean AP vs 0.674 AND log s/epoch vs pre_repro's
+      IO-bound 85-370 s (folds 2-6) to confirm the perf win.
+      **SMOKE FIRED 2026-08-31 08:06 (pid 32705) AND CRASHED** --
+      `ValueError: Expected freqs shape (32, 8) or (8,), got (29, 8)` in
+      `_batched_freqs` <- `compute_dense_edge_input` <-
+      `_expand_pooled_cwt_to_edges` <- `_prepare_features_recompute`
+      (cwt_gnn_classifiers.py:3826/4791/6622/6671).
+      **ROOT CAUSE + FIX 2026-08-31 08:10 ("The Que"):** not batch size per
+      se -- `_prepare_features_recompute` cached `self._recompute_freqs` as
+      the *batched* `(B,F)` row returned by `super()._prepare_features`
+      (B=29 on some fold's last batch); a later cache-hit batch (B=32) then
+      fed that stale `(29,8)` to `_batched_freqs`, which only accepts
+      `(B_now,F)` or `(F,)`. Fix: store the 1-D `(F,)` grid --
+      `_f[0] if _f.ndim==2 else _f`. CPU unit checks still pass.
+      RE-ARMED: watcher pid 32870 polls godoy_tmc (pid 32725, another
+      shell's MPS job) and re-runs the smoke on its exit. Do not double-arm.
+      **SMOKE PASSED 2026-08-31 08:22** (godoy done 08:22, smoke pid 33571):
+      clean end-to-end, `[recompute-cwt cache] N/N reused` every batch,
+      edges rebuilt in-forward, ~4 s/epoch, no freqs error. CSV
+      `*_20260831-082209.csv`.
+      **FULL 6-fold RUNNING 2026-08-31 09:11, pid 33936, MPS.** LOG
+      `scratchpad/run_temporal_graph_recompute_FULL_20260831-091127.log`.
+      Judge: (a) mean AP vs 0.674 / pre_repro 0.644; (b) s/epoch vs
+      pre_repro's IO-bound 85-370 s folds 2-6 -- THIS is the point of 2b.
+      **PARTIAL 2026-08-31 09:56 (fold 3/6 running):** PERF WIN CONFIRMED
+      -- ~40-45 s/epoch EVERY fold (fold-1 e1 44.7s then ~42s; fold-2/3
+      e1 ~88-92s cache-warm then ~42-45s) vs pre_repro's 85-370 s on folds
+      2-6. recompute-cwt cache 100% reused every batch, fits RAM, no
+      page-cache thrash. BUT **AP trending DOWN**: 1_03 auc_pr 0.396
+      (pre_repro .560), 1_04 0.404 (pre_repro .811). Training curves
+      healthy (val_roc_auc 0.98+) -- it's test-set AP. Non-bit-identical
+      coarse-grid smooth/xspec looks like it materially degrades the edge
+      features. Wait for all 6 before final call, but leaning: fast but
+      worse -> NOT a drop-in replacement for the leader.
+      **DONE 2026-08-31 10:57. NEGATIVE (accuracy).** 6-fold mean AP
+      **0.469** (ROC-AUC 0.942, k-of-n 4/6) vs pre_repro 0.644 / hist
+      0.674 -- down **0.175**. Per-fold (2b / pre_repro): 1_03 .396/.560,
+      1_04 .404/.811, 1_15 .279/.416, 1_16 .682/.985, 1_18 .842/.811,
+      1_26 .208/.283 -- worse on 5/6, only 1_18 ~matches. Training curves
+      healthy every fold (val_roc_auc 0.98+) -> pure test-set
+      generalisation loss from the non-bit-identical coarse-grid
+      recompute (`smooth@480 != smooth@7680-then-pool`,
+      `xspec(downsample(w)) != downsample(xspec(w))`).
+      **PERF WIN real but moot:** ~42-57 s/epoch EVERY fold (warmup
+      ~88-97s) vs pre_repro's IO-bound 85-370s folds 2-6; recompute-cwt
+      cache 100% reused, ~0.7 MB/trial, fits RAM.
+      **VERDICT: keep `dense_edge_source="disk_cache"` as production. The
+      recompute path is a dead end -- it buys a 2-6x epoch speedup at the
+      cost of 0.175 mean AP.** `dense_edge_source` param + code stays
+      (guarded, default disk_cache, no effect unless opted in); wrapper
+      `_to_delete/run_temporal_graph_recompute.py` kept for the record.
+      CSV `*_20260831-091141.csv`. Added to NEGATIVES.md.
+      --- ORIGINAL NOTES ---
+      Facts pinned 2026-08-31 (Mac shell "The Que"), config
+      `PREDICTION_TEMPORAL_GRAPH_MAMBA_PARAMS` (the AP 0.674 leader):
+      window 30 s @ 256 Hz = **7680 samples native**; `nfreqs=8` (8-40 Hz);
+      `cwt_resample_n_time=None` -> **CWT cache stored at native T=7680**
+      (`[2,23,7680,8]` ~11 MB/trial); `dense_edge_time_downsample=16` ->
+      **dense-edge cache at T=480** (`[4,253,480,8]` full mesh
+      ~**15 MB/trial** -- E=C*(C-1)/2=253 undirected, matches
+      save_dense_edge docstring; >RAM across the 6-fold set = the IO wall);
+      `coherence_threshold_mode="fixed"` (determinism precondition holds);
+      `time_averaged_graph=False`.
+      Streaming classifier calls `_precompute_dense_edge_inputs` once per
+      BATCH every epoch (comments ~7448) -> disk cache hit every batch =
+      the wall.
+      **DECISION (user: "not worried about bit identical"): build VERSION
+      B, run as a fresh experiment vs 0.674 (NOT a drop-in perf swap).**
+      `_build_dense_edge_input` order is cross-spectrum(253 edges) ->
+      `_smooth` (sep. Gaussian, stride 1) over full native 7680 ->
+      `_downsample_dense_edge_time` x16 -> 480. Version A (cache native
+      CWT, recompute the real pipeline) is bit-identical but the
+      recompute is the "94.8% of forward() time" smooth-over-7680 paid
+      every epoch -- likely NOT faster on MPS. Version B: cache CWT
+      **pre-downsampled x16** (`[2,23,480,8]` ~**0.7 MB/trial**, ~1 GB/fold,
+      fits RAM ~44x smaller); in-forward do only cross-spectrum + smooth
+      + COI + stack at T=480 (cheap: ~62M complex elems/batch, few ms MPS);
+      SKIP `_downsample_dense_edge_time` (CWT already coarse). NOT
+      bit-identical -- smooth@480 != smooth@7680-then-pool, and
+      xspec(downsample(w)) != downsample(xspec(w)). COI: keep the TRUE
+      `n_time_in=7680` (stash it) with `T_out=480` so `_coi_valid_mask`'s
+      cone scaling stays physical.
+      **Call sites (cwt_gnn_classifiers.py unless noted):**
+      - `_precompute_dense_edge_inputs` (~7231) -- branch on new knob;
+        when "recompute": mean-pool `w_real/w_imag` over T by
+        `dense_edge_time_downsample` BEFORE `compute_dense_edge_input`,
+        cache THAT (new small cache namespace, not the `[4,E,T,F]` disk
+        cache), return the freshly built `[B,4,E,480,8]` (do NOT persist
+        the big stack).
+      - `_build_dense_edge_input` / `compute_dense_edge_input` (~4596/
+        ~4741) -- add `cwt_predownsampled: bool`; when True skip the
+        trailing `_downsample_dense_edge_time`, pass real `n_time_in` to
+        `_coi_valid_mask` (~4667).
+      - `_temporal_graph_node_states(dense_edge_raw)` (~5206) -- unchanged;
+        still receives full `[B,4,E,480,8]` (temporal_edge_proj needs all
+        E, all T, 4*F). Only the *persistence* changes, not the shape.
+      - `run_pipelines.py`: add `dense_edge_source="disk_cache"|"recompute"`
+        to `PREDICTION_TEMPORAL_GRAPH_MAMBA_PARAMS`; plumb like
+        `resolve_disable_disk_cache` (~163) / `shared_dense_edge_cache_dir`
+        (~1427/1610/1716).
+      - CWT reuse: native `w_real/w_imag` already come from the CWT window
+        cache (`cwt_window_cache.py`), invariant to per-fold
+        `scale=1/(std+eps)`; the downsample + xspec are the only new work.
+      - Wrapper: `_to_delete/run_temporal_graph_recompute.py` (monkeypatch
+        `dense_edge_source="recompute"` into the params dict, like the
+        other `_to_delete` wrappers) + A/B timing harness (1 fold each
+        mode, compare s/epoch + final fold-1 AP).
+  3. **significance 3-vs-4 ablation -- BUILT 2026-08-31 ("The Que"),
+     smoke ARMED behind 2b (watcher pid 34646).** Wrapper
+     `_to_delete/run_edge_drop_significance.py` (monkeypatches
+     `PREDICTION_TEMPORAL_GRAPH_MAMBA_PARAMS["temporal_graph_edge_drop_
+     significance"]=True`). Code: `temporal_graph_edge_drop_significance:
+     bool` on Core + Classifier (+ `_build_model` plumb). When True:
+     `temporal_edge_proj` = `Linear(3*nfreqs -> edge_dim)` and
+     `_temporal_graph_node_states` slices `dense_edge_raw[:, :3]` in-forward
+     (cproj path already ignored ch3). **Runs on disk_cache path** (NOT 2b's
+     recompute) -- bit-identical edge features, only ch3 dropped; per-epoch
+     ~ pre_repro's IO-bound wall-clock. CPU checks pass (in_features 24 vs
+     32, node_states forward OK both ways). Judge 6-fold mean AP vs 0.644 /
+     0.674.
+     **DONE 2026-08-31 12:39. MILD NEGATIVE / noisy.** 6-fold mean AP
+     **0.542** (ROC-AUC 0.957, hit 6/6 raw + 5/6 k-of-n) vs pre_repro
+     0.644 -- **down 0.10**, but MIXED per-fold (item3 / pre_repro):
+     1_03 .237/.560, 1_04 .593/.811, 1_15 **.568/.416**, 1_16 .732/.985,
+     1_18 **.872/.811**, 1_26 .251/.283 -- worse on 3, BETTER on 2, ~tie 1.
+     The deficit is ~2x the fold noise, concentrated in 1_03. Well above
+     2b's 0.469, so the significance channel matters more than the
+     coarse-grid recompute did -- but the muddiness is exactly why the
+     COI-mask follow-up (item 3b) is worth running. CSV
+     `*_20260831-110945.csv`. LOG `run_edge_drop_significance_FULL_
+     20260831-110934.log`. Added to NEGATIVES.md.
+  3b. **`dense_edge_ch3="coi_mask"` -- BUILT 2026-08-31 ("The Que"),
+      NOT yet queued (user: godoy 5-seed sweep goes first).** Tests the
+      hypothesis from item 3: significance's only non-redundant content in
+      fixed mode is the COI boundary (`sig_masked = coh/thr - coi_valid`),
+      so replace stack component 3 with the RAW `coi_valid` mask -- same
+      4-vector width, ch3 now carries only the cone boundary, zero
+      redundancy with ch0. Code: `dense_edge_ch3: Literal["significance",
+      "coi_mask"]` on Core (ch3 swap in `_build_dense_edge_input` after
+      the COI-mask block) + Classifier (validation: fixed mode +
+      coi_enabled + not drop_significance) + `_build_model` plumb +
+      `dense_edge_cache_key` (namespaced `ch3=coi_mask`, appended only
+      when != "significance" so pre_repro's cache is untouched -- but note
+      a coi_mask run recomputes its own [4,E,T,F] stack from scratch, ~8h
+      like pre_repro fold 2-6). CPU checks pass (cache-key namespacing,
+      3 validation raises, build_model keeps 4-vector). Wrapper
+      `_to_delete/run_edge_coi_channel.py` still TODO.
+  3c. **`channel_subset_k` now works with "pre" -- FIXED 2026-08-31 (this
+      shell), QUEUED (run after item 3b / the parked post jobs, or
+      sooner on a free MPS slot -- it's cheap).** `--channel-subset-k K` was plumbed to
+      `event_mode="temporal_graph"` but `_temporal_graph_node_states`
+      (cwt_gnn_classifiers.py ~5348) summed ALL 253 edges' messages -- dead
+      (non-clique) edges arrive as scattered zeros, but `temporal_edge_proj`
+      / `sparse_message_mlp` biases turn a zero input into a nonzero
+      CONSTANT, polluting every node's mean, and it divided by the fixed
+      full-mesh `temporal_node_in_degree`. **Fix:** derive the live-edge
+      mask from `dense_edge_raw` (dead edge = exactly all-zero), zero the
+      dead messages, divide each node by its per-sample live in-degree.
+      Bit-identical at full mesh (verified via `torch.equal` on an all-live
+      sample); both `pre` and `post` aggregate branches. 29/30 dense-edge
+      tests pass (1 fail is pre-existing `--pipeline` choices staleness).
+      **Smoke first** (fast, 1-2 folds, 5 interictal recs, capped epochs):
+      `python Epilepsy/run_pipelines.py --pipeline temporal_graph_mamba
+      --label-mode prediction --device mps --channel-subset-k 12 --smoke`
+      -- confirms the live-clique cache builds (look for `[4,66,...]` not
+      `[4,253,...]` edge tensors) and a fold completes without NaN.
+      **Then the real run:** `python Epilepsy/run_pipelines.py --pipeline
+      temporal_graph_mamba --label-mode prediction --device mps
+      --channel-subset-k 12` (full 6-fold; ~1-2h, cache fits RAM so no
+      IO wall like pre_repro). Compare mean AP to pre_repro 0.644 /
+      hist 0.674; log a NEGATIVES.md row + session note. Try K=8 next if
+      K=12 is within fold noise. (K=12 -> 66 edges cached vs 253, ~4x
+      smaller; K=8 -> 28, ~9x.) NB drops whole channels not just edges -- non-
+      selected nodes ~zero per window, live clique is per-window, so the
+      `Linear(184,2)` readout sees a varying active set (modeling risk, not
+      a bug). Selection = deterministic cosine top-k on the raw per-window
+      signal. Uncommitted edit to `cwt_gnn_classifiers.py` -- coordinate
+      with "The Que" (also editing that file, items 3/3b).
+  4. parked post-based jobs (other thread): `run_edge_complex.py` (~11 h)
+     -> `run_anomaly.py` v2 (~3-4 h) -> `run_post.py` (~11 h). Wrappers
+     need recreating in `_to_delete/` (scratchpad wiped by reboot).
+  - `continuous_cwt_mamba` 6-fold: **not launched** (user, see below).
+  5b. **godoy_tmc 5-seed sweep -- DONE 2026-08-31.** Seeds 42-46 6-fold
+      mean AP: 0.619 / 0.548 / 0.590 / 0.550 / 0.470 -> **mean 0.556,
+      sample std 0.056** (range 0.47-0.62). The single-run 0.619 was the
+      TOP of the range: seed 42 drew a lucky `1_03` (AP 0.549 vs ~0.15
+      for the other four seeds). All seed variance lives in folds `1_03`
+      and `1_26`; `1_16` perfect every seed, `1_18` perfect on 4/5.
+      godoy_tmc on MPS is deterministic given seed (seed-42 sweep run was
+      bit-identical to `-080715`). Honest headline **0.556 ± 0.056** --
+      a clear 3rd, ~0.08-0.09 AP behind "pre" (0.644) / "post" (0.639),
+      NOT a near-tie. Session note
+      `Session_notes/2026_08_31/godoy_tmc_seed_sweep.md`; comparison-doc
+      board row + caveat updated. CSVs seed 42 `-124010`, 43 `-125636`,
+      44 `-131322`, 45 `-133242`, 46 `-135037`.
+  5c. **godoy_tmc d_model capacity mini-sweep -- DONE 2026-08-31.**
+      Helper `_to_delete/_godoy_run_one.py <d> <heads> <seed>`
+      (monkeypatches `_ConvTokenizer` last conv block + `n_heads`).
+      Cut to **seed 42 only** at d16 and d64 (d16 gated seeds 43/44 off).
+      Per-fold AP seed 42: d16 **0.519** (`*-140959.csv`), d32 **0.619**
+      (`*-080715`), d64 **0.498** (`*-142719.csv`). Inverted-U, peak at
+      the paper's d_model=32; both directions lose ~0.10 AP; d64 overfit
+      the val split (val_roc_auc ~0.998, lost held-out seizure). No d8
+      run (gate not met). **Capacity axis closed for godoy_tmc -- it is
+      already at its best config, width does not rescue it toward "pre".**
+      Session note: `Session_notes/2026_08_31/godoy_tmc_seed_sweep.md`
+      (d_model capacity sweep section appended).
+
+  5d. **MISSION (2026-08-31): faithful-to-"pre" but RAM-resident.**
+      Goal = a `temporal_graph_mamba` "pre" variant whose dense-edge
+      cache fits in 16 GB RAM (no page-cache thrash like item 2b's
+      recompute), with mean AP as close as possible to pre_repro 0.644 /
+      hist 0.674. Lever in flight: `--channel-subset-k` (top-K channels
+      by `abs_cosine` -> C(K,2)-edge clique; live-clique cache only
+      builds surviving edges). K=12 -> 66/253 edges (~3.8x cache cut,
+      most faithful subset that fits); K=4 -> 6/253 edges (~42x, floor).
+      **K=12 KILLED after fold 3 (2026-08-31, run-discipline gate) --
+      NEGATIVE.** folds 1_03/1_04/1_15 AP 0.296/0.528/0.460 vs pre_repro
+      0.560/0.811/0.416; 3-fold mean 0.428 vs 0.596, down ~0.17. Dropping
+      187/253 edges is amputation. K=4 cancelled with it. NEGATIVES.md
+      row logged. Log `_to_delete/pre_csk12_real_20260831-145254.log`.
+      **Recomputed the RAM math (earlier 61 GB figure was WRONG -- that's
+      the accumulated on-disk cache across many runs, not one run's
+      working set).** One full-mesh 6-fold run: ~14 GB disk cache; the
+      DataLoader re-streams only ~700 subsampled train windows/epoch =
+      **~11 GB/epoch at fp32** -> marginal on the 16 GB Mac (mild thrash).
+      **fp16 halves it to ~5.5 GB/epoch -- fits, zero edges dropped.**
+      COI masks only 2.1% of (t,f) cells at 8-40 Hz (measured), so
+      cell-sparsity is not worth it here. Significance channel (ch3) in
+      fixed mode = `coi_valid * (coh/0.9 - 1)` -- exactly recomputable
+      from ch0 at load, 25% more if dropped from storage (v2).
+
+      **DISK CLEANUP 2026-08-31 ~15:55 (was 97% full, fp16 build ENOSPC'd
+      twice):** deleted (all regenerable) -- item-2b `recompute_pooled_cwt`
+      (~2.9 GB), all `channel_subset_k` compact entries (~13.6 GB, whole
+      subset-k line rejected), `~/mne_data/hermitian_ssm_cache` (24 GB,
+      encoder investigation CLOSED), and **fp32 full-mesh dense_edge_cache
+      entries >12 h old (~59 GB)**. That last one means the **parked "post"
+      jobs will have to regenerate their dense-edge cache** (~hours of
+      precompute) when/if they run. Disk now 55% used, 87 GB free.
+
+      **RUNNING 2026-08-31 ~16:10, MPS:** `_to_delete/run_pre_fp16_cache.py`
+      (seed 42) -- full-mesh "pre" 6-fold with the dense-edge cache stored
+      float16 (monkeypatches the cache layer, `-fp16` key suffix so it
+      never collides with the fp32 cache, upcasts on load so downstream is
+      unchanged). Log `_to_delete/pre_fp16_seed42_*.log`. Verified: fp16
+      npz = 7.8 MB (half of 15.5), dtype float16, all 253 edges. Compare
+      mean AP to pre_repro 0.644 -- MUST reproduce it (fp16 is pure
+      compression, byte-exact after upcast). If it holds: this is the
+      RAM-resident faithful deliverable; then item 3b + drop-ch3 for more.
+
+      **UPDATE 2026-08-31 ~23:10 -- see `_to_delete/OVERNIGHT_STATUS.md`
+      for the full running handoff.**
+      - ROOT-CAUSE of the earlier fp16 thrash: the repo NEVER calls
+        `torch.mps.empty_cache()`. On Apple Silicon the MPS reserved pool
+        IS system RAM; without it, `_precompute_dense_edge_inputs`' GPU
+        transients become permanent resident RAM -> swap. FIX (works,
+        verified clean 42-56s/epoch): `_to_delete/run_pre_fp16_*` wrappers
+        now monkeypatch `empty_cache()` into `_save_fp16` + a `_sync_device`
+        wrapper. Consider upstreaming (ask user first).
+      - fp16 seed 42 6-fold: **mean AP 0.617 vs pre_repro 0.644** (-0.027),
+        one-sided (every fold <= pre_repro). Per-fold:
+        .459/.791/.375/.985/.807/.284 vs .560/.811/.416/.985/.811/.283.
+        1_16_0 bit-identical, 1_18_0/1_26_0/1_04_0 within noise; gap is
+        1_03_0 (-0.10, a fold that swings 0.29-1.00) + 1_15_0.
+      - fp16 SEED SWEEP (2026-09-01, `_to_delete/fp16_queue.sh`, one MPS
+        job at a time, "-fp16" cache reused, no rebuild). 6-fold mean AP:
+        seed42 .617 / seed43 .490 / seed43@30ep .464 / seed44 .609 /
+        seed45 .510. vs pre_repro .644 (historical .674). Spread ~0.06
+        std swamps the seed42 -0.027; NO isolated fp16 penalty visible.
+        seed43 is a genuinely bad val-split/init draw (30 epochs did not
+        rescue it, .464). "Stable" fold 1_16_0 stays .93-1.00 every seed;
+        all volatility is in the tiny noise folds 1_03_0 / 1_04_0.
+        Per-seed logs `_to_delete/pre_fp16_seed*_*.log`, means in
+        `_to_delete/fp16_queue.out`. Plan: seeds 46/47, then `rm
+        *-fp16.npz` (~31 GB), then forever fp32 seed sweep (Phase B,
+        `run_pre_fp32_emptycache.py`) for matched fp16-vs-fp32 rows.
+        Full write-up: `Epilepsy/Session_notes/2026_09_01/fp16_dense_edge_cache_seed_sweep.md`.
+        Phase B (`_to_delete/phaseB_fp32_sweep.sh`) now sweeping matched
+        fp32 seeds 42,43,44,... for paired fp16-vs-fp32. `-fp16` cache
+        deleted 09-01 (~31 GB freed); fp32 no-suffix files kept.
+        NEGATIVES.md seed-exposure row still TODO.
+      - fp16 `_load` upcasts to fp32 on load, so fp16 halves DISK + the
+        DataLoader re-stream READ but NOT the resident fp32 edge tensor.
+      - NEXT (user priority): AWS S3 upload of `~/mne_data/dense_edge_cache`
+        (~36 GB, $100 credit, be frugal, egress ~$3.24 so no yo-yo) to
+        free local disk WITHOUT deleting the fp32 partial cache, then an
+        fp32 6-fold "tracking" run + the nfreqs=16 band probe
+        (`run_pre_fp16_nfreqs16.py`, DEFERRED, ~63 GB cold rebuild).
+  4. parked post-based jobs (other thread): `run_edge_complex.py` (~11 h)
+     -> `run_anomaly.py` v2 (~3-4 h) -> `run_post.py` (~11 h). Wrappers
+     need recreating in `_to_delete/` (scratchpad wiped by reboot).
+  - `continuous_cwt_mamba` 6-fold: **not launched** (user, see below).
+  5. **`godoy_tmc` real 6-fold** chb01 prediction LOSO -- separate thread,
+     plain CLI, no scratchpad wrapper needed (no source patching). See
      `Epilepsy/pipelines/godoy_tmc_classifier.py` (TMC-T, built from
      arXiv:2209.11172, commit `8e3945d`) and its addition to
      `_build_argument_parser`'s `--pipeline` help text for the full
@@ -108,6 +612,25 @@ signal the direction has produced (see below).
      table, same protocol, same "not the paper's own reported number"
      framing (Godoy et al.'s own eval was a random 80/20 split, not
      LOSO -- see the classifier's module docstring).
+     **DONE 2026-08-31 08:07 (other shell, pid 32725). 6-fold mean AP
+     0.619**, ROC-AUC 0.968, f1 0.532, recall 0.811, FAR/h 8.66, hit 5/6
+     raw + 5/6 k-of-n. Per-fold AP .549/.291/.311/1.000/1.000/.564 --
+     perfect on 1_16 AND 1_18 (0 false alarms; 1_18 is the fold every
+     other raw-EEG model collapses recall on), total miss on 1_15
+     (predicts 0 preictal, but AP .311/AUC .957 -> threshold/calibration
+     failure not representation). Strongest in that comparison doc on
+     every aggregate metric bar FAR/h-smoothed; sits just under "pre"
+     (0.644-0.674), above the doc's old encoder-free Mamba (0.499).
+     WRITEUP DONE 2026-08-31: **new `Session_notes/2026_08_31/pipeline_
+     comparison_all_models.md`** -- the full board, all 9 candidate
+     pipelines + the ablation/variant table, refreshed from CSVs. (The
+     2026_08_25 4-way doc is left untouched as the detailed write-up for
+     those four; an earlier attempt to bolt Godoy + a "pre" row onto it
+     was reverted per user -- "make a new writeup with all the models".)
+     Board top: "pre" 0.644 / "post" 0.639 / godoy **0.556 ± 0.056**
+     (5-seed sweep, see 5b; single-run 0.619 was the lucky top) /
+     enc-free Mamba 0.499 / DBConf 0.442 / herm-eig 0.436 / SlimSeiz
+     0.430 / GRU 0.423 / CG-MN 0.127.
 - **`continuous_cwt_mamba` 6-fold -- NOT to be launched (user, 2026-08-30);
   kept in context only.** CPU smoke (subject 1, 1 fold) ran clean into
   training -- epoch 1 `loss=0.708 val_loss=0.743` at ~29 min (incl. one-time
@@ -1173,6 +1696,19 @@ read off a continuous timeline). See "Open threads" below.
   CSVs are on disk. `~/mne_data/hermitian_ssm_cache/9d6ad0d850b8b8f0` =
   9.8 GB (band-match config, all 41 recordings, warm) -- the encoder
   experiments (#2/#3/#4/#6) all reuse it unchanged, no new cache writes.
+- **HOUSEKEEPING: prune stale `hermitian_ssm_cache` keys (~14 GB), TODO.**
+  As of 2026-08-31 `~/mne_data/hermitian_ssm_cache` = 24 GB across 5 keys.
+  ACTIVE = `9d6ad0d850b8b8f0` (9.8 GB, per-seizure SUBDIR layout +
+  `config.json`: k=6, 8-40 Hz, nfreqs=16, fd=2, td=16, diagonal=zero) --
+  KEEP. STALE (flat `1_XX.npy`, NO config.json, all mtime 08-30, from the
+  closed encoder/backend sweep): `e17cc670654f6b76` 9.9 G,
+  `1623f9b20fc41f57` 3.1 G, `f86554f585cbcdb9` 1.1 G, `60300779bc34771f`
+  0.35 G. Before `rm -rf`: confirm queued `anomaly_v2` / `edge_complex`
+  (share the hermitian eigenpair cache) resolve to `9d6ad0d850b8b8f0` --
+  they should (eigenpair key = band/k/downsample only; encoder_mode +
+  mamba_backend are downstream, don't touch it). NOT urgent (18 GiB free
+  disk) and does NOT help the dense_edge >RAM IO wall (that's item 2b).
+  Do it during a queue lull.
 - **STG-Mamba Design A (topology modulates the SSM delta) -- still
   unbuilt.** See `Epilepsy/graph_state_space_mamba_design.md`; the
   `hermitian_ssm` pipeline above deliberately took the simpler
