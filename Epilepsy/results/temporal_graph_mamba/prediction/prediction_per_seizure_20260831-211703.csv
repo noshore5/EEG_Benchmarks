@@ -1,0 +1,5 @@
+subject,run,seizure_id,seizure_onset_s,seizure_offset_s,seizure_duration_s,run_start_time,hit,hit_smoothed,n_preictal_windows,n_preictal_windows_predicted_positive,mean_preictal_score,n_interictal_windows,n_false_alarms,false_alarms_per_hour,false_alarms_per_hour_smoothed,gap_to_nearest_seizure_same_recording_s
+1,15,1_15_0,1732.0,1772.0,40.0,2076-11-06T15:43:19+00:00,True,True,30,29,0.802507758140564,688,51,8.895348837209303,1.9186046511627908,
+1,16,1_16_0,1015.0,1066.0,51.0,2076-11-06T16:43:26+00:00,True,True,23,23,0.9168204665184021,720,6,1.0,0.0,
+1,18,1_18_0,1720.0,1810.0,90.0,2076-11-06T17:43:33+00:00,True,False,30,9,0.30972135066986084,720,0,0.0,0.0,
+1,26,1_26_0,1862.0,1963.0,101.0,2076-11-06T18:43:40+00:00,True,True,30,21,0.5895666480064392,600,42,8.4,5.6,
