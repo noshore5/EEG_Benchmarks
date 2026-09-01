@@ -112,6 +112,53 @@ there. To hand a result to eeg-box specifically, drop it under
 after launching check back with:
 `aws ec2 describe-instances --filters Name=tag:Project,Values=eeg Name=instance-state-name,Values=running --query 'Reservations[].Instances[].[InstanceId,InstanceType,LaunchTime]' --output text`
 
+## Autonomous runs -- `eeg-run` (fire-and-forget, self-committing)
+
+`scripts/eeg-run.sh` is the fire-and-forget path: launch it and the result
+CSV(s) (and, optionally, a session note) land as a commit on `origin/main`
+with **no human step**. Flow:
+
+```
+scripts/eeg-run.sh --cpu --name godoy-pred-6fold \
+  --cmd 'python Epilepsy/run_pipelines.py --pipeline godoy_tmc --label-mode prediction --device cpu' \
+  --session-note 'Why: real 6-fold prediction-label run to confirm the val_split=0 leak fix holds.'
+```
+
+On the box: clone repo -> `pip install` -> run `--cmd` -> then
+`scripts/promote_results.sh`:
+
+- **`rc != 0`** -> ship logs to S3, one **SNS email** (`eeg-runs` topic),
+  terminate. **No commit.**
+- **`rc == 0`** -> `git add` **only** new files under `Epilepsy/results/`
+  and `Epilepsy/Session_notes/` (refuses if the run dirtied any tracked
+  file outside those two dirs), commit as `eeg-autorun`, `git push` to
+  `main` with up to 6 pull-rebase retries. Then ship full logs + results
+  tree to S3 and terminate.
+
+Purely additive by construction -- pipelines write timestamped CSVs
+(`..._<run_id>.csv`), so promotion never edits an existing file and
+effectively never conflicts. A bad run can at worst add a results folder
+you delete; it can't corrupt anything you pull.
+
+**Session note** (`--session-note "<why>"`): LLM-written if
+`/eeg/gemini-api-key` holds a real key, else a deterministic template
+(run config + metrics table + `run.log` tail). Note generation never
+blocks the commit.
+
+**Credentials** (one-time, `scripts/setup_autorun_infra.sh`):
+- SSM SecureString **`/eeg/github-deploy-key`** -- a `contents:write`
+  GitHub deploy key, repo-scoped, revocable from the repo's Deploy Keys
+  page. The box pulls it only for the push.
+- SSM SecureString **`/eeg/gemini-api-key`** -- optional, for LLM notes.
+- Roles `eeg-gpu` / `eeg-box` inline policy **`eeg-ssm-and-sns`**:
+  `ssm:GetParameter` on `/eeg/*` + `sns:Publish` on `eeg-runs`.
+- SNS topic **`eeg-runs`** -> email; the only notification you get (on
+  failure). Success = the commit.
+
+**GPU note:** `--gpu` fails at `run-instances` until the pending G/VT
+quota increase lands (see "If you're bringing up the GPU box"). `--cpu`
+works now (Ubuntu 24.04, on-demand, 8-vCPU limit applies).
+
 ---
 
 ## Boxes
