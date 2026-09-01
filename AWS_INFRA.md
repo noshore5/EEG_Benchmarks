@@ -7,9 +7,8 @@ cloud state, not repo state, and nothing in the pipelines reads from it
 yet.
 
 **Account:** `827938107865` &nbsp; **Region:** `us-east-1`
-**Last verified:** 2026-09-01, by Claude (eeg-box shell) -- EC2/SSM grant
-to role `eeg-box` applied from the Mac and confirmed working from the box
-(`RunInstances` dry-run succeeds).
+**Last verified:** 2026-09-01, by Claude (eeg-box shell) -- `eeg-cpu-box`
+stood up + bootstrapped end-to-end; gotchas below all hit and confirmed.
 
 ---
 
@@ -17,11 +16,91 @@ to role `eeg-box` applied from the Mac and confirmed working from the box
 
 | Box | Instance | Spec | State | Address | Notes |
 |---|---|---|---|---|---|
-| **eeg-box** | `i-083e3b55993a13c13` | t3.small, 30 GB EBS (`vol-0812ddb8bac762447`) | running | public `54.236.223.15`, private `172.31.22.104` | the box this agent usually lives on |
+| **eeg-box** | `i-083e3b55993a13c13` | t3.small, 30 GB EBS (`vol-0812ddb8bac762447`) | running | public `54.236.223.15`, private `172.31.22.104` | the box this agent usually lives on. 2 vCPU / 2 GB RAM -- too small to run pipelines (no deps installed) |
+| **eeg-cpu-box** | `i-0a6100d4c303f52a2` | c7i.2xlarge (8 vCPU / 16 GB), 50 GB gp3, us-east-1a | **stop/start** (persistent) | -- | on-demand CPU worker for pipeline runs. Bootstrapped 2026-09-01 (pip env + chb01 data on the volume). `--instance-initiated-shutdown-behavior stop`. Idle ~$4/mo (volume only); ~$0.36/hr when running. See "eeg-cpu-box job runner" below. |
 | GPU box | -- | -- | **not launched** | -- | IAM/instance-profile staged (`eeg-gpu`), nothing running |
 
-There is currently **one** EC2 instance. "The other infra" is the shared
-S3 bucket + the IAM scaffolding below, not a second machine.
+## Launching an EC2 box from eeg-box -- read before `run-instances`
+
+Every one of these was hit for real standing up `eeg-cpu-box` 2026-09-01.
+Skipping this list cost ~40 min of terminate/relaunch cycles.
+
+1. **AMI has no `aws` CLI.** `ami-0d7f022123f8ff19d`
+   (`ubuntu-noble-24.04-amd64-server`) -- and every stock Ubuntu 24.04
+   image -- ships **no `aws`**, no `session-manager-plugin`, and there is
+   **no `awscli` apt package** (not in the enabled repos). Any user-data
+   that calls `aws` must install it *first*:
+   ```
+   apt-get update -y && apt-get install -y unzip curl
+   curl -sS https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o /tmp/a.zip
+   ( cd /tmp && unzip -q a.zip && ./aws/install )   # -> /usr/local/bin/aws
+   ```
+   Symptom if you forget: user-data half-runs, nothing ever appears in
+   S3, `describe-instances` just says `running`. (eeg-box's own `aws` was
+   hand-installed to `/usr/local/bin/aws`, so it's misleading.)
+2. **Spot is not available to this role.** `RunInstances` with
+   `--instance-market-options MarketType=spot` fails
+   `AuthFailure.ServiceLinkedRoleCreationNotPermitted` -- the
+   `AWSServiceRoleForEC2Spot` SLR doesn't exist and `eeg-box` has neither
+   `iam:CreateServiceLinkedRole` nor `CreateSpot...`. **Use on-demand**
+   until an admin creates that SLR once (`aws iam
+   create-service-linked-role --aws-service-name spot.amazonaws.com`).
+3. **On-demand vCPU limit is 16** (Standard family: C/D/H/I/M/R/T/Z).
+   `eeg-box` (t3.small) already burns 2 -> **<=14 free**. So:
+   `c7i.2xlarge` (8) fine; `c7i.4xlarge` (16) -> `VcpuLimitExceeded`.
+   Replacing an 8-vCPU box: 8+8 = 16 but with eeg-box's 2 that's 18 ->
+   you must wait for the old one to reach **`terminated`** (not just
+   `shutting-down`, ~2-4 min) before the replacement will launch.
+4. **AZ capacity varies.** `c7i.4xlarge` in us-east-1c returned
+   `InsufficientInstanceCapacity`; 1a was fine. VPC
+   `vpc-0ab36a88b3617669a` public subnets (all auto-assign public IP):
+   1a `subnet-057fcd8e8ed1ec050`, 1b `subnet-07cdbc1058cf4f752`,
+   1c `subnet-021f5ceeb4af26220`, 1d `subnet-00252702f59bac48f`,
+   1e `subnet-0d55ae5c23cf61927`, 1f `subnet-0090cef9098097cb0`.
+5. **`eeg-box` role CANNOT:** `ec2:CreateImage` (no AMI baking),
+   `ec2:ModifyInstanceAttribute` (no termination protection, no
+   instance-type change on a stopped box -- pick the type you want up
+   front), `ssm:SendCommand` / `ssm:GetCommandInvocation` (only
+   `StartSession`), `ssm:GetParameter` (can't resolve the Canonical AMI
+   SSM alias -- use `describe-images --owners 099720109477` or the pinned
+   id above), any `iam:*`, `iam:ListInstanceProfiles`.
+6. **Tag `Project=eeg` at launch** (`--tag-specifications
+   'ResourceType=instance,Tags=[{Key=Project,Value=eeg}]'`) or you can't
+   stop/terminate it afterward -- those perms are tag-gated.
+7. **No `session-manager-plugin` on eeg-box** -> `aws ssm start-session`
+   errors out. To drive a box: install the plugin (deb from AWS), or use
+   `--instance-initiated-shutdown-behavior stop` + the S3 job-runner
+   pattern below (no shell needed).
+8. A correct bootstrap of `eeg-cpu-box` takes **~4 min** (apt + awscli +
+   `pip install -r requirements.txt` ~2.5 min + chb01 prefetch). If it's
+   taking much longer with no S3 output, it's item 1, not slowness.
+
+## eeg-cpu-box job runner
+
+No `ssm:SendCommand` / `ec2:ModifyInstanceAttribute` / `ec2:CreateImage`
+for the `eeg-box` role, so the CPU box is driven through S3, not a shell:
+
+- **Start it:** `aws ec2 start-instances --instance-ids i-0a6100d4c303f52a2`
+  (eeg-box role can start/stop it -- tag `Project=eeg`). A systemd unit
+  `eeg-runner.service` starts on boot and polls S3.
+- **Queue a job:** upload a bash script to
+  `s3://noshore-eeg-benchmarks-827938107865/exports/eeg_box/jobs/next.sh`.
+  The runner claims it (`s3 mv`), runs it with `cwd=/root/repo`, streams
+  `output.log` to `.../jobs/latest.log` every 30 s, and on exit copies
+  `output.log` + `rc` + `Epilepsy/results/` to `.../jobs/runs/<ts>/`.
+- **Idle self-stop:** 30 min with no job -> the runner runs `shutdown -h
+  now`, which *stops* (not terminates) the box. Restart + re-queue to use
+  it again. Repo is at `/root/repo` (git clone, `git pull` in a job to
+  update); chb01 data cached on the volume.
+- Bootstrap progress on first launch: `.../exports/eeg_box/bootstrap-status`.
+- user-data / job-runner source: `s3://…/exports/eeg_box/_setup/`
+  (`persist_userdata.sh`, `job_godoy.sh`). Regenerate the box from
+  `persist_userdata.sh` if the volume is ever lost. Terminating the box
+  loses the bootstrapped env (no AMI -- `CreateImage` denied).
+- **Gotcha:** the base Ubuntu 24.04 AMI has **no `aws` CLI** and no
+  `session-manager-plugin` / `awscli` apt package. `persist_userdata.sh`
+  installs the CLI (official v2 zip) before its first `aws` call -- keep
+  that step first.
 
 ## Shared storage
 
@@ -67,6 +146,10 @@ Old bucket `s3://coheriq-eeg-dense-edge-cache/` (referenced in
   but no DLM schedules are configured.
 
 ## If you're bringing up the GPU box
+
+**First read "Launching an EC2 box from eeg-box" above** -- the awscli,
+spot-SLR, vCPU-limit and tag gotchas all apply here too (a GPU instance
+family has its own separate on-demand vCPU limit, likely 0 until raised).
 
 1. Launch from eeg-box into `us-east-1`, attach instance profile
    **`eeg-gpu`** and SG **`eeg-ssh`**, key pair **`eeg-box`**, and tag
