@@ -635,11 +635,17 @@ signal the direction has produced (see below).
         on Mac / `--device cpu` on AWS). Mac wrapper `_to_delete/run_pre_val0.py
         <seed> <epochs>` (MPS-only monkeypatch -- do NOT use on AWS; call
         run_pipelines directly with --device cpu there).
-        STATUS:
-          - ep12 seed42: DONE, 6-fold mean AP **0.627** (commit 88aff75).
-          - ep12 seed43: RUNNING on Mac 09-01 (pid 54986).
-          - ep12 seed{44,45,46}: Mac, queued.
+        STATUS (no compute running as of 09-01 20:00, user paused it):
+          - ep12 seed42: DONE, mean AP **0.627** (88aff75).
+          - ep12 seed43: DONE, mean AP **0.569** (aa2a60d).
+          - ep12 seed44: DONE, mean AP **0.540** (d7f7683).
+          - ep12 seed{45,46}: NOT RUN (Mac, resume via
+            `_to_delete/run_pre_val0.py <seed> 12`).
           - **ep20 seed{42..46}: UNCLAIMED -> AWS cpu box to run.**
+        Finding so far: seed spread at val=0 is 0.627/0.569/0.540 --
+        pure optim noise (no split-luck channel), SAME magnitude as the
+        val-split=0.2 sweep. Dropping the split did NOT tighten the error
+        bar; it just moved variance from split-luck to init/SGD-luck.
         Per job: 6-fold mean AP over the `average_precision` column of
         `prediction_leave_one_seizure_out_*.csv`; commit both prediction
         CSVs. Compare 6-fold-mean spread across seeds vs the val-split=0.2
