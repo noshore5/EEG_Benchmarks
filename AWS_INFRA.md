@@ -1,61 +1,58 @@
 # AWS infrastructure
 
 **Who this is for:** any agent shell that touches the shared AWS account --
-whether it runs *on* an AWS box (`eeg-box`, a GPU box) or drives the cloud
-remotely from a local Mac / Grok / cloud-Claude shell. It describes shared
-cloud state, not repo state, and nothing in the pipelines reads from it
-yet -- so if you're only editing code or running tests, you can still skip
-it.
+whether it runs *on* an ephemeral AWS box (an `eeg-run` worker, a GPU box)
+or drives the cloud remotely from a local Mac / Grok / cloud-Claude shell.
+It describes shared cloud state, not repo state, and nothing in the
+pipelines reads from it yet -- so if you're only editing code or running
+tests, you can still skip it.
+
+**The standing `eeg-box` (t3.small, ~$15/mo) was terminated 2026-09-02.**
+Its job as a launcher is now done by GitHub Actions (`eeg-run.yml`, OIDC,
+no stored creds -- see "Launch from anywhere" below); there is no longer a
+persistent shell box. Every AWS box is now ephemeral and self-terminating.
 
 **Can this shell touch AWS?** You need credentials for account
 `827938107865` -- check with `aws sts get-caller-identity`.
 
-- **On an AWS box** (`eeg-box` / `eeg-gpu`): the instance profile supplies
-  them automatically, and *scoped* -- no keys on disk. See "IAM" for what
-  the role can and can't do.
+- **On an ephemeral box** (`eeg-run` worker / GPU box): the instance
+  profile (`eeg-gpu`) supplies them automatically, and *scoped* -- no keys
+  on disk. See "IAM" for what the role can and can't do.
 - **Local / off-AWS shell:** needs the `aws` CLI + a profile in
   `~/.aws/credentials`. The Mac this repo is usually worked from has the
-  `claude` IAM user configured -- **AdministratorAccess**, so it can do
-  everything in this file, *including* the actions the `eeg-box` role is
-  denied (item 5 below). `session-manager-plugin` is **not** installed on
-  the Mac, so `aws ssm start-session` won't work from there -- use
-  `ssh eeg-box` or the S3 job-runner instead.
+  `claude` IAM user configured -- **AdministratorAccess**.
 - **Grok / cloud-Claude shell with no creds:** can't launch anything
-  directly -- hand the work to `eeg-box` (scoped launch role) or drop a
-  job for the S3 runner.
+  directly -- trigger the `eeg-run.yml` workflow (`gh workflow run`, or
+  GitHub mobile/web) or drop a job for the S3 runner.
 
 **Account:** `827938107865` &nbsp; **Region:** `us-east-1`
-**Last verified:** 2026-09-01, by Claude (eeg-box shell) -- `eeg-cpu-box`
-stood up + bootstrapped + ran its first job (`godoy_tmc` 6-fold), then
-stopped; gotchas below all hit and confirmed. Spot SLR created by admin.
-GPU quota-increase requests filed -> now `CASE_OPENED` (AWS support queue,
-not auto-approved; effective quota still 0). Admin added inline policy
-`eeg-box-extra` to the `eeg-box` role (servicequotas read + request,
-spot-SLR create, `ec2:CreateImage`/`ModifyInstanceAttribute`) -- so the
-eeg-box shell can now check quota status and bake an AMI itself.
+**Last verified:** 2026-09-02, by Claude -- `eeg-run.yml` launch-from-
+anywhere path verified end-to-end (OIDC -> launch -> deps -> run -> S3 ->
+self-terminate, no orphan) on a CPU smoke run; `eeg-box` terminated the
+same day. Spot SLR created by admin 2026-09-01. GPU quota-increase
+requests still `CASE_OPENED` (AWS support queue; effective quota 0).
 
 ## Where to run cloud ops from
 
 Launching or starting an instance is a one-shot API call -- the instance
-doesn't care which shell made it, so doing it from a laptop is fine. What
-matters is what happens *after* the shell goes away:
+doesn't care which shell made it. What matters is what happens *after* the
+shell goes away:
 
-- **One-shot calls** (`start-instances` the CPU box, `run-instances`,
-  `terminate-instances`, `aws s3 cp`): run them from wherever you are.
-  Local Mac is fine and usually faster than SSHing into eeg-box first.
-- **Anything that needs babysitting** (tailing a run, a poll loop, an
-  interactive `ssh`): don't anchor it to a laptop. Use the S3 job-runner
-  (survives disconnection) or eeg-box's persistent tmux (`cc`).
-- **eeg-box still earns its place** as: a launcher for shells with no AWS
-  creds (Grok, cloud-Claude), a persistent tmux home for long sessions,
-  and an in-region git/edit box (fast S3). It is *not* required merely to
-  launch instances.
-- **Credential hygiene:** the Mac currently authenticates as the `claude`
-  user (**AdministratorAccess**) -- broad privilege sitting in a laptop's
-  `~/.aws/credentials`. If launching from local shells becomes routine,
-  have an admin cut a scoped `eeg-launcher` IAM user mirroring the
-  `eeg-box` role's `ec2-launch-and-ssm` policy
-  (`scripts/eeg-box-ec2-policy.json`) and put *those* keys on the Mac.
+- **Preferred: the `eeg-run.yml` workflow.** `gh workflow run
+  eeg-run.yml -f name=... -f cmd=...` (or GitHub mobile/web). Needs no AWS
+  creds anywhere -- authenticates via OIDC. The launched box does
+  everything itself and self-terminates; nothing to babysit.
+- **One-shot calls** (`run-instances`, `terminate-instances`, `aws s3
+  cp`, `start-instances` the CPU box): run them from wherever you have
+  creds. Local Mac is fine.
+- **Anything that needs babysitting** (tailing a run, a poll loop): don't
+  anchor it to a laptop. Use the S3 job-runner (survives disconnection) or
+  let the `eeg-run` box handle it and watch the S3 `run.log`.
+- **Credential hygiene:** the Mac authenticates as the `claude` user
+  (**AdministratorAccess**) -- broad privilege sitting in a laptop's
+  `~/.aws/credentials`. The workflow path avoids this entirely; prefer it.
+  If direct local launches become routine, have an admin cut a scoped
+  `eeg-launcher` IAM user mirroring the `eeg-gh-launcher` role's policy.
 
 ## Every launched box must self-terminate and ship results to S3
 
@@ -98,18 +95,16 @@ PYTHONPATH=/root/repo python3 <JOB ...> > /root/run.log 2>&1
 # trap fires here -> upload + terminate
 ```
 
-**Fallback -- launcher-side trap** (what `~/bin/gpu-run` on eeg-box does:
-`trap cleanup EXIT` terminates the box when the launching script exits).
-Fine when launched from **eeg-box's persistent tmux**. **Do not rely on it
-from a laptop** -- if the shell dies the box leaks. From local, use
-self-terminating user-data instead.
+**Fallback -- launcher-side trap** (`trap cleanup EXIT` terminates the box
+when the launching script exits). **Do not rely on it from a laptop** --
+if the shell dies the box leaks. Use self-terminating user-data instead
+(which is what `eeg-run.sh` does).
 
 **Results go to S3, never box-to-box.** There's no SSH trust or stable
-address between boxes (eeg-box's IP is dynamic). Everything lands in the
-bucket: `exports/<run-name>/` for logs + figures to pull back,
-`checkpoints/` for weights. eeg-box or your Mac then `aws s3 sync`s from
-there. To hand a result to eeg-box specifically, drop it under
-`exports/eeg_box/jobs/runs/<ts>/` -- don't try to push to the box.
+address between ephemeral boxes. Everything lands in the bucket:
+`exports/runs/<name>/` for `eeg-run` logs + results, `exports/<run-name>/`
+for ad-hoc jobs, `checkpoints/` for weights. Your Mac then `aws s3 sync`s
+from there.
 
 **Orphan backstop.** Nothing sweeps a box orphaned by a hard crash
 (user-data never ran, kernel panic). Until a terminator Lambda exists,
@@ -191,22 +186,23 @@ Terminate/Stop limited to `Project=eeg` boxes).
 
 | Box | Instance | Spec | State | Address | Notes |
 |---|---|---|---|---|---|
-| **eeg-box** | `i-083e3b55993a13c13` | t3.small, 30 GB EBS (`vol-0812ddb8bac762447`) | running | public `54.236.223.15`, private `172.31.22.104` | the box this agent usually lives on. 2 vCPU / 2 GB RAM -- too small to run pipelines (no deps installed) |
-| **eeg-cpu-box** | `i-0a6100d4c303f52a2` | c7i.2xlarge (8 vCPU / 16 GB), 50 GB gp3, us-east-1a | **stopped** (persistent stop/start) | -- | on-demand CPU worker for pipeline runs. Bootstrapped 2026-09-01 (pip env + chb01 data on the volume). `--instance-initiated-shutdown-behavior stop`. Idle ~$4/mo (volume only); ~$0.36/hr when running. First job: `godoy_tmc` 6-fold, ~41.5 s/epoch, 58 min wall (see session note 2026_09_01). NB: only ~3 of 8 cores used, but peak RSS 14/16 GB (raw-classifier LOSO path leaks per-fold) -- don't downsize below 16 GB. See "eeg-cpu-box job runner" below. |
+| ~~**eeg-box**~~ | `i-083e3b55993a13c13` | t3.small | **terminated 2026-09-02** | -- | was the standing shell/launcher box, ~$15/mo. Replaced by the `eeg-run.yml` GitHub Actions launcher (OIDC, no stored creds). No persistent shell box exists now. |
+| **eeg-cpu-box** | `i-0a6100d4c303f52a2` | c7i.2xlarge (8 vCPU / 16 GB), 50 GB gp3, us-east-1a | **stopped** (persistent stop/start) | -- | on-demand CPU worker for pipeline runs, driven via the S3 job runner. Bootstrapped 2026-09-01 (pip env + chb01 data on the volume). `--instance-initiated-shutdown-behavior stop`. Idle ~$4/mo (volume only); ~$0.36/hr when running. First job: `godoy_tmc` 6-fold, ~41.5 s/epoch, 58 min wall (see session note 2026_09_01). NB: only ~3 of 8 cores used, but peak RSS 14/16 GB (raw-classifier LOSO path leaks per-fold) -- don't downsize below 16 GB. See "eeg-cpu-box job runner" below. This is a *separate* path from `eeg-run` (which spins up fresh ephemeral boxes). |
+| `eeg-run` workers | ephemeral | c7i.2xlarge (cpu) / g5.2xlarge (gpu) | launched per job, self-terminate | -- | created by `scripts/eeg-run.sh` (usually via `eeg-run.yml`). Fresh box each run, tag `Project=eeg`, profile `eeg-gpu`. GPU blocked on quota (below). |
 | GPU box | -- | -- | **not launched** | -- | IAM/instance-profile staged (`eeg-gpu`), nothing running |
 
 ## Launching / driving an EC2 box -- read before `run-instances`
 
-Works from `eeg-box` **or** from a local shell with creds (see scope note
-above). Items 1, 3, 4 and 6-8 are account-wide facts and bite the same
-either way. Items 2 and 5 are `eeg-box`-*role* limits: a local shell on
-the `claude` admin user *can* create the spot SLR (item 2) and *can* do
-the item-5 actions (`CreateImage`, `ModifyInstanceAttribute`, `iam:*`,
-`ssm:SendCommand`).
+Applies to the `eeg-run.yml` workflow (via the `eeg-gh-launcher` role),
+the S3 job runner, and any direct `run-instances` from a local admin
+shell. Items 1, 3, 4 and 6-8 are account-wide facts. Items 2 and 5 were
+`eeg-box`-*role* limits -- the box is gone, but `eeg-gh-launcher` is
+similarly scoped (no `CreateImage`, no `ssm:SendCommand`, `RunInstances`
+tag-gated); a local shell on the `claude` admin user has none of these
+limits.
 
-Every one of these was hit for real standing up `eeg-cpu-box` 2026-09-01
-from eeg-box. Skipping this list cost ~40 min of terminate/relaunch
-cycles.
+Every one of these was hit for real standing up `eeg-cpu-box` 2026-09-01.
+Skipping this list cost ~40 min of terminate/relaunch cycles.
 
 1. **AMI has no `aws` CLI.** `ami-0d7f022123f8ff19d`
    (`ubuntu-noble-24.04-amd64-server`) -- and every stock Ubuntu 24.04
@@ -219,8 +215,8 @@ cycles.
    ( cd /tmp && unzip -q a.zip && ./aws/install )   # -> /usr/local/bin/aws
    ```
    Symptom if you forget: user-data half-runs, nothing ever appears in
-   S3, `describe-instances` just says `running`. (eeg-box's own `aws` was
-   hand-installed to `/usr/local/bin/aws`, so it's misleading.)
+   S3, `describe-instances` just says `running`. (`eeg-run.sh`'s user-data
+   already does this install step -- keep it first if you edit it.)
 2. **Spot SLR: FIXED 2026-09-01.** An admin (user `claude`) ran `aws iam
    create-service-linked-role --aws-service-name spot.amazonaws.com`, so
    `AWSServiceRoleForEC2Spot` now exists and spot `RunInstances` no longer
@@ -230,49 +226,50 @@ cycles.
    Exceeded` instead. Increase-request to 8 filed 2026-09-01 ~14:03 UTC,
    PENDING. (Non-GPU spot families have their own separate quotas.)
 3. **On-demand vCPU limit is 16** (Standard family: C/D/H/I/M/R/T/Z).
-   `eeg-box` (t3.small) already burns 2 -> **<=14 free**. So:
-   `c7i.2xlarge` (8) fine; `c7i.4xlarge` (16) -> `VcpuLimitExceeded`.
-   Replacing an 8-vCPU box: 8+8 = 16 but with eeg-box's 2 that's 18 ->
-   you must wait for the old one to reach **`terminated`** (not just
-   `shutting-down`, ~2-4 min) before the replacement will launch.
+   With `eeg-box` gone the full 16 is free (minus `eeg-cpu-box`'s 8 when
+   it's running). `c7i.2xlarge` (8) fine; `c7i.4xlarge` (16) fine only if
+   nothing else is up. When replacing an 8-vCPU box, wait for the old one
+   to reach **`terminated`** (not just `shutting-down`, ~2-4 min) before
+   the replacement launches, or you may transiently exceed 16.
 4. **AZ capacity varies.** `c7i.4xlarge` in us-east-1c returned
    `InsufficientInstanceCapacity`; 1a was fine. VPC
    `vpc-0ab36a88b3617669a` public subnets (all auto-assign public IP):
    1a `subnet-057fcd8e8ed1ec050`, 1b `subnet-07cdbc1058cf4f752`,
    1c `subnet-021f5ceeb4af26220`, 1d `subnet-00252702f59bac48f`,
    1e `subnet-0d55ae5c23cf61927`, 1f `subnet-0090cef9098097cb0`.
-5. **`eeg-box` role CANNOT:** `ssm:SendCommand` / `ssm:GetCommandInvocation`
-   (only `StartSession`), `ssm:GetParameter` (can't resolve the Canonical
-   AMI SSM alias -- use `describe-images --owners 099720109477` or the
-   pinned id above), most `iam:*`, `iam:ListInstanceProfiles`.
-   `ec2:CreateImage` + `ec2:ModifyInstanceAttribute` were **granted
-   2026-09-01** via the `eeg-box-extra` inline policy (so AMI baking and
-   instance-type change on a stopped box now work); `iam:CreateService
-   LinkedRole` for `spot.amazonaws.com` and `servicequotas:*` (read +
-   request) are in that policy too.
+5. **Scoped launcher roles CANNOT** do admin ops. `eeg-gh-launcher` (the
+   workflow role) = `RunInstances` + `Describe*` + `CreateTags`-on-launch
+   + `PassRole eeg-gpu` + `Terminate/Stop` gated to `Project=eeg`, nothing
+   else. No `ssm:*`, `CreateImage`, `iam:*`, `servicequotas:*`. For quota
+   checks / AMI baking / SLR creation use a local admin (`claude`) shell.
+   No `ssm:GetParameter` either -> resolve AMIs with `describe-images
+   --owners 099720109477` / `amazon` (which `eeg-run.sh` does).
 6. **Tag `Project=eeg` at launch** (`--tag-specifications
    'ResourceType=instance,Tags=[{Key=Project,Value=eeg}]'`) or you can't
    stop/terminate it afterward -- those perms are tag-gated.
-7. **No `session-manager-plugin` on eeg-box** -> `aws ssm start-session`
-   errors out. To drive a box: install the plugin (deb from AWS), or use
-   `--instance-initiated-shutdown-behavior stop` + the S3 job-runner
-   pattern below (no shell needed).
+7. **Ephemeral boxes need no shell.** `eeg-run` boxes self-terminate; the
+   CPU box is driven through S3. If you *do* need an interactive shell,
+   the `eeg-gpu` profile has `AmazonSSMManagedInstanceCore` -> `aws ssm
+   start-session --target <id>` (needs `session-manager-plugin` locally,
+   not installed on the Mac -- `brew install --cask session-manager-plugin`).
 8. A correct bootstrap of `eeg-cpu-box` takes **~4 min** (apt + awscli +
    `pip install -r requirements.txt` ~2.5 min + chb01 prefetch). If it's
    taking much longer with no S3 output, it's item 1, not slowness.
 
 ## eeg-cpu-box job runner
 
-The CPU box is driven through S3, not a shell -- the `eeg-box` role has no
-`ssm:SendCommand` and a local shell has no `session-manager-plugin`, but
-the real reason is that **S3 control needs nothing babysitting it**: queue
-a job, close the laptop, the box runs it and archives results to S3 on its
-own. This is the preferred remote-control path from *any* shell (eeg-box,
-local Mac, cloud):
+The CPU box is driven through S3, not a shell -- **S3 control needs
+nothing babysitting it**: queue a job, close the laptop, the box runs it
+and archives results to S3 on its own. Preferred remote-control path from
+*any* shell (local Mac, cloud). This is a *separate* path from `eeg-run`:
+the CPU box is persistent (pre-bootstrapped env + cached chb01 data), so
+it's faster to start for a quick job, whereas `eeg-run` spins up a clean
+box and commits results automatically.
 
 - **Start it:** `aws ec2 start-instances --instance-ids i-0a6100d4c303f52a2`
-  (eeg-box role can start/stop it -- tag `Project=eeg`). A systemd unit
-  `eeg-runner.service` starts on boot and polls S3.
+  (needs `Project=eeg` tag-gated start/stop -- local admin, or a role with
+  that perm). A systemd unit `eeg-runner.service` starts on boot and
+  polls S3.
 - **Queue a job:** upload a bash script to
   `s3://noshore-eeg-benchmarks-827938107865/exports/eeg_box/jobs/next.sh`.
   The runner claims it (`s3 mv`), runs it with `cwd=/root/repo`, streams
@@ -306,35 +303,25 @@ Old bucket `s3://coheriq-eeg-dense-edge-cache/` (referenced in
 
 ## IAM
 
-- **User `claude`** -- the CLI creds on the boxes. Admin via group `cli`
+- **User `claude`** -- the local CLI creds (Mac). Admin via group `cli`
   (`AdministratorAccess` + others).
-- **Instance profile `eeg-box`** -> role `eeg-box`:
-  - inline policy `s3-eeg-bucket`: RW (`Get`/`Put`/`DeleteObject` +
-    `ListBucket`) on the shared bucket. So from eeg-box, `aws s3 ...`
-    against the bucket works with no keys.
-  - inline policy `ec2-launch-and-ssm` (added 2026-09-01, verified from
-    eeg-box same day): EC2 `Describe*` + `RunInstances`/`CreateTags`
-    (any), `TerminateInstances`/`StopInstances`/`StartInstances` gated to
-    `ec2:ResourceTag/Project=eeg`, `iam:PassRole` for `eeg-gpu` only, and
-    `ssm:StartSession`/etc. So eeg-box can launch/terminate the GPU box
-    and SSM into it. Source: `scripts/eeg-box-ec2-policy.json`.
-    **Always tag launched instances `Project=eeg`** or you can't
-    terminate them from here.
-  - inline policy `eeg-box-extra` (added 2026-09-01 by admin `claude`):
-    `servicequotas:GetServiceQuota` / `ListServiceQuotas` /
-    `ListRequestedServiceQuotaChangeHistory*` / `RequestServiceQuota
-    Increase` (all `*`); `iam:CreateServiceLinkedRole` gated to
-    `iam:AWSServiceName=spot.amazonaws.com`; `ec2:CreateImage` /
-    `RegisterImage` / `ModifyInstanceAttribute` / `DescribeImages` (all
-    `*`). Rationale: stop bouncing quota checks / SLR creation / AMI
-    baking through the Mac. Deliberately NOT included: unrestricted
-    `RunInstances` (the `Project=eeg` tag gate stays), `iam:*` beyond the
-    one SLR, billing.
-- **Instance profile `eeg-gpu`** -> role `eeg-gpu` (created 2026-09-01),
-  same `s3-eeg-bucket` policy, plus managed policy
-  `AmazonSSMManagedInstanceCore` (added 2026-09-01) so the GPU box
-  registers with SSM for keyless shell access. Attach this profile at
-  launch.
+- **Role `eeg-gh-launcher`** (created 2026-09-02) -- assumed by the
+  `eeg-run.yml` workflow via GitHub OIDC, **not** an instance profile,
+  nothing stored. Trust: `token.actions.githubusercontent.com`, scoped to
+  `:repository = noshore5/EEG_Benchmarks` exact + `:sub` wildcard (this
+  account presents a customised `sub`, `repo:<owner>@<id>/<repo>@<id>:...`).
+  Inline policy `eeg-gh-launch`: `RunInstances` + EC2 `Describe*` +
+  `CreateTags`-on-launch + `Terminate/Stop` gated to `Project=eeg` +
+  `PassRole` for `eeg-gpu` only. Setup: `scripts/setup_gh_launcher.sh`.
+- **Role `eeg-box`** -- the terminated box's instance-profile role. Still
+  exists (unused); has `s3-eeg-bucket` RW, `ec2-launch-and-ssm`
+  (`scripts/eeg-box-ec2-policy.json`), `eeg-box-extra` (servicequotas
+  read+request, spot-SLR create, `ec2:CreateImage`). Safe to delete, or
+  keep as a template for a future scoped launcher user.
+- **Instance profile `eeg-gpu`** -> role `eeg-gpu` (created 2026-09-01) --
+  attached to every `eeg-run` worker. `s3-eeg-bucket` RW, `eeg-ssm-and-sns`
+  (`ssm:GetParameter` on `/eeg/*` + `sns:Publish` on `eeg-runs`), plus
+  managed `AmazonSSMManagedInstanceCore` for keyless SSM shell access.
 
 ## Network
 
@@ -347,7 +334,7 @@ Old bucket `s3://coheriq-eeg-dense-edge-cache/` (referenced in
 
 ## If you're bringing up the GPU box
 
-**First read "Launching an EC2 box from eeg-box" above** -- the awscli,
+**First read "Launching / driving an EC2 box" above** -- the awscli,
 spot-SLR, vCPU-limit and tag gotchas all apply here too.
 
 **GPU quota status (2026-09-01, late):** effective quotas on-demand G/VT
@@ -361,36 +348,25 @@ Also `g5`/`g6`/`g4dn` **spot capacity was out region-wide** in us-east-1
 that day -- us-east-1 is the most GPU-contended AWS region; if capacity
 stays dry after the quota clears, fall back to firing the same two
 requests in `us-east-2` and running there (pulls chb01 from the us-east-1
-bucket, ~$0.14 egress). Check status **from eeg-box directly** now (the
-`eeg-box-extra` policy grants it):
+bucket, ~$0.14 egress). Check status from a **local admin shell**
+(scoped launcher roles have no `servicequotas:*`):
 `aws service-quotas list-requested-service-quota-change-history
 --service-code ec2 --region us-east-1` and `get-service-quota
 --service-code ec2 --quota-code L-DB2E81BA --region us-east-1` for the
 effective value.
 
-**A one-shot GPU runner is staged:**
-`s3://noshore-eeg-benchmarks-827938107865/exports/eeg_box/gpu_run/` is the
-output prefix; `.../exports/eeg_box/_setup/gpu_userdata.sh` is the
-user-data -- launches `g5.2xlarge` on the Deep Learning OSS Nvidia Driver
-AMI (`ami-012ba162b9cd2729c`, PyTorch 2.7 / Ubuntu 22.04), installs
-`requirements.txt` (re-pulls `torch==2.8.0+cu128` ~2.5 GB), prefetches
-chb01, runs `godoy_tmc --device cuda`, uploads results, **self-terminates**.
-Est. bootstrap ~6-8 min (heavier AMI + EBS lazy-load).
+**Once the quota clears, GPU runs need no extra work** -- `eeg-run.sh`
+already handles the GPU path (`--gpu` / `-f kind=gpu`): latest Deep
+Learning OSS Nvidia PyTorch AMI, `g5.2xlarge`, 150 GB, profile `eeg-gpu`,
+SG `eeg-ssh`, tag `Project=eeg`, self-terminating. Just run:
+```
+gh workflow run eeg-run.yml -f name=<slug> -f kind=gpu \
+  -f cmd='python Epilepsy/run_pipelines.py --pipeline <p> --device cuda ...'
+```
+The older standalone `gpu_userdata.sh` under `exports/eeg_box/_setup/` is
+superseded by `eeg-run.sh` -- ignore it.
 
-1. Launch from eeg-box into `us-east-1`, attach instance profile
-   **`eeg-gpu`** and SG **`eeg-ssh`**, key pair **`eeg-box`**, and tag
-   **`Project=eeg`** (required -- terminate perms are gated on that tag).
-2. It gets bucket RW for free via the instance profile -- pull data from
-   `s3://noshore-eeg-benchmarks-827938107865/datasets/`, push checkpoints
-   to `checkpoints/`.
-3. Shell in via `aws ssm start-session --target <id>` from eeg-box (no
-   key needed once the SSM agent registers), or SSH with the `eeg-box`
-   key.
-4. Recommended type: **g5.2xlarge spot** (A10G 24 GB, 8 vCPU, 32 GB RAM;
-   ~$0.55-0.90/hr spot in us-east-1a).
-5. **Launch it self-terminating** -- see "Every launched box must
-   self-terminate and ship results to S3" above. Use self-terminating
-   user-data + `--instance-initiated-shutdown-behavior terminate`; don't
-   depend on a babysitting shell.
-6. Update the table above (instance id, state) and note it in
-   `CONTEXT.md`'s pointer line.
+To shell into a running GPU box for debugging: `aws ssm start-session
+--target <id>` (profile `eeg-gpu` has the SSM managed policy) or SSH with
+the `eeg-box` key pair. Update the box table + `CONTEXT.md` if you leave
+one running with `--keep`.
