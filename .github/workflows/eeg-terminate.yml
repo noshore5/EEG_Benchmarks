@@ -1,0 +1,36 @@
+name: eeg-terminate (kill an eeg-run box)
+
+# Manual kill switch for a box launched by eeg-run.yml, usable from anywhere
+# with no AWS creds (GitHub OIDC -> eeg-gh-launcher role, same as eeg-run.yml).
+# Terminate is tag-gated to Project=eeg on the role, so this can't touch
+# anything outside the eeg fleet.
+
+on:
+  workflow_dispatch:
+    inputs:
+      instance_id:
+        description: "Instance ID to terminate, e.g. i-0d18f7926af271893"
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  terminate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::827938107865:role/eeg-gh-launcher
+          aws-region: us-east-1
+
+      - name: Terminate
+        env:
+          IID: ${{ inputs.instance_id }}
+        run: |
+          set -euo pipefail
+          aws ec2 terminate-instances --instance-ids "$IID"
+          aws ec2 describe-instances --instance-ids "$IID" \
+            --query 'Reservations[].Instances[].[InstanceId,State.Name]' --output text
