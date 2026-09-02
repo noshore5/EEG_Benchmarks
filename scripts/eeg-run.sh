@@ -93,6 +93,8 @@ which aws >/dev/null 2>&1 || {
 python3 -m pip --version >/dev/null 2>&1 || {
   apt-get update -y && apt-get install -y python3-pip
 }
+# bare Ubuntu has python3 but no bare `python`; the DLAMI has both via conda.
+command -v python >/dev/null 2>&1 || ln -sf "\$(command -v python3)" /usr/local/bin/python
 hash -r
 
 finish() {
