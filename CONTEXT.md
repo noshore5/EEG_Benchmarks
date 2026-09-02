@@ -648,25 +648,30 @@ signal the direction has produced (see below).
         on Mac / `--device cpu` on AWS). Mac wrapper `_to_delete/run_pre_val0.py
         <seed> <epochs>` (MPS-only monkeypatch -- do NOT use on AWS; call
         run_pipelines directly with --device cpu there).
-        STATUS (no compute running as of 09-01 20:00, user paused it):
-          - ep12 seed42: DONE, mean AP **0.627** (88aff75).
-          - ep12 seed43: DONE, mean AP **0.569** (aa2a60d).
-          - ep12 seed44: DONE, mean AP **0.540** (d7f7683).
-          - ep12 seed{45,46}: RUNNING on Mac 2026-09-01 23:00
-            (`_to_delete/val0_resume.sh`, pid 57911).
-          - **ep20 seed{42..46}: QUEUED on Mac** behind the ep12 jobs
-            (`_to_delete/val0_ep20.sh`, pid 58647; self-serializes on the
-            `run_pre_(fp32_emptycache|val0)` pgrep guard). No longer the
-            AWS cpu box's job -- that box is free.
-        Finding so far: seed spread at val=0 is 0.627/0.569/0.540 --
-        pure optim noise (no split-luck channel), SAME magnitude as the
-        val-split=0.2 sweep. Dropping the split did NOT tighten the error
-        bar; it just moved variance from split-luck to init/SGD-luck.
-        Per job: 6-fold mean AP over the `average_precision` column of
-        `prediction_leave_one_seizure_out_*.csv`; commit both prediction
-        CSVs. Compare 6-fold-mean spread across seeds vs the val-split=0.2
-        sweep's ~0.05-0.13; ep20 rows are the fair comparison to the
-        fp32 seed-42 ~0.64 anchor.
+        STATUS (SWEEP CLOSED 09-02, no val0 compute running):
+          - ep12 seed{42,43,44,45,46}: DONE -- 0.627 / 0.569 / 0.540 /
+            0.571 / 0.412, mean ~0.544 (88aff75 aa2a60d d7f7683 5554c24
+            be68c2c).
+          - ep20 seed{42,43,44,45,46}: DONE -- 0.554 / 0.471 / 0.529 /
+            0.514 / 0.362, mean ~0.486. EVERY seed dropped vs ep12.
+          - ep15 seed42 ONLY: DONE, mean AP **0.6455**
+            (`prediction_leave_one_seizure_out_20260902-131908.csv`).
+            seed42: ep15 0.6455 > ep12 0.627 > ep20 0.554.
+          - **ep15 seed{43,44,45,46}: STILL WANTED, deferred -- do NOT
+            run now** (user call 09-02). Goal: full 5-seed ep15 row to
+            confirm ep15 mean > ep12 ~0.544 and ~= val-split anchor.
+            `_to_delete/val0_ep15.sh` from this session already exists;
+            edit its `for seed in ...` list to `43 44 45 46` and relaunch.
+        FINDING (closed): epoch count -- not the val split -- is the
+        dominant knob at val=0. ep20 uniformly overfits (no early stop);
+        12-15 ep is the sweet spot, ep15 seed42 lands right on the
+        val-split=0.2 anchor (~0.64). Seed spread is the SAME ~0.2 range
+        with or without the split (val0 ep12/ep20 spreads 0.21 / 0.19).
+        Conclusion: **keep `--validation-split 0.2` in the headline
+        config** -- its best-ckpt restore is an implicit early-stop that
+        reaches the same ~0.64 ep15 hits, and dropping it buys no variance
+        reduction while losing the safety net. See
+        `Session_notes/2026_09_02/val0_epoch_sweep_ep15_ep20.md`.
       - fp16 `_load` upcasts to fp32 on load, so fp16 halves DISK + the
         DataLoader re-stream READ but NOT the resident fp32 edge tensor.
       - NEXT (user priority): AWS S3 upload of `~/mne_data/dense_edge_cache`
