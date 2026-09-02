@@ -652,9 +652,12 @@ signal the direction has produced (see below).
           - ep12 seed42: DONE, mean AP **0.627** (88aff75).
           - ep12 seed43: DONE, mean AP **0.569** (aa2a60d).
           - ep12 seed44: DONE, mean AP **0.540** (d7f7683).
-          - ep12 seed{45,46}: NOT RUN (Mac, resume via
-            `_to_delete/run_pre_val0.py <seed> 12`).
-          - **ep20 seed{42..46}: UNCLAIMED -> AWS cpu box to run.**
+          - ep12 seed{45,46}: RUNNING on Mac 2026-09-01 23:00
+            (`_to_delete/val0_resume.sh`, pid 57911).
+          - **ep20 seed{42..46}: QUEUED on Mac** behind the ep12 jobs
+            (`_to_delete/val0_ep20.sh`, pid 58647; self-serializes on the
+            `run_pre_(fp32_emptycache|val0)` pgrep guard). No longer the
+            AWS cpu box's job -- that box is free.
         Finding so far: seed spread at val=0 is 0.627/0.569/0.540 --
         pure optim noise (no split-luck channel), SAME magnitude as the
         val-split=0.2 sweep. Dropping the split did NOT tighten the error
