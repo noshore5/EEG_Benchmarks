@@ -1,0 +1,64 @@
+name: eeg-tail (read-only status/log check on an eeg-run box)
+
+# Lets a Claude session with NO AWS creds "tail" a running eeg-run box:
+# dumps the current S3 run.log for the given run name plus the launched
+# instance's state, into this job's log, which is readable via the
+# GitHub API/MCP tools. Re-trigger to get a fresh snapshot (poll, don't
+# hold the job open).
+#
+# Read-only: same OIDC role as eeg-run.yml (eeg-gh-launcher), scoped by
+# scripts/setup_gh_launcher_tail.sh to s3:GetObject/ListBucket on
+# exports/* only, plus the Describe* it already has. No write, no
+# terminate here -- see eeg-terminate.yml for that.
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_name:
+        description: "Run name / S3 prefix under exports/runs/<name>/, e.g. smoke-launcher-verify"
+        required: true
+        type: string
+      instance_id:
+        description: "Optional: instance ID to also check state/orphan status for"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  tail:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::827938107865:role/eeg-gh-launcher
+          aws-region: us-east-1
+
+      - name: Snapshot
+        env:
+          RUN_NAME: ${{ inputs.run_name }}
+          IID: ${{ inputs.instance_id }}
+        run: |
+          set -uo pipefail
+          BUCKET=noshore-eeg-benchmarks-827938107865
+          PFX="s3://$BUCKET/exports/runs/$RUN_NAME"
+          echo "== run.log ($PFX/run.log) =="
+          aws s3 cp "$PFX/run.log" - 2>&1 || echo "(not present yet)"
+          echo
+          echo "== eeg-job.log tail, if shipped =="
+          aws s3 cp "$PFX/eeg-job.log" - 2>&1 | tail -n 80 || echo "(not present)"
+          echo
+          if [ -n "$IID" ]; then
+            echo "== instance state ($IID) =="
+            aws ec2 describe-instances --instance-ids "$IID" \
+              --query 'Reservations[].Instances[].[InstanceId,State.Name,LaunchTime]' --output text \
+              || echo "(describe failed)"
+          fi
+          echo
+          echo "== any running Project=eeg boxes (orphan check) =="
+          aws ec2 describe-instances \
+            --filters Name=tag:Project,Values=eeg Name=instance-state-name,Values=running \
+            --query 'Reservations[].Instances[].[InstanceId,InstanceType,LaunchTime]' --output text

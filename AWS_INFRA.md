@@ -180,6 +180,29 @@ the OIDC provider + `eeg-gh-launcher` role + a tight inline policy --
 RunInstances, Describe\*, CreateTags-on-launch, PassRole `eeg-gpu`,
 Terminate/Stop limited to `Project=eeg` boxes).
 
+### Tailing / killing a box from a shell with NO AWS creds
+
+Two more workflows on the same OIDC role, for a Claude session (or anyone)
+that can't run `aws` directly:
+
+- **`eeg-tail.yml`** -- read-only snapshot: dumps the current S3 `run.log`
+  (+ `eeg-job.log` tail) for a given run name, plus instance state and an
+  orphan check (any `Project=eeg` box still `running`). Re-trigger to poll;
+  it doesn't hold the job open. `gh workflow run eeg-tail.yml -f
+  run_name=<slug> [-f instance_id=<id>]`. One-time setup:
+  `scripts/setup_gh_launcher_tail.sh` -- adds inline policy
+  `eeg-gh-tail-read` to `eeg-gh-launcher` (`s3:GetObject`/`ListBucket`
+  scoped to `exports/*` only, no write/delete, nothing outside that
+  prefix).
+- **`eeg-terminate.yml`** -- kill switch: `aws ec2 terminate-instances`
+  on one instance ID, via the same role's existing `Terminate/Stop`
+  (tag-gated to `Project=eeg`, so it can't touch anything else). `gh
+  workflow run eeg-terminate.yml -f instance_id=<id>`. No extra setup
+  needed -- reuses the permission `setup_gh_launcher.sh` already grants.
+
+Both need to exist on the repo's default branch to be dispatchable
+(`workflow_dispatch` on a feature branch alone returns 404 from the API).
+
 ---
 
 ## Boxes
