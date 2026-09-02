@@ -29,11 +29,15 @@ and self-terminates; SNS email only on failure. Needs one-time
 `.github/workflows/eeg-run.yml` (`gh workflow run eeg-run.yml -f name=... -f
 cmd=...`, or GitHub mobile/browser -> Actions -> "eeg-run"). GH OIDC ->
 role `eeg-gh-launcher`, nothing stored. One-time `scripts/setup_gh_launcher.sh`.
-This replaces `eeg-box` as a launcher -- `eeg-box` (`i-083e3b55993a13c13`,
-t3.small, ~$15/mo) can be terminated once the workflow is verified.
-Also fixed 3 `eeg-run.sh` bootstrap bugs (missing `python3-pip`,
-`/usr/sbin` not on PATH so `shutdown` failed -> orphaned box, `NAME`
-sanitize trailing `-`).
+VERIFIED end-to-end 2026-09-02 (CPU smoke run: OIDC -> launch -> deps ->
+run -> S3 -> promote no-op -> self-terminate, no orphan). `eeg-box`
+(`i-083e3b55993a13c13`, t3.small, ~$15/mo) TERMINATED 2026-09-02 -- the
+GH launcher replaces it. NB this account presents a customised OIDC `sub`
+(`repo:noshore5@<id>/EEG_Benchmarks@<id>:...`); the trust policy matches
+`:repository` exact + `:sub` wildcard.
+Also fixed `eeg-run.sh` bootstrap bugs: missing `python3-pip`; `/usr/sbin`
+not on PATH so `shutdown` failed -> orphaned box; `NAME` sanitize trailing
+`-`; bare Ubuntu has no `python` (only `python3`) -> symlink shim.
 2026-09-01: `eeg-box` role now has EC2 launch/terminate + SSM perms
 (verified). GPU box still **not launched** -- setup only, no runs started.
 2026-09-01: **`eeg-cpu-box`** (`i-0a6100d4c303f52a2`, c7i.2xlarge, 8 vCPU/
