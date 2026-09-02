@@ -41,14 +41,21 @@ else
 fi
 
 echo "== IAM role $ROLE (trusts only repo:$REPO) =="
+# NB: this account's OIDC subject claim is customised -- the sub GitHub
+# actually presents is  repo:<owner>@<ownerid>/<repo>@<repoid>:ref:refs/...
+# not the vanilla  repo:<owner>/<repo>:...  -- so match on :repository (exact)
+# plus a wildcard :sub (AWS requires a sub or job_workflow_ref condition).
 cat > "$TMP/trust.json" <<JSON
 { "Version": "2012-10-17", "Statement": [
   { "Effect": "Allow",
     "Principal": { "Federated": "$OIDC_ARN" },
     "Action": "sts:AssumeRoleWithWebIdentity",
     "Condition": {
-      "StringEquals": { "${OIDC_HOST}:aud": "sts.amazonaws.com" },
-      "StringLike":   { "${OIDC_HOST}:sub": "repo:${REPO}:*" }
+      "StringEquals": {
+        "${OIDC_HOST}:aud": "sts.amazonaws.com",
+        "${OIDC_HOST}:repository": "${REPO}"
+      },
+      "StringLike": { "${OIDC_HOST}:sub": "repo:${REPO%%/*}@*/${REPO#*/}@*:*" }
     } }
 ] }
 JSON

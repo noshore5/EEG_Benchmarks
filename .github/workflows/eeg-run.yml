@@ -71,25 +71,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: OIDC claims (debug)
-        run: |
-          echo "expected sub: repo:${{ github.repository }}:ref:${{ github.ref }}"
-          T=$(curl -sSf "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" \
-                -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-                | python3 -c 'import sys,json;print(json.load(sys.stdin)["value"])')
-          python3 -c 'import sys,json,base64; p=sys.argv[1].split(".")[1]; print(json.dumps(json.loads(base64.urlsafe_b64decode(p+"==")),indent=2))' "$T"
-
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::827938107865:role/eeg-gh-launcher
           aws-region: us-east-1
 
       - name: Launch
+        env:
+          IN_NAME: ${{ inputs.name }}
+          IN_CMD: ${{ inputs.cmd }}
+          IN_NOTE: ${{ inputs.session_note }}
+          IN_KIND: ${{ inputs.kind }}
+          IN_TYPE: ${{ inputs.type }}
+          IN_DISK: ${{ inputs.disk }}
+          IN_BRANCH: ${{ inputs.branch }}
+          IN_KEEP: ${{ inputs.keep }}
         run: |
           set -euo pipefail
-          args=( --name "${{ inputs.name }}" --cmd "${{ inputs.cmd }}" --"${{ inputs.kind }}" --branch "${{ inputs.branch }}" )
-          if [ -n "${{ inputs.session_note }}" ]; then args+=( --session-note "${{ inputs.session_note }}" ); fi
-          if [ -n "${{ inputs.type }}" ];         then args+=( --type "${{ inputs.type }}" ); fi
-          if [ -n "${{ inputs.disk }}" ];         then args+=( --disk "${{ inputs.disk }}" ); fi
-          if [ "${{ inputs.keep }}" = "true" ];   then args+=( --keep ); fi
+          args=( --name "$IN_NAME" --cmd "$IN_CMD" --"$IN_KIND" --branch "$IN_BRANCH" )
+          if [ -n "$IN_NOTE" ]; then args+=( --session-note "$IN_NOTE" ); fi
+          if [ -n "$IN_TYPE" ]; then args+=( --type "$IN_TYPE" ); fi
+          if [ -n "$IN_DISK" ]; then args+=( --disk "$IN_DISK" ); fi
+          if [ "$IN_KEEP" = "true" ]; then args+=( --keep ); fi
           bash scripts/eeg-run.sh "${args[@]}"
