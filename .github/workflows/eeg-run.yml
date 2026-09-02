@@ -1,0 +1,87 @@
+name: eeg-run (launch a training box)
+
+# Fire-and-forget a pipeline run on a fresh EC2 box, from anywhere:
+#   - GitHub mobile app / any browser -> Actions -> this workflow -> "Run workflow"
+#   - any shell (incl. Claude Code on a phone):  gh workflow run eeg-run.yml -f name=... -f cmd=...
+#
+# This job only *launches* the box (one aws ec2 run-instances call via
+# scripts/eeg-run.sh) and exits in ~30 s. Everything else happens ON the box:
+# clone -> deps -> run -> on success commit the result CSV(s) (+ optional
+# session note) straight to main -> ship logs to S3 -> SNS on failure ->
+# self-terminate. Watch progress at the S3 run.log path printed in the job log;
+# a successful run shows up as an "auto: <name> results" commit on main.
+#
+# Auth: GitHub OIDC -> AWS role eeg-gh-launcher (no stored credentials).
+# One-time setup: scripts/setup_gh_launcher.sh (run once with admin AWS creds).
+
+on:
+  workflow_dispatch:
+    inputs:
+      name:
+        description: "Short run slug (commit msg + S3 prefix + note filename)"
+        required: true
+        type: string
+      cmd:
+        description: "Command to run in the repo root, e.g. python Epilepsy/run_pipelines.py --pipeline temporal_graph_mamba --label-mode prediction --device cuda --seed 42 --validation-split 0 --epochs 20"
+        required: true
+        type: string
+      session_note:
+        description: "Optional: why this run. Non-empty -> a session note is written (LLM if the Gemini key is set, else templated) and committed alongside the CSV."
+        required: false
+        default: ""
+        type: string
+      kind:
+        description: "gpu (g5.2xlarge DLAMI) or cpu (c7i.2xlarge Ubuntu)"
+        required: true
+        default: gpu
+        type: choice
+        options: [gpu, cpu]
+      type:
+        description: "Override instance type (blank = kind default)"
+        required: false
+        default: ""
+        type: string
+      disk:
+        description: "Override root disk GB (blank = kind default: gpu 150 / cpu 60)"
+        required: false
+        default: ""
+        type: string
+      branch:
+        description: "Repo branch the box checks out and commits to"
+        required: false
+        default: main
+        type: string
+      keep:
+        description: "Debug: don't self-terminate (stop instead of terminate on exit)"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  id-token: write   # mint the OIDC token
+  contents: read
+
+concurrency:
+  group: eeg-run-launch
+  cancel-in-progress: false
+
+jobs:
+  launch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::827938107865:role/eeg-gh-launcher
+          aws-region: us-east-1
+
+      - name: Launch
+        run: |
+          set -euo pipefail
+          args=( --name "${{ inputs.name }}" --cmd "${{ inputs.cmd }}" --"${{ inputs.kind }}" --branch "${{ inputs.branch }}" )
+          if [ -n "${{ inputs.session_note }}" ]; then args+=( --session-note "${{ inputs.session_note }}" ); fi
+          if [ -n "${{ inputs.type }}" ];         then args+=( --type "${{ inputs.type }}" ); fi
+          if [ -n "${{ inputs.disk }}" ];         then args+=( --disk "${{ inputs.disk }}" ); fi
+          if [ "${{ inputs.keep }}" = "true" ];   then args+=( --keep ); fi
+          bash scripts/eeg-run.sh "${args[@]}"

@@ -25,6 +25,15 @@ and self-terminates; SNS email only on failure. Needs one-time
 `scripts/setup_autorun_infra.sh` (deploy key in SSM, IAM, SNS topic).
 `--cpu` works now; `--gpu` blocked on the pending quota bump. See
 `AWS_INFRA.md` "Autonomous runs".
+2026-09-02: **launch from anywhere w/o AWS creds** --
+`.github/workflows/eeg-run.yml` (`gh workflow run eeg-run.yml -f name=... -f
+cmd=...`, or GitHub mobile/browser -> Actions -> "eeg-run"). GH OIDC ->
+role `eeg-gh-launcher`, nothing stored. One-time `scripts/setup_gh_launcher.sh`.
+This replaces `eeg-box` as a launcher -- `eeg-box` (`i-083e3b55993a13c13`,
+t3.small, ~$15/mo) can be terminated once the workflow is verified.
+Also fixed 3 `eeg-run.sh` bootstrap bugs (missing `python3-pip`,
+`/usr/sbin` not on PATH so `shutdown` failed -> orphaned box, `NAME`
+sanitize trailing `-`).
 2026-09-01: `eeg-box` role now has EC2 launch/terminate + SSM perms
 (verified). GPU box still **not launched** -- setup only, no runs started.
 2026-09-01: **`eeg-cpu-box`** (`i-0a6100d4c303f52a2`, c7i.2xlarge, 8 vCPU/

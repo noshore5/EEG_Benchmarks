@@ -163,6 +163,28 @@ blocks the commit.
 quota increase lands (see "If you're bringing up the GPU box"). `--cpu`
 works now (Ubuntu 24.04, on-demand, 8-vCPU limit applies).
 
+### Launch from anywhere -- GitHub Actions (`.github/workflows/eeg-run.yml`)
+
+No AWS creds needed on the launching machine. The workflow authenticates
+to AWS via **GitHub OIDC** (role `eeg-gh-launcher`, assumable only by this
+repo's workflows -- nothing stored anywhere) and runs `scripts/eeg-run.sh`
+for you. The job just launches the box (~30 s) then exits; the box does
+the rest exactly as above.
+
+```
+gh workflow run eeg-run.yml -f name=<slug> -f kind=gpu \
+  -f cmd='python Epilepsy/run_pipelines.py --pipeline temporal_graph_mamba --label-mode prediction --device cuda --seed 42 --validation-split 0 --epochs 20' \
+  -f session_note='Why: ...'
+```
+
+...or GitHub mobile app / any browser: **Actions -> "eeg-run" -> Run
+workflow**. This is the path that replaces `eeg-box` as a launcher.
+
+One-time setup: `scripts/setup_gh_launcher.sh` (admin AWS creds; creates
+the OIDC provider + `eeg-gh-launcher` role + a tight inline policy --
+RunInstances, Describe\*, CreateTags-on-launch, PassRole `eeg-gpu`,
+Terminate/Stop limited to `Project=eeg` boxes).
+
 ---
 
 ## Boxes

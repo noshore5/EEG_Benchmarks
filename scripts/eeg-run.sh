@@ -43,7 +43,7 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$NAME" ] || { echo "--name required" >&2; exit 2; }
 [ -n "$CMD" ]  || { echo "--cmd required"  >&2; exit 2; }
-NAME=$(echo "$NAME" | tr -c 'A-Za-z0-9._-' '-')
+NAME=$(printf '%s' "$NAME" | tr -c 'A-Za-z0-9._-' '-')
 
 if [ "$KIND" = gpu ]; then
   ITYPE=${ITYPE:-g5.2xlarge}; DISK=${DISK:-150}
@@ -76,7 +76,7 @@ UD=$(cat <<EOF
 set -x
 exec > /var/log/eeg-run.log 2>&1
 export HOME=/root DEBIAN_FRONTEND=noninteractive
-export PATH=/usr/local/bin:/usr/bin:/bin:/snap/bin
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/sbin:/usr/bin:/bin:/snap/bin
 BUCKET=$BUCKET
 PFX="$PFX"
 NAME="$NAME"
@@ -88,6 +88,10 @@ which aws >/dev/null 2>&1 || {
   apt-get update -y && apt-get install -y unzip curl git
   curl -sS https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o /tmp/a.zip
   ( cd /tmp && unzip -q a.zip && ./aws/install )
+}
+# bare Ubuntu AMIs ship no pip; the DLAMI has it via conda. Ensure one exists.
+python3 -m pip --version >/dev/null 2>&1 || {
+  apt-get update -y && apt-get install -y python3-pip
 }
 hash -r
 
@@ -102,7 +106,7 @@ finish() {
       --message "\$(printf 'run %s failed rc=%s\ncmd: %s\nlogs: %s\n\n--- run.log tail ---\n%s' \
         "\$NAME" "\$RC" "\$CMD" "\$PFX/" "\$(tail -n 40 /root/run.log 2>/dev/null)")" || true
   fi
-  [ "$KEEP" = 1 ] || shutdown -h now
+  [ "$KEEP" = 1 ] || shutdown -h now || systemctl poweroff || halt -p
 }
 trap finish EXIT
 
