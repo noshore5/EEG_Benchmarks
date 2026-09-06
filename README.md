@@ -18,16 +18,20 @@ published architectures and several original ones are run head-to-head
 under a single protocol with the leakage paths closed.
 
 <p align="center">
-  <img src="docs/assets/coherence-graph.png" width="520"
+  <img src="docs/assets/coherence-graph.png" width="430"
        alt="Wavelet-coherence graph over the scalp montage for a chb01 preictal window">
+  <img src="docs/assets/coherence-edge.png" width="430"
+       alt="Coherence and phase across time and frequency for one edge">
 </p>
 
 Several pipelines here consume a **wavelet-coherence graph**: nodes are the
-bipolar EEG channels, edges are the time–frequency coherence between each
-channel pair. The figure above is that graph for one real chb01 preictal
-window (strongest 45 of 253 edges; regenerate with
-`docs/assets/render_coherence_graph.py`, full export in
-`exports/coherence-graph/`).
+bipolar EEG channels, edges carry the time–frequency coherence and phase
+between each channel pair. Left: that graph for one real chb01 preictal
+window (strongest 45 of 253 edges). Right: what a single edge carries —
+coherence magnitude and phase over the 4 s window, 8–40 Hz. Both are
+computed by the real pipeline; regenerate with the scripts in
+`docs/assets/`, full export (all 253 edges, raw arrays) in
+`exports/coherence-graph/`.
 
 ## What's in it
 
