@@ -1,6 +1,6 @@
 # EEG_Benchmarks
 
-A research bench for **EEG classification under honest, leakage-resistant
+A research bench for **EEG classification under leakage-resistant
 evaluation**. Two domains share one codebase, one shared training loop,
 and one results layout:
 
