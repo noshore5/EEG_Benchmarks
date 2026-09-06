@@ -1,0 +1,8 @@
+# Container runtime deps. Everything must install at build time -- inference
+# runs offline (no network) inside SzCORE's CI.
+# CPU wheels come from the extra index in the Dockerfile:
+#   --extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.8.0
+numpy>=1.26,<2.3
+scipy>=1.11
+epilepsy2bids>=0.0.6

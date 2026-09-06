@@ -1,108 +1,139 @@
 # EEG_Benchmarks
-Benchmarking on MOABB BCI benchmarks along with additional paradigms
 
-## CHB-MIT subjects
+A research bench for **EEG classification under honest, leakage-resistant
+evaluation**. Two domains share one codebase, one shared training loop,
+and one results layout:
 
-Default epilepsy pipelines use CHB-MIT subject `chb01`. Recordings for any
-subject aren't in git; a subject with a known GitHub Release mirror is
-fetched from there instead of PhysioNet's (throttled) S3 mirror --
-currently `chb01`-`chb04`, see `GITHUB_RELEASE_SHA256` in
-`datasets/epilepsy/chb_mit.py` for the live list:
+1. **BCI / motor imagery** — pipelines evaluated on
+   [MOABB](https://moabb.neurotechx.com) benchmarks (`BCI/`).
+2. **Epilepsy** — CHB-MIT scalp EEG, seizure **prediction** (preictal vs
+   interictal) and seizure **detection** (ictal vs non-ictal), under a
+   strict leave-one-seizure-out protocol (`Epilepsy/`).
 
-- [`chbmit-chb01-1.0.0`](https://github.com/noshore5/EEG_Benchmarks/releases/tag/chbmit-chb01-1.0.0) -- `chb01.tar.gz` (~991MB, 42 EDFs + summary)
-- [`chbmit-chb02-1.0.0`](https://github.com/noshore5/EEG_Benchmarks/releases/tag/chbmit-chb02-1.0.0) -- `chb02.tar.gz` (~859MB, 36 EDFs + summary)
-- [`chbmit-chb03-1.0.0`](https://github.com/noshore5/EEG_Benchmarks/releases/tag/chbmit-chb03-1.0.0) -- `chb03.tar.gz` (~863MB, 38 EDFs + summary)
-- [`chbmit-chb04-1.0.0`](https://github.com/noshore5/EEG_Benchmarks/releases/tag/chbmit-chb04-1.0.0) -- `chb04.part1.tar.xz` + `chb04.part2.tar.xz` (~1.6GB combined, 42 EDFs + summary split across 2 assets -- chb04's raw size doesn't fit GitHub's 2GiB-per-asset cap as one archive)
+The point of the repo is the *evaluation*, not any one model. Published
+seizure-prediction/detection numbers are hard to compare because almost
+every paper uses its own split, horizon, and preprocessing — and random
+splits over overlapping windows leak. Here, faithful reimplementations of
+published architectures and several original ones are run head-to-head
+under a single protocol with the leakage paths closed.
 
-All PhysioNet 1.0.0, ODC-By 1.0 -- see `THIRD_PARTY_NOTICES.md`.
+<p align="center">
+  <img src="docs/assets/coherence-graph.png" width="520"
+       alt="Wavelet-coherence graph over the scalp montage for a chb01 preictal window">
+</p>
 
-`datasets/epilepsy/chb_mit.py` downloads a registered subject's archive(s)
-on first use and extracts them into the MNE cache
-(`~/mne_data/MNE-chbmit-data/chbmit/1.0.0/chbXX/`). A subject NOT in
-`GITHUB_RELEASE_SHA256` downloads from PhysioNet's S3 mirror instead, same
-as before this mechanism existed. Override any subject's archive with
-`CHBMIT_CHB{NN}_ARCHIVE_URL` / `CHBMIT_CHB{NN}_SHA256` (e.g.
-`CHBMIT_CHB01_ARCHIVE_URL` / `CHBMIT_CHB01_SHA256`) if needed -- the env
-override always describes a single archive, even for a subject normally
-split into parts.
+Several pipelines here consume a **wavelet-coherence graph**: nodes are the
+bipolar EEG channels, edges are the time–frequency coherence between each
+channel pair. The figure above is that graph for one real chb01 preictal
+window (strongest 45 of 253 edges; regenerate with
+`docs/assets/render_coherence_graph.py`, full export in
+`exports/coherence-graph/`).
 
-## RunPod pod image
+## What's in it
 
-`Dockerfile` (repo root) bakes in this repo's Python dependencies (`pip
-install -r requirements.txt`, no apt build toolchain needed anymore -- see
-"fcwt" below) on top of `runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404`
-(confirmed 2026-08-20 against a live RTX 4090 pod: driver 570.133.20, CUDA
-12.8, `torch==2.8.0+cu128` with `torch.cuda.is_available() == True`). It
-deliberately does **not** bake in the repo's pipeline code -- code is synced
-to the pod at launch (rsync/git clone) since it changes on nearly every
-commit. As of 2026-08-21 the image **does** bake in CHB-MIT subject `chb01`
-(~1.6GB uncompressed, ~991MB as `chb01.tar.gz`), landing at
-`/root/mne_data/MNE-chbmit-data/chbmit/1.0.0/chb01/` -- the only subject
-`Epilepsy/run_pipelines.py`'s `DEFAULT_SUBJECTS` exercises by default, so a
-fresh pod never needs a first-run download for the common case. The image
-and `datasets/epilepsy/chb_mit.py` both pull that archive from the
-[`chbmit-chb01-1.0.0`](https://github.com/noshore5/EEG_Benchmarks/releases/tag/chbmit-chb01-1.0.0)
-GitHub Release (PhysioNet 1.0.0 files, ODC-By 1.0). Other subjects still
-download on demand from PhysioNet's S3 mirror. See
-`THIRD_PARTY_NOTICES.md`.
+### Epilepsy pipelines (`Epilepsy/run_pipelines.py`)
 
-**Building it:** RunPod pods can't run a Docker daemon themselves (they're
-unprivileged containers, no `cap_sys_admin`), so the image is built by GitHub
-Actions (`.github/workflows/build-pod-image.yml`) on a real Docker daemon and
-pushed to GHCR (`ghcr.io/noshore5/eeg_benchmarks`). Triggers automatically on
-any push to `main` that touches `Dockerfile`, `requirements.txt`, or
-`THIRD_PARTY_NOTICES.md` (repo code isn't baked into the image, so code-only
-commits don't need a rebuild), or manually via `workflow_dispatch`. Tagged
-with date + short commit hash (e.g. `20260820-831695a`) plus a floating
-`latest`.
+Reimplementations, each built from the paper's spec (not vendored code):
 
-RunPod's own GitHub-integration build (Settings → Connections → GitHub, then
-Serverless → New Endpoint → Import Git Repository) was tried first and is a
-dead end for this use case: it publishes to RunPod's internal
-`registry.runpod.net`, scoped to the Serverless endpoint it built for -- a
-plain Pod can't pull it (`Failed to get Hub registry auth` / `No such image`,
-confirmed against a live Pod, not a guess). It also requires a queue-endpoint
-handler (`runpod.serverless.start()`) to build at all, which doesn't fit a
-Pod-based repo like this one. Not used.
+| pipeline | source | input |
+|---|---|---|
+| `slimseiz` | SlimSeiz (adaptive channel selection) | raw EEG |
+| `dbconformer` | DBConformer | raw EEG |
+| `cg_mambanet` | CG-MambaNet | raw EEG |
+| `godoy_tmc` | Godoy et al. TMC-T (conv-tokenizer + Transformer) | raw EEG |
+| `truong_stft_cnn` | Truong et al. 2018 (STFT + CNN) | STFT |
 
-**Using it:** once built, pass `ghcr.io/noshore5/eeg_benchmarks:latest` (or a
-specific date-commit tag) as `imageName` when creating a pod (or bake it into
-a Runpod template) in place of the stock `runpod/pytorch:...` image, and skip
-`bash setup.sh` entirely. Public GHCR package, no registry credential needed
-to pull.
+Original architectures built here:
 
-### `dense_edge_mamba` + fused `mamba-ssm` kernel (`Dockerfile.mamba`)
+| pipeline | idea | input |
+|---|---|---|
+| `temporal_graph_mamba` | wavelet coherence graph → per-channel selective SSM (Mamba) → logits | CWT coherence graph |
+| `dense_edge` / `dense_edge_gru` / `dense_edge_mamba` | dense edge-feature graph with a Conv2d / per-edge GRU / Mamba temporal step | CWT coherence graph |
+| `hermitian_ssm` | eigendecomposition of the Hermitian coherence matrix → selective SSM | CWT coherence graph |
+| `continuous_cwt_mamba` | streaming (carried-state) variant for continuous recordings | CWT coherence graph |
 
-A second image, `Dockerfile.mamba`, bakes in repo code **and** compiles
-`mamba-ssm`/`causal-conv1d` against the same `torch==2.8.0+cu128` base so
-`_DenseEdgeMambaTemporal`'s `use_cuda_kernel` auto-detect (mambapy
-`MambaConfig.use_cuda=True`) has a real fused scan to call. Windows/Mac
-keep the portable `mambapy` pscan; this image is Linux/CUDA only.
+Every pipeline respects `--label-mode {prediction,detection}` and writes
+to a per-pipeline, per-mode results directory. Detection and prediction
+numbers are **never pooled** — different tasks, different ceilings (see
+`Epilepsy/results/README.md`).
 
-- Workflow: `.github/workflows/build-mamba-pod-image.yml` (`workflow_dispatch`
-  or a push that touches `Dockerfile.mamba`). Tags:
-  `ghcr.io/noshore5/eeg_benchmarks-mamba:<date>-<sha>` and `:latest`.
-- On the pod: `--device cuda --pipeline dense_edge_mamba`. Kernel
-  auto-engages; `--no-mamba-use-cuda-kernel` forces pscan. The Mamba block
-  is excluded from `--train-amp-bf16` (fp32) because the fused kernel is
-  not (b)float16-safe.
-- First thing on a new pod: `python scripts/dense_edge_mamba_cuda_kernel_parity.py`
-  then `python Epilepsy/run_pipelines.py --pipeline dense_edge_mamba
-  --channel-subset-k 23 --device cuda --max-folds 1 --epochs 1`.
-- `_DenseEdgeMambaContinuous` does **not** use this kernel (no initial-state
-  API on `selective_scan_fn`).
+### Evaluation protocol
 
-See `Epilepsy/runpod_mamba_fast_image_brief.md`.
+- **Leave-one-seizure-out** cross-validation: hold out one seizure's
+  recording, train on the rest, repeat.
+- **Prediction** uses a configurable seizure-prediction horizon (SPH) and
+  occurrence period (SOP), a postictal buffer excluded from interictal,
+  and negative-window subsampling with per-recording stratification so no
+  fold is starved.
+- **Shuffled-label controls** (`*_shuffled_control/`) for every prediction
+  pipeline — a sanity floor.
+- Prediction runs additionally report event-level metrics (per-seizure
+  hit/miss, false alarms per hour) that window-level F1/AP can't stand in
+  for.
 
-**Fallback:** `setup.sh` (manual bootstrap on a stock pod) is still the
-documented path until a few real runs have gone through the new image
-cleanly -- don't remove it yet.
+Current head-to-head board (chb01, prediction LOSO, single untuned run
+per pipeline — treat gaps under ~0.05 mean AP as noise):
+`Epilepsy/Session_notes/2026_08_31/pipeline_comparison_all_models.md`.
 
-**fcwt:** dropped from `requirements.txt` (2026-08-20) along with the apt
-`cmake build-essential libfftw3-dev` toolchain it needed to compile from
-source -- that compile step was the slowest part of both `setup.sh` and this
-image's build, for a dependency the default pipeline no longer uses now that
-`cwt_backend="torch"` (`utils/torch_cwt.py`) is the default in
-`run_pipelines.py`'s `_SHARED_ARCH_PARAMS`. `cwt_backend="fcwt"` still exists
-in `cwt_gnn_classifiers.py` as a manual revert switch; using it again means
-restoring both `fcwt==0.1.18` in `requirements.txt` and that apt step.
+### SzCORE submission (`Epilepsy/szcore/`)
+
+Packages `godoy_tmc` as a container for
+[SzCORE / EpilepsyBench](https://epilepsybenchmarks.com), the community
+seizure-detection benchmark: EDF in → seizure-annotation TSV out, scored
+on a private held-out set. See `Epilepsy/szcore/README.md`.
+
+## Quickstart
+
+```bash
+python -m venv .venv && . .venv/bin/activate
+pip install -r requirements.txt
+
+# Epilepsy: seizure prediction on chb01 (auto-downloads the data)
+python Epilepsy/run_pipelines.py --pipeline temporal_graph_mamba --label-mode prediction --device mps
+
+# wiring-only smoke (fast, not a real result)
+python Epilepsy/run_pipelines.py --pipeline godoy_tmc --label-mode prediction --smoke
+
+# BCI: motor imagery on BNCI2014-001
+python BCI/run_pipelines.py --pipeline dense_edge --subjects 1
+```
+
+Use `--device cpu` off Apple Silicon / without CUDA. `--param-names` /
+`--param-values` override any pipeline parameter for a one-off run without
+editing source.
+
+## Repo layout
+
+| path | what |
+|---|---|
+| `Epilepsy/` | seizure prediction/detection — pipelines, run harness, results, math notes |
+| `Epilepsy/szcore/` | SzCORE detection-benchmark container |
+| `BCI/` | MOABB motor-imagery pipelines (evidence GNNs, EEGNet) |
+| `datasets/epilepsy/` | CHB-MIT loader (PhysioNet + GitHub-Release mirror, seizure-annotation parsing) |
+| `paradigms/` | windowing / continuous-labeling paradigms |
+| `utils/` | CWT backends, shared helpers |
+| `scripts/` | AWS launch + result-promotion tooling |
+| `CONTEXT.md` | living current-state doc — read before working in the repo |
+| `Epilepsy/Session_notes/` | dated detailed record of every experiment |
+
+## Data & infrastructure
+
+- **CHB-MIT** subjects `chb01`–`chb04` are mirrored on this repo's GitHub
+  Releases (faster than PhysioNet's throttled S3); others download on
+  demand. `datasets/epilepsy/chb_mit.py` handles fetch + cache into
+  `~/mne_data/`. Redistribution notice + citations: `THIRD_PARTY_NOTICES.md`.
+- **RunPod / AWS**: `Dockerfile` (+ `Dockerfile.mamba` for the fused
+  `mamba-ssm` CUDA kernel) build GPU pod images via GitHub Actions;
+  `scripts/` + `.github/workflows/eeg-run.yml` launch fire-and-forget
+  training runs. See `docs/infrastructure.md` and `AWS_INFRA.md`.
+
+## Status / caveats
+
+- Most head-to-head numbers are **single untuned runs on one subject
+  (chb01)** — directional, not definitive. No error bars unless a session
+  note gives a seed sweep.
+- Cross-patient generalization is not solved here (or in the literature);
+  the honest LOSO numbers are far below the subject-specific figures
+  papers report.
+- No `LICENSE` file yet — add one before sharing the repo publicly.
+  CHB-MIT data is ODC-By 1.0 (`THIRD_PARTY_NOTICES.md`).

@@ -1,0 +1,28 @@
+---
+# SzCORE submission descriptor. Copy into a fork of esl-epfl/szcore at
+# algorithms/coheriq_tmct.yaml and open a PR once the image is pushed
+# public. Schema: https://github.com/esl-epfl/szcore/blob/main/config/schema.json
+title: "CoherIQ TMC-T -- conv-tokenizer + Transformer seizure detector"
+short_title: "CoherIQ TMC-T"
+image: "ghcr.io/noshore5/eeg_benchmarks-szcore:0.1.0"
+authors:
+  - given_names: Noah
+    family_names: Shore
+    email: noahtshore@gmail.com
+    affiliation: CoherIQ
+version: 0.1.0
+date_released: "2026-09-06"
+abstract: >
+  A reconstruction of the TMC-T architecture (Godoy et al., "EEG-Based
+  Epileptic Seizure Prediction Using Temporal Multi-Channel Transformers",
+  arXiv:2209.11172) trained here for seizure DETECTION rather than
+  prediction. A three-block 1D conv tokenizer over the double-banana
+  bipolar montage feeds a single-layer Transformer encoder (d_model 32,
+  8 heads); mean-pooled tokens go to a small MLP head. Inference slides a
+  4 s window (1 s stride) over the recording, thresholds the per-window
+  seizure probability, then merges detections within 30 s and drops
+  events shorter than 10 s.
+license: MIT
+repository: https://github.com/noshore5/EEG_Benchmarks
+datasets:
+  - "CHB-MIT Scalp EEG Database"

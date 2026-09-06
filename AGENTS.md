@@ -18,7 +18,8 @@ Facts that flipped in 2026-08-25 and are easy to reverse by reading old
 comments -- confirm in `CONTEXT.md` rather than the file-level docstring
 that introduced them:
 
-- Current branch is `continuous-cwt-mamba`.
+- Current branch is `main` (`continuous-cwt-mamba` was merged and deleted
+  2026-08-25) -- confirm in `CONTEXT.md`.
 - `_DenseEdgeMambaTemporal.use_cuda_kernel` is auto-detect, not forced
   `False`. Fused-kernel image:
   `ghcr.io/noshore5/eeg_benchmarks-mamba:20260825-4760de0`.

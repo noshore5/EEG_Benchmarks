@@ -27,3 +27,11 @@ _to_delete/
 
 .venv
 
+
+# SzCORE checkpoint (produced by train_detector.py -- retrain, do not commit)
+Epilepsy/szcore/algo/model_weights.pt
+*.hyp.tsv
+
+# Generated visualization output (large; regenerate via exports/coherence-graph/build_coherence_export.py)
+exports/
+!exports/coherence-graph/build_coherence_export.py

@@ -65,7 +65,20 @@ incidence-average -> per-channel selective SSM -> flatten -> logits),
 plus how `hermitian_ssm` (eigendecomp of `Gamma`) and the `channel_cwt`
 ablations relate to it. Written 2026-08-31 for the linear-algebra view.
 
-**Last updated:** 2026-08-30, by Claude (Mac shell). On `main`. Uncommitted
+2026-09-06: **`Epilepsy/szcore/`** -- SzCORE / EpilepsyBench submission
+scaffold (seizure *detection*, event F1 / FP-24h -- NOT the repo's
+preictal-prediction task). `train_detector.py` pools CHB-MIT into 4s
+bipolar-montage windows and fits `GodoyTMCClassifier` (godoy_tmc arch) ->
+`algo/model_weights.pt` (git-ignored); `algo/infer.py` is the container
+entrypoint (`python -m algo $INPUT $OUTPUT`, EDF->TSV via `epilepsy2bids`);
+`Dockerfile` + `coheriq_tmct.yaml` for the PR to `esl-epfl/szcore`. Full
+chain smoke-verified 2026-09-06 (3-epoch chb01 model detects chb01_03's
+real seizure). `epilepsy2bids` added to `.venv`. Real chb01 20-epoch
+training RUNNING (pid 34320, MPS, log `_to_delete/szcore_train_chb01_full.log`).
+Single-subject checkpoint is CI-validation only -- scale `--subjects` on
+AWS for a cross-patient submission. See `Epilepsy/szcore/README.md`.
+
+**Last updated:** 2026-09-06, by Claude (Mac shell). On `main`. Uncommitted
 working tree (all this session, all smoke-tested, commit once the running/
 queued results land):
 - `run_pipelines.py`: `HERMITIAN_SSM_PARAMS` only -- `encoder_mode` ->
