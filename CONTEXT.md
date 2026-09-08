@@ -23,8 +23,9 @@ on-demand box; on `rc==0` it commits the new result CSV(s) (+ optional
 `--session-note`) straight to `origin/main` via `scripts/promote_results.sh`
 and self-terminates; SNS email only on failure. Needs one-time
 `scripts/setup_autorun_infra.sh` (deploy key in SSM, IAM, SNS topic).
-`--cpu` works now; `--gpu` blocked on the pending quota bump. See
-`AWS_INFRA.md` "Autonomous runs".
+`--cpu` works now; `--gpu` launches on-demand only (quota still 0) and
+has an unfixed pip bug on the DLAMI -- see the 2026-09-07 GPU note below.
+See `AWS_INFRA.md` "Autonomous runs".
 2026-09-02: **launch from anywhere w/o AWS creds** --
 `.github/workflows/eeg-run.yml` (`gh workflow run eeg-run.yml -f name=... -f
 cmd=...`, or GitHub mobile/browser -> Actions -> "eeg-run"). GH OIDC ->
@@ -50,14 +51,37 @@ wall**, mean AP 0.535 (within the MPS 5-seed band; timing run, not a new
 board number). Peak RSS 14.1/16 GB -- the raw-classifier LOSO path leaks
 per-fold, don't shrink the box below 16 GB. See `AWS_INFRA.md` "eeg-cpu-box
 job runner" + `Session_notes/2026_09_01/aws_cpu_box_first_run_godoy_tmc.md`.
-GPU run blocked: on-demand G quota `L-DB2E81BA` = 0 and spot G quota
-`L-3819A6DF` = 0 (both increase-requests now `CASE_OPENED` -- AWS support
-queue, not auto-approved; hours-to-days). EC2-Spot SLR exists; `g5` spot
-capacity was out region-wide in us-east-1. One-shot `gpu_userdata.sh`
-staged at `.../_setup/` for when a quota clears. eeg-box role got inline
-policy `eeg-box-extra` 2026-09-01 (servicequotas read+request, spot-SLR
-create, `ec2:CreateImage`/`ModifyInstanceAttribute`) -- eeg-box shell can
-now check quota status itself.
+GPU quota (2026-09-07): **spot G `L-3819A6DF` = 8 -- APPROVED**
+(CASE_CLOSED 2026-09-03); on-demand G `L-DB2E81BA` = 0 still CASE_OPENED.
+So spot GPU launches work now, on-demand still don't. 2026-09-07 verified
+end-to-end: `aws ec2 run-instances --instance-market-options
+MarketType=spot` succeeded, box booted (Tesla T4), self-terminated, logs
+to S3 -- **total cost ~$0.01-0.04** for a 4-min box. BUT: `g5.xlarge` /
+`g6.xlarge` spot returned `InsufficientInstanceCapacity` in all 5 AZs;
+only `g4dn.xlarge` (us-east-1c) had stock. AND: `eeg-run.sh`'s GPU path
+has a bug -- it runs `pip install --break-system-packages` which the
+Ubuntu-22.04 DLAMI's pip 22.0 doesn't support (that flag was for the
+CPU path's 24.04 AMI), so deps never install. Fix before the next GPU
+run: use the DLAMI conda `python` / drop the flag. EC2-Spot SLR exists.
+eeg-box role got inline policy `eeg-box-extra` 2026-09-01 (servicequotas
+read+request, spot-SLR create, `ec2:CreateImage`/`ModifyInstanceAttribute`).
+
+**`SPOT_TRAINING.md`** (2026-09-08) -- passive cheap training on
+interruptible spot GPUs. CORE BUILT + locally tested, NOT yet run on a
+real spot box:
+- `Epilepsy/szcore/trainer.py` `SpotTrainer` -- per-epoch checkpoint
+  (local+S3), `--resume-from` (auto from `s3://.../latest.pt`), SIGTERM ->
+  checkpoint + exit 0, config-hash guard. `train_detector.py` rewired
+  onto it (was `GodoyTMCClassifier`); writes `DONE` on clean finish.
+- `scripts/eeg-spot-train.sh` -- spot launch, (type,AZ) capacity
+  fallback, `MaxPrice`, venv bootstrap (avoids the DLAMI pip bug),
+  SIGTERM-forward, self-terminate only on clean finish.
+- `.github/workflows/eeg-spot-keepalive.yml` -- `*/15` cron relaunch loop
+  + crash-loop guard (3 stalls / 48h -> FAILED DONE + SNS).
+STILL TO DO: run `scripts/setup_spot_keepalive.sh` once (IAM); merge
+workflow to main; **streaming-shard dataset cache** (`build_dataset` still
+`np.concatenate`s all windows -> ~130GB for 24 subjects, caps `--subjects`
+at ~4-6 until fixed); first real spot run.
 
 **`Epilepsy/temporal_graph_mamba_math.md`** -- `pre` written as matrix
 operations (Hermitian coherence matrix `Gamma(f,t)` -> off-diag ->

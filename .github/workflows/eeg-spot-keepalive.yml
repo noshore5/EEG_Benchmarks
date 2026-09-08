@@ -1,0 +1,133 @@
+name: eeg-spot-keepalive (resume spot training)
+
+# Keeps a resumable SzCORE-detector training run alive on interruptible spot
+# GPUs. Every ~15 min (and on manual dispatch) it checks:
+#   DONE sentinel in S3?          -> nothing to do, run finished
+#   a spot box already running?   -> nothing to do, still training
+#   otherwise                     -> launch one via scripts/eeg-spot-train.sh
+#
+# Crash-loop guard: tracks the checkpoint epoch across ticks in
+# s3://$BUCKET/checkpoints/<job>/keepalive-state.json. After 3 consecutive
+# launches with NO epoch progress, or 48 h wall-clock, it writes a FAILED
+# DONE and stops relaunching (one SNS notification).
+#
+# Auth: GitHub OIDC -> role eeg-gh-launcher. One-time setup:
+#   scripts/setup_spot_keepalive.sh   (adds checkpoints/* RW + sns:Publish)
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      job:
+        description: "Job slug (S3 checkpoint prefix)"
+        required: true
+        default: szcore-detector
+        type: string
+      cmd:
+        description: "Trainer command (cwd=/root/repo). Do NOT add --checkpoint-dir/--s3-prefix."
+        required: true
+        default: "python Epilepsy/szcore/train_detector.py --subjects 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 --epochs 25 --device cuda"
+        type: string
+      reset:
+        description: "Clear DONE + keepalive-state before this tick (restart a finished/failed run)"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: eeg-spot-keepalive
+  cancel-in-progress: false
+
+env:
+  BUCKET: noshore-eeg-benchmarks-827938107865
+  # scheduled ticks use these; manual dispatch overrides via inputs
+  DEFAULT_JOB: szcore-detector
+  DEFAULT_CMD: "python Epilepsy/szcore/train_detector.py --subjects 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 --epochs 25 --device cuda"
+  MAX_STALL: "3"
+  MAX_HOURS: "48"
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::827938107865:role/eeg-gh-launcher
+          aws-region: us-east-1
+
+      - name: Tick
+        env:
+          IN_JOB: ${{ inputs.job }}
+          IN_CMD: ${{ inputs.cmd }}
+          IN_RESET: ${{ inputs.reset }}
+          SNS_TOPIC_ARN: arn:aws:sns:us-east-1:827938107865:eeg-runs
+        run: |
+          set -euo pipefail
+          JOB="${IN_JOB:-$DEFAULT_JOB}"
+          CMD="${IN_CMD:-$DEFAULT_CMD}"
+          PFX="s3://$BUCKET/checkpoints/$JOB"
+          now=$(date -u +%s)
+
+          if [ "${IN_RESET:-false}" = "true" ]; then
+            echo "reset: clearing DONE + keepalive-state for $JOB"
+            aws s3 rm "$PFX/DONE" || true
+            aws s3 rm "$PFX/keepalive-state.json" || true
+          fi
+
+          if aws s3 ls "$PFX/DONE" >/dev/null 2>&1; then
+            echo "DONE exists -- run complete. Nothing to do."
+            exit 0
+          fi
+
+          RUNNING=$(aws ec2 describe-instances \
+            --filters "Name=tag:Project,Values=eeg" "Name=tag:spot-job,Values=$JOB" \
+                      "Name=instance-state-name,Values=pending,running" \
+            --query 'Reservations[].Instances[].InstanceId' --output text)
+          if [ -n "$RUNNING" ]; then
+            echo "box $RUNNING already training $JOB. Nothing to do."
+            exit 0
+          fi
+
+          # --- progress / crash-loop state -----------------------------------
+          EPOCH=-1
+          if aws s3 cp "$PFX/progress.json" /tmp/progress.json >/dev/null 2>&1; then
+            EPOCH=$(python3 -c "import json;print(json.load(open('/tmp/progress.json'))['epoch'])")
+          fi
+          SEEN=-1; STALL=0; FIRST=$now
+          if aws s3 cp "$PFX/keepalive-state.json" /tmp/state.json >/dev/null 2>&1; then
+            SEEN=$(python3 -c "import json;print(json.load(open('/tmp/state.json')).get('seen_epoch',-1))")
+            STALL=$(python3 -c "import json;print(json.load(open('/tmp/state.json')).get('stall',0))")
+            FIRST=$(python3 -c "import json;print(json.load(open('/tmp/state.json')).get('first_ts',$now))")
+          fi
+
+          if [ "$EPOCH" -gt "$SEEN" ]; then
+            STALL=0; SEEN=$EPOCH
+          else
+            STALL=$((STALL + 1))
+          fi
+          HOURS=$(( (now - FIRST) / 3600 ))
+          echo "epoch=$EPOCH seen=$SEEN stall=$STALL hours=$HOURS"
+
+          if [ "$STALL" -ge "$MAX_STALL" ] || [ "$HOURS" -ge "$MAX_HOURS" ]; then
+            REASON="stall=$STALL hours=$HOURS"
+            echo "giving up: $REASON"
+            printf 'FAILED %s\n' "$REASON" > /tmp/DONE
+            aws s3 cp /tmp/DONE "$PFX/DONE"
+            aws sns publish --topic-arn "$SNS_TOPIC_ARN" \
+              --subject "eeg-spot-keepalive gave up on $JOB" \
+              --message "$REASON -- see $PFX/" || true
+            exit 0
+          fi
+
+          python3 -c "import json;json.dump({'seen_epoch':$SEEN,'stall':$STALL,'first_ts':$FIRST},open('/tmp/state.json','w'))"
+          aws s3 cp /tmp/state.json "$PFX/keepalive-state.json"
+
+          echo "launching spot box for $JOB (epoch so far: $EPOCH)"
+          bash scripts/eeg-spot-train.sh --job "$JOB" --cmd "$CMD"

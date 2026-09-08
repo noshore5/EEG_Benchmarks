@@ -1,11 +1,23 @@
 """Train the SzCORE seizure-DETECTION checkpoint (TMC-T / godoy_tmc arch).
 
 Pools CHB-MIT recordings into 4 s bipolar-montage windows labelled
-ictal/non-ictal, fits this repo's ``GodoyTMCClassifier``, and writes
+ictal/non-ictal, fits a ``TMCTransformer`` via the checkpoint-aware
+``SpotTrainer`` (so the run survives a spot-instance eviction), and writes
 ``algo/model_weights.pt`` for the container.
 
     .venv/bin/python Epilepsy/szcore/train_detector.py --subjects 1 --epochs 20 --device mps
     .venv/bin/python Epilepsy/szcore/train_detector.py --subjects 1 2 3 5 --epochs 25
+
+Spot / resumable use (see ``SPOT_TRAINING.md``):
+
+    python Epilepsy/szcore/train_detector.py --subjects $(seq 1 24) --epochs 25 \
+        --device cuda --checkpoint-dir /root/ckpt \
+        --s3-prefix s3://noshore-eeg-benchmarks-827938107865/checkpoints/szcore-detector
+
+With ``--s3-prefix`` the trainer auto-resumes from ``<prefix>/latest.pt``
+if it exists, checkpoints there every epoch, and on clean completion
+writes ``<prefix>/DONE``. On SIGTERM it checkpoints and exits 0 WITHOUT
+writing DONE, so a relaunch picks the run back up.
 
 Note this is seizure DETECTION (ictal windows are positive), a different
 task from the repo's headline preictal-PREDICTION rows -- do not compare
@@ -15,19 +27,21 @@ the numbers.
 from __future__ import annotations
 
 import argparse
+import subprocess
 import sys
 from pathlib import Path
 
 import numpy as np
+import torch
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
-sys.path.insert(0, str(Path(__file__).resolve().parent))  # for `algo` package
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # for `algo` / `trainer`
 
 from algo.common import FS, N_CHANNELS, WINDOW_S, TRAIN_STEP_S, load_bipolar_eeg, make_windows  # noqa: E402
 
 from datasets.epilepsy.chb_mit import CHBMIT  # noqa: E402
-from Epilepsy.pipelines.godoy_tmc_classifier import GodoyTMCClassifier  # noqa: E402
+from trainer import SpotTrainer, TrainConfig, _s3_cp  # noqa: E402
 
 WEIGHTS_OUT = Path(__file__).resolve().parent / "algo" / "model_weights.pt"
 
@@ -116,6 +130,13 @@ def main():
                     help="cap seizure-free recordings per subject (smoke/memory)")
     ap.add_argument("--threshold", type=float, default=None,
                     help="override the auto-picked operating point")
+    ap.add_argument("--checkpoint-dir", default="checkpoints",
+                    help="local dir for per-epoch resume checkpoints")
+    ap.add_argument("--s3-prefix", default=None,
+                    help="s3://.../<run> -- auto-resume, per-epoch upload, DONE sentinel")
+    ap.add_argument("--resume-from", default=None,
+                    help="explicit checkpoint (local path or s3:// uri); "
+                         "default is auto (s3-prefix/latest.pt or checkpoint-dir/latest.pt)")
     ap.add_argument("--out", default=str(WEIGHTS_OUT))
     args = ap.parse_args()
 
@@ -131,24 +152,33 @@ def main():
     print(f"[data] after negative subsample: {X.shape[0]} windows, {int(y.sum())} ictal")
     assert X.shape[1] == N_CHANNELS
 
-    clf = GodoyTMCClassifier(
-        **MODEL_KWARGS,
-        normalize_input=True,
+    cfg = TrainConfig(
+        model_kwargs=MODEL_KWARGS,
+        n_channels=N_CHANNELS,
+        n_time=window,
+        fs=FS,
+        window_s=WINDOW_S,
         epochs=args.epochs,
         batch_size=args.batch_size,
-        learning_rate=args.lr,
+        lr=args.lr,
         weight_decay=1e-4,
         grad_clip_norm=1.0,
         validation_split=0.2,
         early_stopping_patience=5,
-        device=args.device,
         seed=args.seed,
         use_class_weights=True,
+        train_subjects=list(args.subjects),
+    )
+    trainer = SpotTrainer(
+        cfg,
+        device=args.device,
+        checkpoint_dir=args.checkpoint_dir,
+        s3_prefix=args.s3_prefix,
         verbose=1,
     )
-    clf.fit(X, y)
+    trainer.fit(X, y, resume_from=args.resume_from)
 
-    probs = clf.predict_proba(X)[:, 1]
+    probs = trainer.predict_proba(X)[:, 1]
     auto_t, f1 = pick_threshold(probs, y)
     threshold = args.threshold if args.threshold is not None else auto_t
     print(f"[thr] auto operating point {auto_t} (train sample-F1 {f1:.3f}); using {threshold}")
@@ -156,23 +186,30 @@ def main():
     ckpt = dict(
         arch="godoy_tmc_tmct",
         task="detection",
-        state_dict={k: v.cpu() for k, v in clf.model_.state_dict().items()},
+        state_dict={k: v.cpu() for k, v in trainer.model.state_dict().items()},
         model_kwargs=MODEL_KWARGS,
         n_channels=N_CHANNELS,
         n_time=window,
         fs=FS,
         window_s=WINDOW_S,
-        x_mean=float(clf.X_mean_),
-        x_std=float(clf.X_std_),
+        x_mean=float(trainer.x_mean_),
+        x_std=float(trainer.x_std_),
         threshold=float(threshold),
         train_subjects=list(args.subjects),
         train_epochs=args.epochs,
     )
-    import torch
 
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     torch.save(ckpt, args.out)
     print(f"[done] wrote {args.out}")
+
+    if args.s3_prefix:
+        prefix = args.s3_prefix.rstrip("/")
+        _s3_cp(args.out, f"{prefix}/model_weights.pt")
+        done = Path(args.checkpoint_dir) / "DONE"
+        done.write_text(f"train_epochs={args.epochs} subjects={args.subjects}\n")
+        _s3_cp(str(done), f"{prefix}/DONE")
+        print(f"[done] wrote {prefix}/DONE -- relaunch loop will stop")
 
 
 if __name__ == "__main__":
