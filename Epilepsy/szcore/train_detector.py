@@ -87,6 +87,12 @@ def build_dataset(subjects, window, step, pos_overlap=0.5, max_records=None):
             ys.append(y)
             groups.append(np.full(y.shape[0], f"{subj}:{fname}"))
             print(f"  {fname}: {windows.shape[0]} windows, {int(y.sum())} ictal")
+    if not Xs:
+        raise RuntimeError(
+            "build_dataset produced no windows -- every recording was skipped. "
+            "Most likely a missing dep (epilepsy2bids / mne) or no local EDFs. "
+            "See the per-file 'skip <fname>: <reason>' lines above."
+        )
     X = np.concatenate(Xs).astype(np.float32)
     y = np.concatenate(ys)
     g = np.concatenate(groups)

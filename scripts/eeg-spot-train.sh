@@ -149,8 +149,12 @@ cd /root/repo
 git rev-parse --short HEAD >> /root/run.log
 nvidia-smi >> /root/run.log 2>&1 || echo "NO GPU" >> /root/run.log
 
-# everything the SzCORE trainer needs that the DLAMI venv lacks (NOT torch)
+# everything the SzCORE trainer needs that the DLAMI venv lacks (NOT torch):
+# top-level requirements.txt (moabb/mne/... for datasets.epilepsy.chb_mit)
+# minus torch, PLUS the szcore container's own reqs (epilepsy2bids, used by
+# algo/common.load_bipolar_eeg).
 grep -vE '^(torch|--extra-index-url|#|\$)' requirements.txt > /tmp/reqs.txt || true
+grep -vE '^(torch|--extra-index-url|#|\$)' Epilepsy/szcore/requirements.txt >> /tmp/reqs.txt || true
 if [ -n "\$BASEPY" ]; then
   PY="\$BASEPY"
   "\$PY" -m pip install -r /tmp/reqs.txt >> /root/pip.log 2>&1 \
@@ -159,9 +163,11 @@ else
   echo "no torch python found -- bare venv fallback" >> /root/run.log
   python3 -m venv /root/venv && PY=/root/venv/bin/python
   "\$PY" -m pip install -U pip wheel >> /root/pip.log 2>&1 || true
-  "\$PY" -m pip install -r requirements.txt >> /root/pip.log 2>&1 \
+  "\$PY" -m pip install -r requirements.txt -r Epilepsy/szcore/requirements.txt >> /root/pip.log 2>&1 \
     && echo "pip ok" >> /root/run.log || echo "pip FAILED (see pip.log)" >> /root/run.log
 fi
+"\$PY" -c "import epilepsy2bids" 2>>/root/run.log \
+  || "\$PY" -m pip install 'epilepsy2bids>=0.0.6' >> /root/pip.log 2>&1
 "\$PY" -c "import torch,moabb,mne,epilepsy2bids;print('cuda',torch.cuda.is_available())" >> /root/run.log 2>&1
 
 mkdir -p /root/ckpt
