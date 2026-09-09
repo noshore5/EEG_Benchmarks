@@ -1,9 +1,30 @@
 # Passive spot-instance training
 
-**Status (2026-09-08): core built + locally tested; not yet run on a real
-spot box, and the 24-subject dataset cache (§"What's NOT built" #2) is
-still needed before a full-CHB-MIT run.** Read `AWS_INFRA.md` first for the
-account / launcher / S3 facts this builds on.
+**Status (2026-09-09): infrastructure works and is DORMANT. No active
+training target.** The SzCORE-detector / CHB-MIT run this was first hung on
+was abandoned (2026-09-09, user: "the spot training pipelines work, which
+is the important thing, but I don't care about training godoy for
+detection of CHB-MIT"). The `eeg-spot-keepalive.yml` cron is
+**disabled** (`gh workflow disable`) -- re-enable only when there's a real
+run to drive, and never with the 24-subject default command (needs the
+dataset cache, §"What's NOT built" #2). Read `AWS_INFRA.md` first.
+
+What was actually proven:
+- `SpotTrainer` checkpoint / resume / SIGTERM-flush / config-guard --
+  tested locally (chb01, cpu+mps), works.
+- `eeg-spot-train.sh` bootstrap on a real g4dn spot box got through:
+  spot launch w/ capacity fallback, `/opt/pytorch` venv + full dep
+  install, git clone, `epilepsy2bids` import, `torch.cuda == True`,
+  PhysioNet download, `build_dataset` running. No full training run ever
+  completed an epoch on a box (every failure was bootstrap/plumbing or the
+  24-subject OOM, never the training loop).
+- Cost of getting there: ~6 spot boxes, ~$0.5-2 of AWS credit (2 were
+  autonomous cron boxes running the 24-subject default -- a mistake:
+  the workflow was pushed to main with an active `*/15` schedule).
+
+To reuse this for a different model: point `--cmd` at another training
+script that takes `--checkpoint-dir` / `--s3-prefix` / `--resume-from` and
+follows the same DONE-sentinel + SIGTERM contract (copy `SpotTrainer`).
 
 Built so far:
 - `Epilepsy/szcore/trainer.py` -- `SpotTrainer`: per-epoch checkpoint

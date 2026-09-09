@@ -78,10 +78,17 @@ real spot box:
   SIGTERM-forward, self-terminate only on clean finish.
 - `.github/workflows/eeg-spot-keepalive.yml` -- `*/15` cron relaunch loop
   + crash-loop guard (3 stalls / 48h -> FAILED DONE + SNS).
-STILL TO DO: run `scripts/setup_spot_keepalive.sh` once (IAM); merge
-workflow to main; **streaming-shard dataset cache** (`build_dataset` still
-`np.concatenate`s all windows -> ~130GB for 24 subjects, caps `--subjects`
-at ~4-6 until fixed); first real spot run.
+2026-09-09: SzCORE-detector target ABANDONED (user doesn't want godoy/
+CHB-MIT detection). Infra is DORMANT + WORKS: `SpotTrainer` checkpoint/
+resume/SIGTERM tested locally; `eeg-spot-train.sh` bootstrap verified on a
+real g4dn spot box through deps+cuda+data+build_dataset (no epoch ever
+completed on a box, but every failure was plumbing not the trainer).
+`eeg-spot-keepalive.yml` cron is **DISABLED** (`gh workflow disable`) --
+it was pushed to main with an active `*/15` schedule + 24-subject default
+and ran 2 autonomous boxes (~$0.5-2 credit) before the crash-loop guard
+stopped it. Re-enable only for a real run, never with the 24-subj default.
+Reusable for other models via `--cmd` + the checkpoint-dir/s3-prefix/
+resume-from + DONE-sentinel contract.
 
 **`Epilepsy/temporal_graph_mamba_math.md`** -- `pre` written as matrix
 operations (Hermitian coherence matrix `Gamma(f,t)` -> off-diag ->
