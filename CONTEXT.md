@@ -108,6 +108,11 @@ real seizure). `epilepsy2bids` added to `.venv`. Real chb01 20-epoch
 training RUNNING (pid 34320, MPS, log `_to_delete/szcore_train_chb01_full.log`).
 Single-subject checkpoint is CI-validation only -- scale `--subjects` on
 AWS for a cross-patient submission. See `Epilepsy/szcore/README.md`.
+2026-09-10: **`Epilepsy/szcore/PREDICTION_TRACK_PROPOSAL.md`** -- playbook
+(not started) for pitching a seizure-*forecasting* track to
+`esl-epfl/szcore`: bump Jonathan Dan -> open a GH Discussion RFC -> build a
+prototype in a fork on public data -> scoped PR only after a yes. Draft
+issue body + follow-up email + decision gates are in the doc.
 
 **Last updated:** 2026-09-06, by Claude (Mac shell). On `main`. Uncommitted
 working tree (all this session, all smoke-tested, commit once the running/
