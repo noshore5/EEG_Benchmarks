@@ -110,9 +110,18 @@ Single-subject checkpoint is CI-validation only -- scale `--subjects` on
 AWS for a cross-patient submission. See `Epilepsy/szcore/README.md`.
 2026-09-10: **`Epilepsy/szcore/PREDICTION_TRACK_PROPOSAL.md`** -- playbook
 (not started) for pitching a seizure-*forecasting* track to
-`esl-epfl/szcore`: bump Jonathan Dan -> open a GH Discussion RFC -> build a
+`esl-epfl/szcore`: bump Jonathan Dan -> open a GH RFC issue -> build a
 prototype in a fork on public data -> scoped PR only after a yes. Draft
 issue body + follow-up email + decision gates are in the doc.
+2026-09-11: confirmed `esl-epfl/szcore` has Discussions **disabled**
+(`gh api ... --jq .has_discussions` -> false) -- so the RFC is a regular
+Issue, not a Discussion; doc above still says "GH Discussion RFC" in
+places, treat "Issue" as current. No labels self-applied (not a
+collaborator). Second, independent outreach thread opened: a short
+low-commitment email drafted to **Levin Kuhlmann** (Monash, My Seizure
+Gauge) re: general involvement -- not sent yet, separate from the Dan
+thread, no reply-window gate defined for it. Notes in
+`Epilepsy/Session_notes/2026_09_11/szcore_prediction_track_outreach.md`.
 
 **Last updated:** 2026-09-06, by Claude (Mac shell). On `main`. Uncommitted
 working tree (all this session, all smoke-tested, commit once the running/
