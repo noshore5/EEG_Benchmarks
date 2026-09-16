@@ -143,18 +143,23 @@ apt-get update -y && apt-get install -y git python3-venv >> /root/pip.log 2>&1
 
 DOCKER_IMAGE="$DOCKER_IMAGE"
 if [ -n "\$DOCKER_IMAGE" ]; then
-  # Docker path (2026-09-16): image already has repo code, requirements.txt,
-  # compiled mamba-ssm/causal-conv1d fused kernel (sm_86/8.9 -- g5/g6, this
-  # script's first-choice candidates), and chb01 baked in -- see
-  # Dockerfile.mamba. Skips clone/pip/compile entirely; the only per-launch
-  # work is a docker pull + docker run. DLAMI ships Docker + the NVIDIA
-  # container runtime already configured (--gpus all works out of the box).
+  # Docker path (2026-09-16, revised same day): the image holds ONLY
+  # environment -- requirements.txt, compiled mamba-ssm/causal-conv1d fused
+  # kernel, chb01 baked in (see Dockerfile.mamba) -- never repo code. Code
+  # comes from a live git clone bind-mounted over /workspace at docker-run
+  # time, so ANY code change (new pipeline, new flag, whatever) is
+  # usable the instant it's pushed -- no image rebuild, no AMI re-bake.
+  # Only a real dependency/environment change needs those. The dataset
+  # (/root/mne_data inside the image) and installed packages live outside
+  # /workspace, so the bind mount doesn't touch them.
   echo "DOCKER_IMAGE=\$DOCKER_IMAGE" >> /root/run.log
   nvidia-smi >> /root/run.log 2>&1 || echo "NO GPU" >> /root/run.log
   docker pull "\$DOCKER_IMAGE" >> /root/pip.log 2>&1 \
     && echo "docker pull ok" >> /root/run.log \
     || echo "docker pull FAILED (see pip.log)" >> /root/run.log
-  mkdir -p /root/checkpoint /root/results_out
+  git clone -b "$BRANCH" --depth 1 "$REPO_URL" /root/repo >> /root/pip.log 2>&1
+  echo "code checkout: \$(cd /root/repo && git rev-parse --short HEAD)" >> /root/run.log
+  mkdir -p /root/checkpoint
   aws s3 sync "\$CKPT_S3" /root/checkpoint || true
   echo "checkpoint dir has \$(ls /root/checkpoint 2>/dev/null | wc -l) file(s) at launch" >> /root/run.log
   ( while true; do
@@ -167,12 +172,13 @@ if [ -n "\$DOCKER_IMAGE" ]; then
   term() { docker kill -s TERM eeg-run 2>/dev/null || true; }
   trap term TERM
   set +e
-  # results_out mount so promote_results.sh (run against a thin clone
-  # below, since --rm throws the container's own /workspace away) can see
-  # what the run wrote to Epilepsy/results/.
+  # /root/repo mounted over /workspace shadows the image's own (absent)
+  # code with the live checkout; --rm only discards the container layer,
+  # not this host-side mount, so /root/repo/Epilepsy/results already has
+  # whatever the run wrote -- no separate results_out mount/copy needed.
   docker run --name eeg-run --gpus all --rm \
     -v /root/checkpoint:/root/checkpoint \
-    -v /root/results_out:/workspace/Epilepsy/results \
+    -v /root/repo:/workspace \
     -w /workspace "\$DOCKER_IMAGE" \
     python3 -u \$ARGS >> /root/run.log 2>&1 &
   JOB_PID=\$!
@@ -180,19 +186,11 @@ if [ -n "\$DOCKER_IMAGE" ]; then
   RC=\$?
   set -e
   kill \$TAILER 2>/dev/null || true
-  # promote_results.sh expects a repo checkout at \$REPO_DIR to push results
-  # from; the docker path has none on the host. Clone a thin checkout just
-  # for that push, then hand off.
-  git clone -b "$BRANCH" --depth 1 "$REPO_URL" /root/repo >> /root/pip.log 2>&1 || true
-  if [ -d /root/repo ]; then
-    mkdir -p /root/repo/Epilepsy/results
-    cp -r /root/results_out/. /root/repo/Epilepsy/results/ 2>/dev/null || true
-    cd /root/repo
-    REPO_DIR=/root/repo RC=\$RC RUN_NAME="$NAME" RUN_CMD="\$CMD" \
-      RUN_LOG=/root/run.log RUN_STARTED_UTC="\$STARTED" \
-      SESSION_NOTE="\$NOTE" DEPLOY_KEY_SSM="$DEPLOY_KEY_SSM" \
-      bash scripts/promote_results.sh
-  fi
+  cd /root/repo
+  REPO_DIR=/root/repo RC=\$RC RUN_NAME="$NAME" RUN_CMD="\$CMD" \
+    RUN_LOG=/root/run.log RUN_STARTED_UTC="\$STARTED" \
+    SESSION_NOTE="\$NOTE" DEPLOY_KEY_SSM="$DEPLOY_KEY_SSM" \
+    bash scripts/promote_results.sh
   exit \$RC
 fi
 
