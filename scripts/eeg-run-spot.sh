@@ -46,12 +46,15 @@ PROFILE_NAME=eeg-gpu
 SNS_TOPIC_ARN=${SNS_TOPIC_ARN:-arn:aws:sns:us-east-1:827938107865:eeg-runs}
 DEPLOY_KEY_SSM=${DEPLOY_KEY_SSM:-/eeg/github-deploy-key}
 
+## 2026-09-16: g5/g6 (Ampere/Ada, real datacenter GPUs) tried before g4dn
+## (Tesla T4, weak/older, launch-overhead-heavy workloads like this one's
+## per-batch dense-edge precompute lose to it) -- see CONTEXT.md.
 CANDIDATES=(
-  "g4dn.xlarge:us-east-1c"  "g4dn.xlarge:us-east-1d"  "g4dn.xlarge:us-east-1a"
-  "g4dn.xlarge:us-east-1b"  "g4dn.xlarge:us-east-1f"
   "g5.xlarge:us-east-1a"    "g5.xlarge:us-east-1b"     "g5.xlarge:us-east-1c"
   "g5.xlarge:us-east-1d"    "g5.xlarge:us-east-1f"
   "g6.xlarge:us-east-1a"    "g6.xlarge:us-east-1b"     "g6.xlarge:us-east-1c"
+  "g4dn.xlarge:us-east-1c"  "g4dn.xlarge:us-east-1d"  "g4dn.xlarge:us-east-1a"
+  "g4dn.xlarge:us-east-1b"  "g4dn.xlarge:us-east-1f"
 )
 subnet_for() {
   case "$1" in
@@ -73,7 +76,7 @@ maxprice_for() {
   esac
 }
 
-NAME=""; CMD=""; NOTE=""; DISK=150; BRANCH=main; KEEP=0
+NAME=""; CMD=""; NOTE=""; DISK=150; BRANCH=main; KEEP=0; DOCKER_IMAGE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --name)         NAME=$2; shift 2;;
@@ -81,6 +84,7 @@ while [ $# -gt 0 ]; do
     --session-note) NOTE=$2; shift 2;;
     --disk)         DISK=$2; shift 2;;
     --branch)       BRANCH=$2; shift 2;;
+    --docker-image) DOCKER_IMAGE=$2; shift 2;;
     --keep)         KEEP=1; shift;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
@@ -136,6 +140,62 @@ finish() {
 trap finish EXIT
 
 apt-get update -y && apt-get install -y git python3-venv >> /root/pip.log 2>&1
+
+DOCKER_IMAGE="$DOCKER_IMAGE"
+if [ -n "\$DOCKER_IMAGE" ]; then
+  # Docker path (2026-09-16): image already has repo code, requirements.txt,
+  # compiled mamba-ssm/causal-conv1d fused kernel (sm_86/8.9 -- g5/g6, this
+  # script's first-choice candidates), and chb01 baked in -- see
+  # Dockerfile.mamba. Skips clone/pip/compile entirely; the only per-launch
+  # work is `docker pull` + `docker run`. DLAMI ships Docker + the NVIDIA
+  # container runtime already configured (--gpus all works out of the box).
+  echo "DOCKER_IMAGE=\$DOCKER_IMAGE" >> /root/run.log
+  nvidia-smi >> /root/run.log 2>&1 || echo "NO GPU" >> /root/run.log
+  docker pull "\$DOCKER_IMAGE" >> /root/pip.log 2>&1 \
+    && echo "docker pull ok" >> /root/run.log \
+    || echo "docker pull FAILED (see pip.log)" >> /root/run.log
+  mkdir -p /root/checkpoint /root/results_out
+  aws s3 sync "\$CKPT_S3" /root/checkpoint || true
+  echo "checkpoint dir has \$(ls /root/checkpoint 2>/dev/null | wc -l) file(s) at launch" >> /root/run.log
+  ( while true; do
+      aws s3 cp /root/run.log "\$PFX/run.log" 2>/dev/null
+      aws s3 sync /root/checkpoint "\$CKPT_S3" 2>/dev/null
+      sleep 20
+    done ) &
+  TAILER=\$!
+  ARGS=\$(echo "\$CMD" | sed -E 's/^ *python[0-9.]* +//')
+  term() { docker kill -s TERM eeg-run 2>/dev/null || true; }
+  trap term TERM
+  set +e
+  # results_out mount so promote_results.sh (run against a thin clone
+  # below, since --rm throws the container's own /workspace away) can see
+  # what the run wrote to Epilepsy/results/.
+  docker run --name eeg-run --gpus all --rm \
+    -v /root/checkpoint:/root/checkpoint \
+    -v /root/results_out:/workspace/Epilepsy/results \
+    -w /workspace "\$DOCKER_IMAGE" \
+    python3 -u \$ARGS >> /root/run.log 2>&1 &
+  JOB_PID=\$!
+  wait \$JOB_PID
+  RC=\$?
+  set -e
+  kill \$TAILER 2>/dev/null || true
+  # promote_results.sh expects a repo checkout at $REPO_DIR to push results
+  # from; the docker path has none on the host. Clone a thin checkout just
+  # for that push, then hand off.
+  git clone -b "$BRANCH" --depth 1 "$REPO_URL" /root/repo >> /root/pip.log 2>&1 || true
+  if [ -d /root/repo ]; then
+    mkdir -p /root/repo/Epilepsy/results
+    cp -r /root/results_out/. /root/repo/Epilepsy/results/ 2>/dev/null || true
+    cd /root/repo
+    REPO_DIR=/root/repo RC=\$RC RUN_NAME="$NAME" RUN_CMD="\$CMD" \
+      RUN_LOG=/root/run.log RUN_STARTED_UTC="\$STARTED" \
+      SESSION_NOTE="\$NOTE" DEPLOY_KEY_SSM="$DEPLOY_KEY_SSM" \
+      bash scripts/promote_results.sh
+  fi
+  exit \$RC
+fi
+
 # DLAMI ships a torch+CUDA venv (usually /opt/pytorch) -- install the repo's
 # extra deps INTO it rather than reinstalling torch from scratch (that path
 # is broken: pip 22.0 on this AMI doesn't support --break-system-packages).
@@ -217,7 +277,7 @@ trap term TERM
 set +e
 # strip a leading "python"/"python3" from --cmd; we supply the interpreter
 ARGS=\$(echo "\$CMD" | sed -E 's/^ *python[0-9.]* +//')
-# 2026-09-16 fix: was `> /root/run.log` (truncating) -- silently wiped every
+# 2026-09-16 fix: was a truncating '>' redirect to /root/run.log -- silently wiped every
 # boot-time diagnostic above (BASEPY, nvidia-smi, mamba-ssm compile result,
 # the MAMBA_SSM_CUDA_KERNEL_OK/FAILED marker) the moment training started,
 # so the one thing worth grepping for was never actually in the shipped log.
