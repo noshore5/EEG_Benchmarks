@@ -39,6 +39,16 @@ DEPLOY_KEY_SSM=${DEPLOY_KEY_SSM:-/eeg/github-deploy-key}
 GEMINI_KEY_SSM=${GEMINI_KEY_SSM:-/eeg/gemini-api-key}
 GEMINI_MODEL=${GEMINI_MODEL:-gemini-flash-latest}
 GIT_REMOTE_SSH=${GIT_REMOTE_SSH:-git@github.com:noshore5/EEG_Benchmarks.git}
+# 2026-09-16: every OTHER non-S3 aws CLI call in this pipeline
+# (eeg-run-spot.sh's `aws sns publish --region $REGION`, `aws ec2
+# run-instances --region $REGION`) passes --region explicitly; `aws s3`
+# happens to work without it (legacy global-endpoint fallback), but `aws
+# ssm get-parameter` does not -- it fails client-side ("must specify a
+# region") before ever reaching AWS, invisible in CloudTrail and swallowed
+# by this script's own `2>/dev/null`. Misdiagnosed once as a missing
+# kms:Decrypt permission (that fix was real and still needed, just not the
+# actual cause of "could not read deploy key from SSM").
+AWS_REGION_SSM=${AWS_REGION_SSM:-us-east-1}
 
 WL_RE='^(Epilepsy/results/|Epilepsy/Session_notes/)'   # promote whitelist
 
@@ -128,6 +138,7 @@ PY
 
   # try LLM prose; on any failure fall back to the deterministic template
   GEMINI_KEY=$(aws ssm get-parameter --name "$GEMINI_KEY_SSM" --with-decryption \
+                 --region "$AWS_REGION_SSM" \
                  --query 'Parameter.Value' --output text 2>/dev/null || true)
   LLM_BODY=""
   if [ -n "$GEMINI_KEY" ] && [ "$GEMINI_KEY" != "None" ] && command -v python3 >/dev/null; then
@@ -175,6 +186,7 @@ fi
 # --- auth: pull the write deploy key from SSM, use it just for this push ---
 mkdir -p /root/.ssh
 if ! aws ssm get-parameter --name "$DEPLOY_KEY_SSM" --with-decryption \
+       --region "$AWS_REGION_SSM" \
        --query 'Parameter.Value' --output text > /root/.ssh/eeg_deploy 2>/dev/null; then
   say "could not read deploy key from SSM ($DEPLOY_KEY_SSM) -- cannot push"
   exit 4
