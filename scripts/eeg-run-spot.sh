@@ -147,7 +147,7 @@ if [ -n "\$DOCKER_IMAGE" ]; then
   # compiled mamba-ssm/causal-conv1d fused kernel (sm_86/8.9 -- g5/g6, this
   # script's first-choice candidates), and chb01 baked in -- see
   # Dockerfile.mamba. Skips clone/pip/compile entirely; the only per-launch
-  # work is `docker pull` + `docker run`. DLAMI ships Docker + the NVIDIA
+  # work is a docker pull + docker run. DLAMI ships Docker + the NVIDIA
   # container runtime already configured (--gpus all works out of the box).
   echo "DOCKER_IMAGE=\$DOCKER_IMAGE" >> /root/run.log
   nvidia-smi >> /root/run.log 2>&1 || echo "NO GPU" >> /root/run.log
@@ -180,7 +180,7 @@ if [ -n "\$DOCKER_IMAGE" ]; then
   RC=\$?
   set -e
   kill \$TAILER 2>/dev/null || true
-  # promote_results.sh expects a repo checkout at $REPO_DIR to push results
+  # promote_results.sh expects a repo checkout at \$REPO_DIR to push results
   # from; the docker path has none on the host. Clone a thin checkout just
   # for that push, then hand off.
   git clone -b "$BRANCH" --depth 1 "$REPO_URL" /root/repo >> /root/pip.log 2>&1 || true
