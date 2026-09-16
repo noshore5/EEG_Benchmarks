@@ -214,6 +214,15 @@ Both need to exist on the repo's default branch to be dispatchable
 | `eeg-run` workers | ephemeral | c7i.2xlarge (cpu) / g5.2xlarge (gpu) | launched per job, self-terminate | -- | created by `scripts/eeg-run.sh` (usually via `eeg-run.yml`). Fresh box each run, tag `Project=eeg`, profile `eeg-gpu`. GPU blocked on quota (below). |
 | GPU box | -- | -- | **not launched** | -- | IAM/instance-profile staged (`eeg-gpu`), nothing running |
 
+## Never launch on-demand -- spot only
+
+**2026-09-16 rule, user directive:** never launch a GPU (or any) EC2
+instance on-demand. Spot only, always -- including one-off/throwaway
+tasks like AMI-baking. This was violated baking `eeg-gpu-mamba-docker-*`
+(g5.xlarge on-demand, reasoned at the time that a spot reclaim mid-pull
+would waste the ~20min docker pull) -- overridden: use spot even there,
+accept the retry cost if reclaimed. No exceptions without asking first.
+
 ## Launching / driving an EC2 box -- read before `run-instances`
 
 Applies to the `eeg-run.yml` workflow (via the `eeg-gh-launcher` role),
@@ -345,6 +354,17 @@ Old bucket `s3://coheriq-eeg-dense-edge-cache/` (referenced in
   attached to every `eeg-run` worker. `s3-eeg-bucket` RW, `eeg-ssm-and-sns`
   (`ssm:GetParameter` on `/eeg/*` + `sns:Publish` on `eeg-runs`), plus
   managed `AmazonSSMManagedInstanceCore` for keyless SSM shell access.
+  **2026-09-16 fix:** `/eeg/github-deploy-key` is a `SecureString` (KMS key
+  `alias/aws/ssm`) -- `ssm:GetParameter --with-decryption` needs `kms:Decrypt`
+  on that key TOO, which neither `eeg-gpu` nor `eeg-box` had. Silent failure
+  (`promote_results.sh` swallows the real error, `2>/dev/null`): every
+  worker box could read/write S3 and publish SNS, but could never actually
+  push results to `main` -- `promote: could not read deploy key from SSM`.
+  Added `kms:Decrypt` on `arn:aws:kms:us-east-1:827938107865:key/
+  1a6a51f2-231f-4212-bdef-5d0a46641a87` to both roles' `eeg-ssm-and-sns`
+  inline policy. Caught on `eeg-run-spot.sh`'s `tgm-smoke2` box -- NOT yet
+  re-verified against a real box (IAM propagation is normally near-instant;
+  confirm on the next launch rather than trusting this note alone).
 
 ## Network
 
