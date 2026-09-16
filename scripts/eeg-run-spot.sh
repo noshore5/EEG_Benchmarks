@@ -167,6 +167,29 @@ else
 fi
 "\$PY" -c "import torch,moabb,mne;print('cuda',torch.cuda.is_available())" >> /root/run.log 2>&1
 
+# Fused mamba-ssm CUDA kernel (2026-09-16) -- same recipe Dockerfile.mamba
+# already proved works (versions, --no-build-isolation --no-deps to dodge
+# the torch-ABI-mismatch bug documented there), just compiled directly on
+# THIS box instead of baked into an image. Building here (not on a GPU-less
+# CI runner) means no TORCH_CUDA_ARCH_LIST guess needed -- pip's build
+# auto-detects whatever GPU is actually present (T4/A10G/L4, whichever
+# candidate this launch landed on), so it isn't tied to Dockerfile.mamba's
+# baked 8.0/8.6/8.9/9.0 list (which doesn't even cover T4's sm_75).
+apt-get install -y --no-install-recommends build-essential ninja-build >> /root/pip.log 2>&1
+nvcc --version >> /root/run.log 2>&1 || echo "NO NVCC" >> /root/run.log
+export MAX_JOBS=4
+"\$PY" -m pip install --no-build-isolation --no-deps \
+  "causal-conv1d>=1.4.0" "mamba-ssm>=2.2.2" >> /root/pip.log 2>&1 \
+  && echo "mamba-ssm compile: ok" >> /root/run.log \
+  || echo "mamba-ssm compile: FAILED (see pip.log)" >> /root/run.log
+"\$PY" -m pip install huggingface_hub transformers >> /root/pip.log 2>&1
+# Loud, explicit check -- grep run.log for this exact marker, never assume.
+"\$PY" -c "
+import torch
+from mamba_ssm.ops.selective_scan_interface import selective_scan_fn
+print('MAMBA_SSM_CUDA_KERNEL_OK', torch.cuda.get_device_name(0), torch.cuda.get_device_capability(0))
+" >> /root/run.log 2>&1 || echo "MAMBA_SSM_CUDA_KERNEL_FAILED" >> /root/run.log
+
 mkdir -p /root/mne_data
 aws s3 sync "s3://$BUCKET/datasets" /root/mne_data || true
 export MNE_DATA=/root/mne_data PYTHONPATH=/root/repo
@@ -194,7 +217,11 @@ trap term TERM
 set +e
 # strip a leading "python"/"python3" from --cmd; we supply the interpreter
 ARGS=\$(echo "\$CMD" | sed -E 's/^ *python[0-9.]* +//')
-"\$PY" -u \$ARGS > /root/run.log 2>&1 &
+# 2026-09-16 fix: was `> /root/run.log` (truncating) -- silently wiped every
+# boot-time diagnostic above (BASEPY, nvidia-smi, mamba-ssm compile result,
+# the MAMBA_SSM_CUDA_KERNEL_OK/FAILED marker) the moment training started,
+# so the one thing worth grepping for was never actually in the shipped log.
+"\$PY" -u \$ARGS >> /root/run.log 2>&1 &
 JOB_PID=\$!
 wait \$JOB_PID
 RC=\$?
