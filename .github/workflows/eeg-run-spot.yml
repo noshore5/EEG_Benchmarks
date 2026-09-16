@@ -1,0 +1,94 @@
+name: eeg-run-spot (launch a spot GPU training box)
+
+# The default remote launcher now (2026-09-16) -- eeg-run.yml (on-demand,
+# no checkpointing, no docker) is disabled. This wraps
+# scripts/eeg-run-spot.sh: interruptible spot GPU, capacity fallback across
+# g5/g6/g4dn, fold-level checkpoint/resume via --checkpoint-dir (opt-in --
+# only leave_one_seizure_out_prediction supports it so far, see that
+# function's docstring), and defaults to the pre-built Dockerfile.mamba
+# image (fused mamba-ssm kernel + repo code baked in -- no per-launch
+# clone/pip/compile). Trigger from anywhere:
+#   - GitHub mobile app / any browser -> Actions -> this workflow -> "Run workflow"
+#   - any shell (incl. Claude Code on a phone):  gh workflow run eeg-run-spot.yml -f name=... -f cmd=...
+#
+# This job only *launches* the box and exits quickly; everything else
+# happens ON the box (see eeg-run-spot.sh's own header). Not a queue --
+# each dispatch launches immediately, in parallel with any other running
+# job. Watch progress at the S3 run.log path printed in the job log.
+#
+# Auth: GitHub OIDC -> AWS role eeg-gh-launcher (no stored credentials) --
+# same role eeg-run.yml used; eeg-run-spot.sh's spot RunInstances call needs
+# no extra IAM beyond what that role's eeg-gh-launch policy already grants.
+
+on:
+  workflow_dispatch:
+    inputs:
+      name:
+        description: "Short run slug (S3 prefix + checkpoint prefix + note filename)"
+        required: true
+        type: string
+      cmd:
+        description: "Command to run in the repo root, e.g. python Epilepsy/run_pipelines.py --pipeline temporal_graph_mamba --label-mode prediction --device cuda --checkpoint-dir /root/checkpoint"
+        required: true
+        type: string
+      session_note:
+        description: "Optional: why this run. Non-empty -> a session note is written and committed alongside the CSV."
+        required: false
+        default: ""
+        type: string
+      docker_image:
+        description: "Image to pull+run (blank = clone+pip+compile on box instead, see eeg-run-spot.sh)"
+        required: false
+        default: "ghcr.io/noshore5/eeg_benchmarks-mamba:latest"
+        type: string
+      branch:
+        description: "Repo branch the box checks out (and, for the docker path, clones for the results-promotion step)"
+        required: false
+        default: main
+        type: string
+      disk:
+        description: "Root disk GB"
+        required: false
+        default: "100"
+        type: string
+      keep:
+        description: "Debug: don't self-terminate (stop instead of terminate on exit)"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  id-token: write   # mint the OIDC token
+  contents: read
+
+concurrency:
+  group: eeg-run-spot-launch
+  cancel-in-progress: false
+
+jobs:
+  launch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::827938107865:role/eeg-gh-launcher
+          aws-region: us-east-1
+
+      - name: Launch
+        env:
+          IN_NAME: ${{ inputs.name }}
+          IN_CMD: ${{ inputs.cmd }}
+          IN_NOTE: ${{ inputs.session_note }}
+          IN_DOCKER_IMAGE: ${{ inputs.docker_image }}
+          IN_BRANCH: ${{ inputs.branch }}
+          IN_DISK: ${{ inputs.disk }}
+          IN_KEEP: ${{ inputs.keep }}
+        run: |
+          set -euo pipefail
+          args=( --name "$IN_NAME" --cmd "$IN_CMD" --branch "$IN_BRANCH" --disk "$IN_DISK" )
+          if [ -n "$IN_NOTE" ]; then args+=( --session-note "$IN_NOTE" ); fi
+          if [ -n "$IN_DOCKER_IMAGE" ]; then args+=( --docker-image "$IN_DOCKER_IMAGE" ); fi
+          if [ "$IN_KEEP" = "true" ]; then args+=( --keep ); fi
+          bash scripts/eeg-run-spot.sh "${args[@]}"
