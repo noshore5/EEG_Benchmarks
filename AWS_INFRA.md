@@ -7,6 +7,22 @@ It describes shared cloud state, not repo state, and nothing in the
 pipelines reads from it yet -- so if you're only editing code or running
 tests, you can still skip it.
 
+**Scope warning for a shell working in a DIFFERENT repo that shares this
+AWS account (`827938107865`):** only the account-level mechanics below
+(IAM roles, S3 bucket, SSM params, "every box self-terminates", OIDC
+launch-from-anywhere) are reusable as-is. Every *concrete* launch
+recipe in this file -- the custom AMI, `--docker-image`, branch names,
+`run_pipelines.py` flags -- is baked for **this repo (EEG_Benchmarks)**
+and will not apply to another repo's own pipeline entrypoint or launch
+script. Don't copy those commands verbatim; copy the *shape* (self-
+terminating user-data, S3 log shipping, spot request pattern) and wire
+in your own repo's image/entrypoint. A bug in your own launch script
+(e.g. a hardcoded device-list flag silently overriding a GPU-only
+default) is not an AWS problem this doc can diagnose -- if you hit the
+same bug on repeated launches, the fix isn't here, it's in your repo's
+own script, and it needs to be committed (or written into that repo's
+own equivalent of this file) so the next shell doesn't rediscover it.
+
 **The standing `eeg-box` (t3.small, ~$15/mo) was terminated 2026-09-02.**
 Its job as a launcher is now done by GitHub Actions (`eeg-run.yml`, OIDC,
 no stored creds -- see "Launch from anywhere" below); there is no longer a
@@ -26,15 +42,19 @@ persistent shell box. Every AWS box is now ephemeral and self-terminating.
   GitHub mobile/web) or drop a job for the S3 runner.
 
 **Account:** `827938107865` &nbsp; **Region:** `us-east-1`
-**Last verified:** 2026-09-02, by Claude -- `eeg-run.yml` launch-from-
-anywhere path verified end-to-end (OIDC -> launch -> deps -> run -> S3 ->
-self-terminate, no orphan) on a CPU smoke run; `eeg-box` terminated the
-same day. Spot SLR created by admin 2026-09-01. GPU quota-increase
-requests still `CASE_OPENED` (AWS support queue; effective quota 0).
-**Stale as of that date re: GPU** -- GPU spot has been launching and
-running real jobs since (see "GPU spot + docker/custom-AMI path" below);
-the quota-0 note above no longer reflects reality, not yet corrected
-upstream in this doc.
+**GPU quota: available and working (confirmed 2026-09-17 onward).** GPU
+spot instances (`g5.xlarge`/A10G) launch and run real jobs routinely --
+see "GPU spot + docker/custom-AMI path" below for the actual recipe. The
+2026-09-02 note below is a dated snapshot, kept only for history; the
+`CASE_OPENED`/"effective quota 0" line it contains does **not** reflect
+current reality and should not be read as current GPU availability.
+
+**2026-09-02 snapshot (historical, GPU part now superseded -- see
+above):** `eeg-run.yml` launch-from-anywhere path verified end-to-end
+(OIDC -> launch -> deps -> run -> S3 -> self-terminate, no orphan) on a
+CPU smoke run; `eeg-box` terminated the same day. Spot SLR created by
+admin 2026-09-01. GPU quota-increase requests were `CASE_OPENED` (AWS
+support queue; effective quota 0) as of that date only.
 
 ## GPU spot + docker/custom-AMI path (2026-09-17)
 
