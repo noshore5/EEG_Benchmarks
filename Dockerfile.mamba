@@ -54,6 +54,14 @@ RUN set -euo pipefail; \
     [ "$n_edf" -ge 40 ]
 
 COPY requirements.txt /tmp/requirements.txt
+# 2026-09-17: PIP_SRC must be outside /workspace. requirements.txt installs
+# moabb editable (`-e git+...`), which with the default PIP_SRC (<cwd>/src,
+# i.e. /workspace/src here) clones into /workspace/src/moabb -- and
+# eeg-run-spot.sh's docker path bind-mounts a fresh code checkout directly
+# over /workspace at `docker run` time, which shadows that path and breaks
+# the moabb import (ModuleNotFoundError, found on tgm-smoke-realcmd this
+# session). /opt/pip-src sits outside the bind mount so it survives.
+ENV PIP_SRC=/opt/pip-src
 RUN pip install --break-system-packages --ignore-installed -r /tmp/requirements.txt
 
 # Toolchain for mamba-ssm / causal-conv1d's CUDA extensions. nvcc is
