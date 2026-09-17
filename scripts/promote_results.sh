@@ -192,8 +192,15 @@ git commit -q -m "auto: ${RUN_NAME} results" \
         "$(curl -s -H "X-aws-ec2-metadata-token: $(curl -s -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60')" http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null)")"
 
 # --- push to main with pull-rebase retries (other shells push here too) ---
+# Rebase onto FETCH_HEAD, not the named ref origin/main: a job box launched
+# with --branch <feature-branch> only has that branch checked out (often a
+# --depth 1 clone of it), so origin/main is never a resolvable remote-
+# tracking ref here and `git rebase origin/main` fails deterministically
+# every time (not a transient race) with "fatal: invalid upstream
+# 'origin/main'". FETCH_HEAD is always set by a successful `git fetch`
+# regardless of which branch is checked out or how shallow the clone is.
 for i in $(seq 1 6); do
-  if git fetch -q origin main && git rebase -q origin/main && git push -q origin HEAD:main; then
+  if git fetch -q origin main && git rebase -q FETCH_HEAD && git push -q origin HEAD:main; then
     say "pushed ${RUN_NAME} -> origin/main ($(git rev-parse --short HEAD))"
     exit 0
   fi
