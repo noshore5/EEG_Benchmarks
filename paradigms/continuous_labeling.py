@@ -36,6 +36,8 @@ recordings don't have. Datasets it consumes (e.g.
 from __future__ import annotations
 
 import logging
+import os
+from concurrent.futures import ProcessPoolExecutor
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -46,6 +48,94 @@ from moabb.datasets.base import BaseDataset
 log = logging.getLogger(__name__)
 
 LABEL_MODES = ("detection", "prediction")
+
+# get_data()/get_continuous_data() are dominated by mne's per-recording
+# raw.load_data() (actual EDF decode off disk -- read_raw_edf itself is
+# called with preload=False, so this is where the real read happens),
+# run strictly one recording at a time. For CHB-MIT/prediction mode
+# (~40 recordings/subject, ~1.7GB), that serial loop was measured taking
+# ~10min on a 4-vCPU spot box (2026-09-17) despite doing no filtering/
+# resampling by default -- pure single-threaded file I/O + decode, an
+# embarrassingly parallel problem across independent files. Capped at 4:
+# mne's EDF reader is disk-I/O-bound more than CPU-bound past a point, and
+# this also runs on boxes with as few as 2 vCPUs (see maxprice_for's
+# g4dn.xlarge fallback in eeg-run-spot.sh) where oversubscribing would
+# just thrash. `EEG_BENCHMARKS_WINDOWING_WORKERS=1` to force serial (e.g.
+# for a debugger, or if this ever needs isolating from the parallel path).
+_DEFAULT_WINDOWING_WORKERS = min(4, os.cpu_count() or 1)
+
+
+def _load_and_window_one_run(
+    job: Tuple["ContinuousLabelingParadigm", object, object, object, object, float],
+) -> Tuple[List[np.ndarray], List[int], List[dict]]:
+    """One (subject, session, run)'s worth of `get_data()`'s loop body --
+    factored out so it can run in a worker process. Must stay a plain
+    module-level function (not a bound method) to pickle cleanly for
+    ProcessPoolExecutor; takes a single tuple argument (rather than one
+    positional arg per field) so ProcessPoolExecutor.map can dispatch it
+    with a plain list of jobs instead of the `zip(*jobs)` transpose that
+    per-field args would need.
+    """
+    paradigm, subject, session, run, raw, unit_factor = job
+    raw = raw.copy().load_data(verbose="ERROR")
+    if paradigm.fmin is not None or paradigm.fmax is not None:
+        raw.filter(paradigm.fmin, paradigm.fmax, verbose="ERROR")
+    if paradigm.resample is not None:
+        raw.resample(paradigm.resample, verbose="ERROR")
+
+    meas_date = raw.info.get("meas_date")
+    run_start_time = meas_date.isoformat() if meas_date is not None else None
+
+    sfreq = raw.info["sfreq"]
+    duration = raw.n_times / sfreq
+    starts = paradigm._window_starts(duration)
+    X_parts: List[np.ndarray] = []
+    y_parts: List[int] = []
+    metadata: List[dict] = []
+    if len(starts) == 0:
+        return X_parts, y_parts, metadata
+
+    if paradigm.label_mode == "prediction":
+        labels, seizure_idx, spans = paradigm._label_windows_prediction(
+            starts, raw.annotations
+        )
+    else:
+        labels = paradigm._label_windows(starts, raw.annotations)
+        seizure_idx = None
+        spans = None
+
+    n_samples = int(round(paradigm.window_length * sfreq))
+    raw_data = raw.get_data() * unit_factor
+    for i, (start, label) in enumerate(zip(starts, labels)):
+        if label < 0:
+            continue
+        start_sample = int(round(start * sfreq))
+        window = raw_data[:, start_sample : start_sample + n_samples]
+        if window.shape[1] != n_samples:
+            continue
+        X_parts.append(window)
+        y_parts.append(int(label))
+        window_meta = {
+            "subject": subject,
+            "session": session,
+            "run": run,
+            "window_start": float(start),
+            "window_end": float(start + paradigm.window_length),
+            "run_start_time": run_start_time,
+        }
+        if paradigm.label_mode == "prediction":
+            k = int(seizure_idx[i])
+            if k >= 0:
+                onset, offset = spans[k]
+                window_meta["seizure_id"] = f"{subject}_{run}_{k}"
+                window_meta["seizure_onset"] = float(onset)
+                window_meta["seizure_offset"] = float(offset)
+            else:
+                window_meta["seizure_id"] = None
+                window_meta["seizure_onset"] = None
+                window_meta["seizure_offset"] = None
+        metadata.append(window_meta)
+    return X_parts, y_parts, metadata
 
 
 class ContinuousLabelingParadigm:
@@ -319,71 +409,35 @@ class ContinuousLabelingParadigm:
         """
         data = dataset.get_data(subjects=subjects)
 
+        # Flatten to a list up front so results can be collected back in
+        # this exact (subject, session, run) order below -- required for
+        # reproducibility (downstream fold/seed logic assumes a stable
+        # window order), and executor.map preserves submission order
+        # regardless of which worker finishes first.
+        jobs = [
+            (subject, session, run, raw)
+            for subject, sessions in data.items()
+            for session, runs in sessions.items()
+            for run, raw in runs.items()
+        ]
+
+        job_args = [
+            (self, subject, session, run, raw, dataset.unit_factor)
+            for subject, session, run, raw in jobs
+        ]
+        n_workers = int(os.environ.get("EEG_BENCHMARKS_WINDOWING_WORKERS", _DEFAULT_WINDOWING_WORKERS))
         X_parts: List[np.ndarray] = []
         y_parts: List[int] = []
         metadata: List[dict] = []
-
-        for subject, sessions in data.items():
-            for session, runs in sessions.items():
-                for run, raw in runs.items():
-                    raw = raw.copy().load_data(verbose="ERROR")
-                    if self.fmin is not None or self.fmax is not None:
-                        raw.filter(self.fmin, self.fmax, verbose="ERROR")
-                    if self.resample is not None:
-                        raw.resample(self.resample, verbose="ERROR")
-
-                    meas_date = raw.info.get("meas_date")
-                    run_start_time = meas_date.isoformat() if meas_date is not None else None
-
-                    sfreq = raw.info["sfreq"]
-                    duration = raw.n_times / sfreq
-                    starts = self._window_starts(duration)
-                    if len(starts) == 0:
-                        continue
-
-                    if self.label_mode == "prediction":
-                        labels, seizure_idx, spans = self._label_windows_prediction(
-                            starts, raw.annotations
-                        )
-                    else:
-                        labels = self._label_windows(starts, raw.annotations)
-                        seizure_idx = None
-                        spans = None
-
-                    n_samples = int(round(self.window_length * sfreq))
-                    # MOABB paradigms scale by dataset.unit_factor (default
-                    # 1e6, volts -> microvolts); match that convention so
-                    # output here is on the same scale as other paradigms.
-                    raw_data = raw.get_data() * dataset.unit_factor
-                    for i, (start, label) in enumerate(zip(starts, labels)):
-                        if label < 0:
-                            continue  # excluded (prediction mode only): drop, don't count either class
-                        start_sample = int(round(start * sfreq))
-                        window = raw_data[:, start_sample : start_sample + n_samples]
-                        if window.shape[1] != n_samples:
-                            continue  # last partial window, skip
-                        X_parts.append(window)
-                        y_parts.append(int(label))
-                        window_meta = {
-                            "subject": subject,
-                            "session": session,
-                            "run": run,
-                            "window_start": float(start),
-                            "window_end": float(start + self.window_length),
-                            "run_start_time": run_start_time,
-                        }
-                        if self.label_mode == "prediction":
-                            k = int(seizure_idx[i])
-                            if k >= 0:
-                                onset, offset = spans[k]
-                                window_meta["seizure_id"] = f"{subject}_{run}_{k}"
-                                window_meta["seizure_onset"] = float(onset)
-                                window_meta["seizure_offset"] = float(offset)
-                            else:
-                                window_meta["seizure_id"] = None
-                                window_meta["seizure_onset"] = None
-                                window_meta["seizure_offset"] = None
-                        metadata.append(window_meta)
+        if n_workers <= 1 or len(job_args) <= 1:
+            results = (_load_and_window_one_run(job) for job in job_args)
+        else:
+            with ProcessPoolExecutor(max_workers=min(n_workers, len(job_args))) as pool:
+                results = list(pool.map(_load_and_window_one_run, job_args))
+        for run_X, run_y, run_metadata in results:
+            X_parts.extend(run_X)
+            y_parts.extend(run_y)
+            metadata.extend(run_metadata)
 
         if X_parts:
             X = np.stack(X_parts, axis=0)
@@ -437,6 +491,12 @@ class ContinuousLabelingParadigm:
         data = dataset.get_data(subjects=subjects)
         recordings: List[dict] = []
 
+        # 2026-09-17: this loop has the identical serial-load bottleneck
+        # get_data() had (see _load_and_window_one_run's module comment
+        # above) -- not parallelized here since continuous_cwt_mamba has
+        # no working LOSO pipeline yet (CONTEXT.md) so nothing exercises
+        # this path today; apply the same ProcessPoolExecutor treatment
+        # if/when that changes.
         for subject, sessions in data.items():
             for session, runs in sessions.items():
                 for run, raw in runs.items():
