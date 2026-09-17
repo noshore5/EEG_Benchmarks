@@ -93,10 +93,19 @@ done
 [ -n "$CMD" ]  || { echo "--cmd required"  >&2; exit 2; }
 NAME=$(printf '%s' "$NAME" | tr -c 'A-Za-z0-9._-' '-')
 
-AMI=$(aws ec2 describe-images --owners amazon --region $REGION \
-  --filters "Name=name,Values=Deep Learning OSS Nvidia Driver AMI GPU PyTorch*Ubuntu 22.04*" \
-            "Name=state,Values=available" \
-  --query 'reverse(sort_by(Images,&CreationDate))[0].ImageId' --output text)
+# When --docker-image is given, use the pre-baked custom AMI
+# (ami-042ff1af14b5afec6 -- env/deps only, no code baked in; code is bind-
+# mounted live from a fresh git clone in the docker-run path below). This
+# skips the ~20min `docker pull` on every launch. Falls back to the
+# dynamic DLAMI lookup otherwise. See AWS_INFRA.md.
+if [ -n "$DOCKER_IMAGE" ]; then
+  AMI=ami-042ff1af14b5afec6
+else
+  AMI=$(aws ec2 describe-images --owners amazon --region $REGION \
+    --filters "Name=name,Values=Deep Learning OSS Nvidia Driver AMI GPU PyTorch*Ubuntu 22.04*" \
+              "Name=state,Values=available" \
+    --query 'reverse(sort_by(Images,&CreationDate))[0].ImageId' --output text)
+fi
 SG=$(aws ec2 describe-security-groups --region $REGION \
   --filters Name=group-name,Values=eeg-ssh --query 'SecurityGroups[0].GroupId' --output text)
 
