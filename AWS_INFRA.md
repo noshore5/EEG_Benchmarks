@@ -192,6 +192,19 @@ Purely additive by construction -- pipelines write timestamped CSVs
 effectively never conflicts. A bad run can at worst add a results folder
 you delete; it can't corrupt anything you pull.
 
+**Fixed 2026-09-17 (`6e7e33f`):** the push loop used to rebase onto the
+named ref `origin/main`, which does not exist on a box launched with
+`--branch <feature-branch>` -- `eeg-run-spot.sh`'s `git clone -b
+"$BRANCH" --depth 1` never creates an `origin/main` remote-tracking ref
+on those checkouts, so `git rebase origin/main` failed
+`fatal: invalid upstream 'origin/main'` on **all 6 retries, every time**
+(deterministic, not a race). Hit this on `tgm-pred-nosig-6fold-seed7`
+(`--branch spot-tgm-nosig-checkpoint`): all 6 folds finished cleanly, but
+the result commit never reached `origin/main` and had to be recovered
+manually from S3 after the box terminated (`68e9fd1`). Now rebases onto
+`FETCH_HEAD`, which `git fetch` always sets regardless of which branch
+is checked out or clone depth.
+
 **Session note** (`--session-note "<why>"`): LLM-written if
 `/eeg/gemini-api-key` holds a real key, else a deterministic template
 (run config + metrics table + `run.log` tail). Note generation never

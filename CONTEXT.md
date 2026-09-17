@@ -34,9 +34,20 @@ bind-mount, breaking the moabb import. `paradigms/continuous_labeling.py`'s
 was purely serial per-recording EDF load, ~10min for chb01/prediction's
 ~40 recordings; not yet timed on an actual cloud Linux box (a local Mac
 timing test was misleadingly slower -- see that commit's message).
-`tgm-pred-nosig-6fold-seed7` re-launched and training normally as of this
-writing (g5.xlarge/A10G, epoch_time~12.2s, matches the known-good
-baseline). Real successful precedent already on `main`:
+`tgm-pred-nosig-6fold-seed7` completed all 6 folds (roc_auc=0.960,
+accuracy=0.909, event-level hit rate raw 6/6) but its on-box
+`promote_results.sh` push failed all 6 retries with `fatal: invalid
+upstream 'origin/main'` -- a **deterministic** bug, not a race: the box
+was launched with `--branch spot-tgm-nosig-checkpoint`, and
+`eeg-run-spot.sh`'s `--depth 1` clone of a non-`main` branch never gets
+an `origin/main` remote-tracking ref, so `git rebase origin/main` can
+never resolve on any branch-launched box. Results survived in S3 (the
+durable fallback promote_results.sh falls back to) but the instance
+terminated before the commit could be pushed, so it had to be recovered
+manually (`68e9fd1`). Fixed at the root (`6e7e33f`): promote now rebases
+onto `FETCH_HEAD` instead of the named ref `origin/main`, since
+`FETCH_HEAD` is always set by a successful fetch regardless of which
+branch is checked out. Real successful precedent already on `main`:
 `tgm-pred-nosig-6fold-docker` (`b8def4c`, roc_auc 0.955).
 2026-09-01: **`scripts/eeg-run.sh`** -- fire-and-forget a run on an
 on-demand box; on `rc==0` it commits the new result CSV(s) (+ optional
@@ -1375,6 +1386,21 @@ read off a continuous timeline). See "Open threads" below.
   Epilepsy/pipelines/cwt_gnn_classifiers.py` if in doubt.
 
 ## Known gotchas (keep rediscovering these -- stop rediscovering them)
+
+- **`promote_results.sh` rebasing onto `origin/main` failed
+  deterministically on any box launched with `--branch <feature-branch>`
+  (fixed 2026-09-17, `6e7e33f`).** `eeg-run-spot.sh` clones with
+  `git clone -b "$BRANCH" --depth 1`, so a non-`main` branch checkout
+  never gets an `origin/main` remote-tracking ref; `git rebase
+  origin/main` in the old promote script then failed
+  `fatal: invalid upstream 'origin/main'` on all 6 retries every time --
+  not a race, a guaranteed failure. `tgm-pred-nosig-6fold-seed7`
+  (`--branch spot-tgm-nosig-checkpoint`) hit this, finished all 6 folds
+  cleanly (roc_auc=0.960, AP=0.587, accuracy=0.909) but stranded its
+  result commit on the now-terminated box; recovered manually from S3
+  (`68e9fd1`). Now fixed: promote rebases onto `FETCH_HEAD` instead of
+  the named ref, which is always set after a successful fetch regardless
+  of branch/depth.
 
 - **`mambapy`'s Mamba scan (BOTH `pscan=True` and `pscan=False`) does not
   scale to a "many stacked/parallel Mamba instances x long-ish sequence"
