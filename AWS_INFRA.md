@@ -223,6 +223,23 @@ tasks like AMI-baking. This was violated baking `eeg-gpu-mamba-docker-*`
 would waste the ~20min docker pull) -- overridden: use spot even there,
 accept the retry cost if reclaimed. No exceptions without asking first.
 
+## Monitoring a launched box -- escalate on the FIRST stall, don't repoll
+
+**2026-09-17 rule, user directive (recurring failure across sessions,
+~50 instances of this):** when watching a just-launched box for progress
+(smoke test, real run, AMI bake), if a log/status check comes back
+unchanged from the previous check, that is the trigger to escalate to
+active diagnosis (SSM `send-command` into the box: `docker ps -a`,
+`ps aux`, tail the actual userdata/cloud-init log) on THAT SAME check --
+never just reschedule another passive `s3 cp run.log` poll and wait
+again. Never say "I'll check back in a few minutes" about a box already
+showing zero progress; that phrasing is itself the failure mode. If one
+round of active diagnosis doesn't produce a clear answer, terminate
+rather than let it idle further, and tell the user before or immediately
+after. Silently letting a box sit for 10-20 min doing nothing between
+checks -- even if the dollar cost is small -- is the actual problem, not
+just the spend.
+
 ## Launching / driving an EC2 box -- read before `run-instances`
 
 Applies to the `eeg-run.yml` workflow (via the `eeg-gh-launcher` role),
