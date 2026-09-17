@@ -1589,6 +1589,28 @@ read off a continuous timeline). See "Open threads" below.
 
 ## Open threads
 
+- **TRY: synchrosqueezed CWT (`ssqueezepy`) as an alternative to the plain
+  CWT front-end, not yet built (2026-09-17, idea only).** Every
+  `temporal_graph_*`/`dense_edge_*`/`hermitian_ssm` pipeline currently
+  gets its per-frequency time-series from a plain CWT (see
+  `Epilepsy/pipelines/cwt_gnn_classifiers.py`'s coherence/phase
+  construction) -- coefficients spread energy across frequency bins per
+  the wavelet's own time-frequency resolution tradeoff. Synchrosqueezing
+  (`ssqueezepy.ssq_cwt`) reassigns that same CWT's energy onto a sharper
+  instantaneous-frequency axis post-hoc, which could make `coh`/phase
+  (and the significance-channel question right above this) less smeared
+  across frequency bins -- plausibly relevant given the open significance-
+  channel/COI-mask thread just above, since a sharper time-frequency
+  representation could change how much (if any) extra information a
+  fixed-threshold significance channel actually carries. Untested
+  question: whether `ssq_cwt`'s extra compute cost (it runs a full CWT
+  first, then a reassignment step) is worth it against this repo's
+  existing 8-40 Hz/`nfreqs` config, and whether the reassigned bins can
+  even slot into `_build_dense_edge_input`'s existing per-(edge,
+  frequency) coherence/phase machinery without a real rewrite. No code
+  written yet -- next step before running anything is to check
+  `ssqueezepy`'s API against a single chb01 recording's existing
+  plain-CWT output for shape/API compatibility.
 - **`cg_mambanet` capacity cut (2026-08-29, `run_pipelines.py` commit
   `b4ee0db`) re-run 2026-08-30 (RunPod, `-135306`) -- DID NOT FIX IT,
   basically a wash.** The first real 6-fold run (`20260829-114933`) was
