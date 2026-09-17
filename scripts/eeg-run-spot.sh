@@ -188,7 +188,7 @@ if [ -n "\$DOCKER_IMAGE" ]; then
   docker run --name eeg-run --gpus all --rm \
     -v /root/checkpoint:/root/checkpoint \
     -v /root/repo:/workspace \
-    -w /workspace "\$DOCKER_IMAGE" \
+    -w /workspace -e PYTHONPATH=/workspace:/workspace/Epilepsy "\$DOCKER_IMAGE" \
     python3 -u \$ARGS >> /root/run.log 2>&1 &
   JOB_PID=\$!
   wait \$JOB_PID
