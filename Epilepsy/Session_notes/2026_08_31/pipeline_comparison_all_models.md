@@ -80,27 +80,45 @@ only, never run 6-fold per user call. Not in either table.)
 
 ## Reading the board
 
-**"pre" is the leader on the metrics this repo optimizes** — highest AP
-(0.644) and AUC (0.973), 6/6 raw hits. "post" (0.639) is a statistical
-tie that keeps the full 253-edge graph through the temporal model
-(~11× compute); it's the fallback "graph-native" deliverable. The gap
-from "pre" to the best raw-EEG model is small.
+**"pre" has the highest single-seed AP (0.644) and AUC (0.973) on this
+board, 6/6 raw hits, but its seed-swept mean (0.556, see correction above)
+ties `godoy_tmc` (0.556) exactly.** "pre is the leader" is true only for
+the favorable seed-42 draw this table reports, not for the pipeline's
+actual seed-averaged behavior — the two are not distinguishable once both
+are measured the same way. "post" (0.639, single-seed only, never
+seed-swept) is presumably subject to the same caveat.
+
+**CORRECTION (2026-09-16): "pre" WAS seed-swept, and it lands on top of
+`godoy_tmc` — they are statistically indistinguishable, not a ~0.09 AP
+gap.** `Session_notes/2026_09_01/fp16_dense_edge_cache_seed_sweep.md`
+ran "pre" over seeds 42/43/44/45 (fp16 cache, verified faithful to fp32
+at matched seed 42, -0.027 mean AP, within seed noise): **0.617 / 0.490 /
+0.609 / 0.510, mean 0.556, seed std ~0.06** — identical to `godoy_tmc`'s
+5-seed mean (0.556, std 0.056). That note's own conclusion: "the honest
+'pre' number is ~0.56–0.64 depending on seed" and the fp32 seed-42 single
+run this doc cites as 0.644 is "a favorable-ish draw," ~1.5 std above the
+fp16 seed mean. **Do not cite "pre" (0.644) beating `godoy_tmc` (0.556)
+by ~0.09 AP — that compares a favorable single seed against a proper
+mean. The seed-matched comparison is 0.556 vs 0.556: a tie.**
 
 **`godoy_tmc` — honest number is 0.556 ± 0.056, not 0.619.** The
 single-run 0.619 (seed 42) was the *top* of a 5-seed sweep (42–46:
-0.619, 0.548, 0.590, 0.550, 0.470); mean 0.556, sample std 0.056. That
-puts the raw-signal 1-layer Transformer ~0.09 AP below the same-machine
-"pre" (0.644) and ~0.08 below "post" (0.639) — a clear third, not a
-near-tie. The whole seed spread lives in `1_03` (AP 0.11–0.55 across
+0.619, 0.548, 0.590, 0.550, 0.470); mean 0.556, sample std 0.056. Against
+the same-machine "pre" *single-seed* 0.644 and "post" *single-seed* 0.639
+this looks like ~0.08-0.09 AP back — see the correction above for why
+that gap is not trustworthy without a "pre"/"post" seed sweep to compare
+against. The whole seed spread lives in `1_03` (AP 0.11–0.55 across
 seeds) and `1_26` (0.37–0.83); seed 42 simply drew a good `1_03`
 (0.549 vs ~0.15 for the other four). `1_16` stays perfect every seed
 (AP 1.000) and `1_18` nearly so (0.80–1.00), both on ≤30 test windows.
 `1_15` is missed (0 preictal windows predicted) on 3 of 5 seeds. Same
 "two hard folds carry all the variance" fragility as "pre" — but where
-"pre"'s error bar is 0.644–0.674, godoy's is 0.47–0.62. Off-label too:
-TMC-T is a *detection* architecture and this is a reconstruction, not
-the authors' code. Cite it as "a representative raw-signal Transformer
-baseline, 0.556 ± 0.056," not as a settled #2. Sweep detail:
+"pre"'s error bar is *unknown* (never seed-swept; only a same-seed
+run-to-run check exists, 0.644 vs historical 0.674), godoy's is 0.47–0.62
+measured. Off-label too: TMC-T is a *detection* architecture and this is
+a reconstruction, not the authors' code. Cite it as "a representative
+raw-signal Transformer baseline, 0.556 ± 0.056, not yet distinguishable
+from 'pre' without a matching seed sweep on the leader." Sweep detail:
 `Session_notes/2026_08_31/godoy_tmc_seed_sweep.md`.
 
 **The enc-free GRU/Mamba rows are stale references, not current
