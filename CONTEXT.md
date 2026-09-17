@@ -18,6 +18,26 @@ Read it before touching the AWS account from **any** shell -- on-box or
 driving remotely from a local Mac / Grok shell (the Mac has admin creds).
 Skip it if you're only editing code / running tests; nothing in the
 pipelines depends on it yet.
+
+**2026-09-17 (most recent):** GPU spot IS working now (the "quota 0"
+notes below and in `AWS_INFRA.md`'s header are stale) via
+`scripts/eeg-run-spot.sh` on branch `spot-tgm-nosig-checkpoint` (NOT
+merged to `main` -- see "Branch map"), `--docker-image
+ghcr.io/noshore5/eeg_benchmarks-mamba:latest` + custom AMI
+`ami-0c131b0c97ed93cda` (re-baked this session after the PIP_SRC fix
+made the prior AMI, `ami-042ff1af14b5afec6`, stale -- see AWS_INFRA.md's
+"GPU spot + docker/custom-AMI path"). `Dockerfile.mamba` also got a real
+fix (`f3c1cb1`): `PIP_SRC=/opt/pip-src`, since the default `PIP_SRC`
+(inside `/workspace`) got shadowed by the docker-run path's live-code
+bind-mount, breaking the moabb import. `paradigms/continuous_labeling.py`'s
+`get_data()` is now parallelized across processes (`ffcbd63`, `main`) --
+was purely serial per-recording EDF load, ~10min for chb01/prediction's
+~40 recordings; not yet timed on an actual cloud Linux box (a local Mac
+timing test was misleadingly slower -- see that commit's message).
+`tgm-pred-nosig-6fold-seed7` re-launched and training normally as of this
+writing (g5.xlarge/A10G, epoch_time~12.2s, matches the known-good
+baseline). Real successful precedent already on `main`:
+`tgm-pred-nosig-6fold-docker` (`b8def4c`, roc_auc 0.955).
 2026-09-01: **`scripts/eeg-run.sh`** -- fire-and-forget a run on an
 on-demand box; on `rc==0` it commits the new result CSV(s) (+ optional
 `--session-note`) straight to `origin/main` via `scripts/promote_results.sh`
@@ -1301,7 +1321,22 @@ read off a continuous timeline). See "Open threads" below.
 
 ## Branch map
 
-- `main` -- **current branch, everything is merged here as of 2026-08-28.**
+- `spot-tgm-nosig-checkpoint` (remote, `origin/`) -- **NOT merged into
+  `main` as of 2026-09-17; has real work `main` lacks.** Adds
+  `run_pipelines.py --checkpoint-dir` (fold-level resume for
+  `leave_one_seizure_out_prediction`, `eaf8fe1`) and
+  `scripts/eeg-run-spot.sh` (the GPU spot launcher actually used for
+  `temporal_graph_mamba` runs this session -- capacity-fallback across
+  (instance type, AZ), `--docker-image` pre-baked-AMI path, S3
+  checkpoint sync, `promote_results.sh` integration). Passing `--branch
+  main` to that script for a `--cmd` using `--checkpoint-dir` crashes
+  (`unrecognized arguments`) since `main` doesn't have the flag -- see
+  AWS_INFRA.md's "GPU spot + docker/custom-AMI path" section before
+  launching anything with this script. Real successful run already
+  promoted from this path: `tgm-pred-nosig-6fold-docker` (`b8def4c`,
+  roc_auc 0.955, g5.xlarge/A10G, epoch_time~12.5s).
+- `main` -- **current branch, everything is merged here as of 2026-08-28**
+  except the above.
   Has `dense_edge_mamba` (from `mamba-temporal-edge-model`, merged at
   `6d38573`), the cwt node encoder, the continuous-cwt-mamba paradigm
   plumbing (`aa3c565`, `4760de0`), `use_cuda_kernel` + `Dockerfile.mamba` +

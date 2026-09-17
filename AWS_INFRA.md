@@ -31,6 +31,59 @@ anywhere path verified end-to-end (OIDC -> launch -> deps -> run -> S3 ->
 self-terminate, no orphan) on a CPU smoke run; `eeg-box` terminated the
 same day. Spot SLR created by admin 2026-09-01. GPU quota-increase
 requests still `CASE_OPENED` (AWS support queue; effective quota 0).
+**Stale as of that date re: GPU** -- GPU spot has been launching and
+running real jobs since (see "GPU spot + docker/custom-AMI path" below);
+the quota-0 note above no longer reflects reality, not yet corrected
+upstream in this doc.
+
+## GPU spot + docker/custom-AMI path (2026-09-17)
+
+`scripts/eeg-run-spot.sh` -- the actual launcher used for GPU spot runs
+this session (`temporal_graph_mamba`, prediction, 6-fold LOSO) -- **lives
+only on branch `spot-tgm-nosig-checkpoint`, not on `main`.** Same for
+`run_pipelines.py`'s `--checkpoint-dir` flag (added `eaf8fe1`, same
+branch). Launching with `--branch main` but a `--cmd` that uses
+`--checkpoint-dir` crashes with `unrecognized arguments` almost
+immediately (hit this 2026-09-17, cost one wasted launch) -- **always
+pass `--branch spot-tgm-nosig-checkpoint`** when the `--cmd` needs that
+flag, until/unless that branch merges to `main`.
+
+`--docker-image ghcr.io/noshore5/eeg_benchmarks-mamba:latest` (built by
+`.github/workflows/build-mamba-pod-image.yml` from `Dockerfile.mamba`,
+~49min on GH-hosted runners, unrelated to AWS billing) skips the env
+setup a plain DLAMI launch would need (mamba-ssm/causal-conv1d CUDA
+compile, dataset download) by using a **pre-baked custom AMI**
+(env/deps + chb01 pre-pulled onto disk; code is always bind-mounted live
+from a fresh git clone, never baked in -- an image rebuild is only needed
+for a real dependency/environment change).
+
+**The custom AMI must be re-baked after every `Dockerfile.mamba`
+rebuild, or launches pay a partial `docker pull` re-download tax.**
+`ami-042ff1af14b5afec6` (original) went stale the moment the PIP_SRC fix
+(`f3c1cb1`) changed the image -- every layer from that `ENV` instruction
+onward differs, so the AMI's cached layers no longer match `:latest` and
+`docker pull` re-fetches the delta (small here, ~2min, but not zero).
+Re-baked 2026-09-17 to **`ami-0c131b0c97ed93cda`** (current, set in
+`eeg-run-spot.sh` on `spot-tgm-nosig-checkpoint`, commit `647c4bf`):
+launch a cheap on-demand `t3.medium` off the *old* AMI (no GPU needed,
+`docker pull` doesn't need one), let it pull `:latest`, `stop` it (NOT
+`--keep` via the spot script -- that path needs
+`InstanceInterruptionBehavior=stop` which the script doesn't set;
+on-demand + `--instance-initiated-shutdown-behavior stop` sidesteps it),
+`aws ec2 create-image`, wait for `available` (took ~17min for this
+image's size), *then* terminate the source box -- terminating before the
+snapshot finishes can lose/corrupt the AMI (root volume `DeleteOnTermination`).
+
+**Windowing (`paradigms/continuous_labeling.py`'s `get_data()`) is now
+parallelized across processes** (`ffcbd63`, `main`) -- was purely serial
+per-recording `raw.load_data()`, measured ~10min for chb01/prediction's
+~40 recordings on a 4-vCPU spot box despite no filtering ever being
+applied by default. `EEG_BENCHMARKS_WINDOWING_WORKERS` env var (default
+`min(4, cpu_count)`) controls it; `=1` forces the old serial path. Not
+yet timed on an actual cloud Linux box -- a local Mac timing test was
+*slower* parallel (macOS `spawn` + tiny cache-hot dataset dominated by
+pool-startup overhead), which doesn't reflect the real target regime
+(Linux `fork`, ~40 cold EBS-backed files).
 
 ## Where to run cloud ops from
 
