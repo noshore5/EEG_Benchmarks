@@ -94,12 +94,17 @@ done
 NAME=$(printf '%s' "$NAME" | tr -c 'A-Za-z0-9._-' '-')
 
 # When --docker-image is given, use the pre-baked custom AMI
-# (ami-042ff1af14b5afec6 -- env/deps only, no code baked in; code is bind-
+# (ami-0c131b0c97ed93cda -- env/deps only, no code baked in; code is bind-
 # mounted live from a fresh git clone in the docker-run path below). This
-# skips the ~20min `docker pull` on every launch. Falls back to the
-# dynamic DLAMI lookup otherwise. See AWS_INFRA.md.
+# skips the ~20min `docker pull` on every launch, PROVIDED the AMI's cached
+# image digest still matches :latest -- any Dockerfile.mamba rebuild
+# invalidates every layer from the changed point onward, so the AMI needs
+# re-baking after each such rebuild or launches pay a partial re-pull (see
+# 2026-09-17: ami-042ff1af14b5afec6 was stale from the PIP_SRC fix, re-baked
+# to this id from a box that pulled digest sha256:974a906a...). Falls back
+# to the dynamic DLAMI lookup otherwise. See AWS_INFRA.md.
 if [ -n "$DOCKER_IMAGE" ]; then
-  AMI=ami-042ff1af14b5afec6
+  AMI=ami-0c131b0c97ed93cda
 else
   AMI=$(aws ec2 describe-images --owners amazon --region $REGION \
     --filters "Name=name,Values=Deep Learning OSS Nvidia Driver AMI GPU PyTorch*Ubuntu 22.04*" \
