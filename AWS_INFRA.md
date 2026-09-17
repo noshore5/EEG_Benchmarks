@@ -240,6 +240,13 @@ after. Silently letting a box sit for 10-20 min doing nothing between
 checks -- even if the dollar cost is small -- is the actual problem, not
 just the spend.
 
+Startup/bootstrap phase specifically (launch through first real
+progress line -- docker pull done, code checked out, first epoch/first
+real work logged) needs tighter polling than steady-state: check every
+~1-2 min, not every 3-4+, since this is exactly where silent failures
+(bad AMI config, --gpus wiring, import errors) show up, and they show up
+fast if you're actually looking.
+
 ## Launching / driving an EC2 box -- read before `run-instances`
 
 Applies to the `eeg-run.yml` workflow (via the `eeg-gh-launcher` role),
