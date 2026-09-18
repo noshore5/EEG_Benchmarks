@@ -38,11 +38,85 @@ from __future__ import annotations
 import hashlib
 import os
 import zipfile
+from collections import OrderedDict
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import torch
+
+
+class DenseEdgeMemCache:
+    """Byte-budgeted LRU cache for GPU-resident dense-edge tensors.
+
+    2026-09-18. The original dense_edge_mem_cache was a plain dict: no size
+    limit, no eviction -- either the whole run's unique windows fit in VRAM
+    (near-100% hit rate, ~5-6x/epoch speedup measured on real CUDA) or the
+    dict outgrows the card and CUDA OOMs, typically mid-run after several
+    folds already succeeded (the dict only ever grows, one entry per unique
+    window, shared cross-fold). There was no middle ground: doubling nfreqs
+    (which doubles cache bytes/window) could not "just" degrade from ~2.7s
+    to ~4s/epoch -- it would crash once the resident set exceeded the card.
+
+    This class fixes that by capping total resident bytes and evicting the
+    least-recently-used entry on overflow, so a too-big working set degrades
+    to a smooth partial hit rate (proportional epoch-time cost) instead of
+    an OOM. Drop-in for the plain dict: same `.get(key)` / `[key] = tensor`
+    call sites in _precompute_dense_edge_inputs (cwt_gnn_classifiers.py)
+    work unchanged -- this only adds bookkeeping around them.
+
+    max_bytes: budget for the *tensor storage* this cache holds (element
+    count * dtype size, summed across entries) -- not a full CUDA memory
+    accounting (no allocator fragmentation, no other tensors on the card).
+    Pass something comfortably under total VRAM minus model/activation/
+    optimizer footprint; see AWS_INFRA.md for measured per-fold overhead.
+    """
+
+    def __init__(self, max_bytes: int):
+        if max_bytes <= 0:
+            raise ValueError(f"DenseEdgeMemCache max_bytes must be positive, got {max_bytes}")
+        self.max_bytes = int(max_bytes)
+        self._store: "OrderedDict[str, torch.Tensor]" = OrderedDict()
+        self._nbytes = 0
+        self.hits = 0
+        self.misses = 0
+        self.evictions = 0
+
+    @staticmethod
+    def _tensor_bytes(tensor: torch.Tensor) -> int:
+        return tensor.element_size() * tensor.nelement()
+
+    def get(self, key: str) -> Optional[torch.Tensor]:
+        tensor = self._store.get(key)
+        if tensor is None:
+            self.misses += 1
+            return None
+        self._store.move_to_end(key)  # mark most-recently-used
+        self.hits += 1
+        return tensor
+
+    def __setitem__(self, key: str, tensor: torch.Tensor) -> None:
+        if key in self._store:
+            self._nbytes -= self._tensor_bytes(self._store[key])
+            del self._store[key]
+        size = self._tensor_bytes(tensor)
+        # A single entry bigger than the whole budget can never fit -- skip
+        # it rather than evicting everything else for nothing.
+        if size > self.max_bytes:
+            return
+        while self._nbytes + size > self.max_bytes and self._store:
+            _, evicted = self._store.popitem(last=False)  # oldest (LRU)
+            self._nbytes -= self._tensor_bytes(evicted)
+            self.evictions += 1
+        self._store[key] = tensor
+        self._nbytes += size
+
+    def __len__(self) -> int:
+        return len(self._store)
+
+    @property
+    def nbytes(self) -> int:
+        return self._nbytes
 
 
 def default_dense_edge_cache_root() -> Path:

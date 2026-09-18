@@ -153,7 +153,7 @@ from Epilepsy.pipelines.hermitian_ssm_cache import (
     default_hermitian_ssm_cache_root,
 )
 from Epilepsy.pipelines.cwt_window_cache import DISABLE_CWT_CACHE, DiskCWTCache, default_cwt_cache_root
-from Epilepsy.pipelines.dense_edge_cache import default_dense_edge_cache_root
+from Epilepsy.pipelines.dense_edge_cache import DenseEdgeMemCache, default_dense_edge_cache_root
 from Epilepsy.pipelines.truong_stft_cnn_classifier import TruongSTFTCNNClassifier, k_of_n_alarm
 from Epilepsy.pipelines.dbconformer_classifier import DBConformerClassifier
 from Epilepsy.pipelines.slimseiz_classifier import SlimSeizClassifier
@@ -1390,6 +1390,7 @@ def leave_one_seizure_out_detection(
     max_folds: int | None = None,
     skip_folds: set[int] | None = None,
     dense_edge_gpu_cache: bool = False,
+    dense_edge_gpu_cache_gb: float = 15.0,
 ) -> pd.DataFrame:
     """Leave-one-seizure-out CV for label_mode="detection": hold out one
     recording's windows at a time.
@@ -1436,7 +1437,15 @@ def leave_one_seizure_out_detection(
     # under LOSO). See SparseEvidenceGNNClassifier's dense_edge_mem_cache
     # docstring for why this is opt-in rather than defaulted on like
     # shared_cwt_cache: a dense-edge entry is far larger than a CWT one.
-    shared_dense_edge_mem_cache = {} if dense_edge_gpu_cache else None
+    # 2026-09-18: capped/LRU (DenseEdgeMemCache), not a plain dict -- see
+    # its docstring in dense_edge_cache.py. A too-big working set (e.g. a
+    # higher nfreqs) now degrades to a smooth partial hit rate instead of
+    # a mid-run CUDA OOM once the resident set exceeds --dense-edge-gpu-
+    # cache-gb.
+    shared_dense_edge_mem_cache = (
+        DenseEdgeMemCache(max_bytes=int(dense_edge_gpu_cache_gb * (1024 ** 3)))
+        if dense_edge_gpu_cache else None
+    )
 
     rows = []
     for fold_i, group in enumerate(unique_groups):
@@ -1533,6 +1542,7 @@ def leave_one_seizure_out_prediction(
     skip_folds: set[int] | None = None,
     dump_window_scores: bool = False,
     dense_edge_gpu_cache: bool = False,
+    dense_edge_gpu_cache_gb: float = 15.0,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame | None]:
     """Leave-one-seizure-out CV for label_mode="prediction".
 
@@ -1623,7 +1633,10 @@ def leave_one_seizure_out_prediction(
     shared_cwt_cache = DISABLE_CWT_CACHE if disable_disk_cache else DiskCWTCache(default_cwt_cache_root())
     shared_dense_edge_cache_dir = None if disable_disk_cache else default_dense_edge_cache_root()
     # 2026-09-18: see leave_one_seizure_out_detection's matching comment.
-    shared_dense_edge_mem_cache = {} if dense_edge_gpu_cache else None
+    shared_dense_edge_mem_cache = (
+        DenseEdgeMemCache(max_bytes=int(dense_edge_gpu_cache_gb * (1024 ** 3)))
+        if dense_edge_gpu_cache else None
+    )
 
     subject_arr = metadata["subject"].to_numpy()
     run_arr = metadata["run"].to_numpy()
@@ -3293,6 +3306,24 @@ def _build_argument_parser() -> argparse.ArgumentParser:
             "dense-edge pipeline regardless of GPU size."
         ),
     )
+    parser.add_argument(
+        "--dense-edge-gpu-cache-gb",
+        type=float,
+        default=15.0,
+        help=(
+            "Byte budget (GiB) for --dense-edge-gpu-cache's resident set "
+            "(DenseEdgeMemCache, dense_edge_cache.py). LRU-evicted, not a "
+            "plain unbounded dict (2026-09-18 fix): a working set bigger "
+            "than this degrades to a smooth partial hit rate instead of a "
+            "mid-run CUDA OOM. Default (15GB) matches the measured size of "
+            "the whole CHB-MIT prediction run's unique windows at "
+            "nfreqs=8/2-channel-native-complex/bf16 on a 23GB A10G, "
+            "leaving headroom for model/activations/optimizer state. Raise "
+            "this (with more VRAM, or a smaller batch size to free room) "
+            "to let a higher nfreqs stay fully resident; ignored unless "
+            "--dense-edge-gpu-cache is also passed."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--shuffle-labels",
@@ -3771,6 +3802,7 @@ def main(args: argparse.Namespace) -> None:
             skip_folds=set(args.skip_folds) if args.skip_folds else None,
             dump_window_scores=args.dump_window_scores,
             dense_edge_gpu_cache=args.dense_edge_gpu_cache,
+            dense_edge_gpu_cache_gb=args.dense_edge_gpu_cache_gb,
         )
 
         # Separate output path (task 6, bullet 1): never pooled with
@@ -3842,6 +3874,7 @@ def main(args: argparse.Namespace) -> None:
             max_folds=args.max_folds,
             skip_folds=set(args.skip_folds) if args.skip_folds else None,
             dense_edge_gpu_cache=args.dense_edge_gpu_cache,
+            dense_edge_gpu_cache_gb=args.dense_edge_gpu_cache_gb,
         )
 
         # --shuffle-labels: same separate-subdirectory reasoning as the
