@@ -600,6 +600,19 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
             and self.cwt_resample_n_time is None
             and getattr(self, "device_", None) is not None
         )
+        # Step-timing (2026-09-18): the raw-CWT counterpart to
+        # _precompute_dense_edge_inputs's existing verbose>=2 phase-timing
+        # block -- added to answer "why is an epoch N seconds" with a real
+        # CWT-vs-dense-edge-vs-forward-vs-backward breakdown instead of
+        # inferring it from how many times a log line appears (that alone
+        # doesn't establish where the TIME goes -- a cheap call can still
+        # print often). Accumulated on self across the whole epoch;
+        # _train_loop (common.py) reads and resets it each epoch alongside
+        # the analogous model-side accumulators.
+        _profile_cwt = self.verbose >= 2 or PROFILE_TEMPORAL_GRAPH_STEPS
+        if _profile_cwt:
+            _sync_device(self.device_ if self.device_ is not None else torch.device("cpu"))
+            _t_cwt0 = time.perf_counter()
         features = compute_cwt_real_imag_tensors_cached(
             X,
             mean=mean,
@@ -626,6 +639,11 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
             keep_on_device=keep_on_device,
             device=self.device_ if keep_on_device else None,
         )
+        if _profile_cwt:
+            _sync_device(self.device_ if self.device_ is not None else torch.device("cpu"))
+            self._profile_cwt_s = getattr(self, "_profile_cwt_s", 0.0) + (
+                time.perf_counter() - _t_cwt0
+            )
         if fit:
             X_normalized = apply_global_zscore(X, mean, std) if self.normalize_input else X
             self._fit_noise_augmentation_state(features, X_normalized, train_idx)
@@ -1576,6 +1594,19 @@ def _sync_device(device: torch.device) -> None:
         torch.cuda.synchronize(device)
     elif device.type == "mps":
         torch.mps.synchronize()
+
+
+# 2026-09-18: SparseEvidenceGNNCore (the trainable nn.Module) has no
+# `self.verbose` -- that lives on the classifier wrapper, not the model --
+# so the temporal_graph forward-pass step-timing below (edge_to_node vs
+# mamba, the two stages inside the model that _prepare_features' and
+# _precompute_dense_edge_inputs' classifier-level CWT/dense-edge timers
+# can't see) is gated by this env var instead, same convention as
+# EEG_BENCHMARKS_WINDOWING_WORKERS (paradigms/continuous_labeling.py).
+# Read once at import time -- a training run doesn't flip this mid-flight.
+PROFILE_TEMPORAL_GRAPH_STEPS = bool(
+    os.environ.get("EEG_BENCHMARKS_PROFILE_STEPS")
+)
 
 
 def _interp_percentile_grid(
@@ -5298,6 +5329,22 @@ class SparseEvidenceGNNCore(nn.Module):
         axis's usual slot. See temporal_graph_mode's own constructor
         docstring for the full "aggregate-then-Mamba" motivation.
         """
+        # Step-timing (2026-09-18, EEG_BENCHMARKS_PROFILE_STEPS): this
+        # method is the "encoder to n_channels" + "mamba" half of the
+        # per-epoch breakdown the classifier-level CWT/dense-edge timers
+        # (_prepare_features/_precompute_dense_edge_inputs) can't see --
+        # see PROFILE_TEMPORAL_GRAPH_STEPS's own docstring for why this is
+        # env-gated rather than self.verbose (no verbose on this module).
+        # "edge_to_node" spans everything from the raw [B,4,E,T,F] stack
+        # through temporal_edge_proj, sparse_message_mlp, and the
+        # scatter_add that collapses E edges down to n_channels nodes
+        # (node_seq) -- the actual "encoder to n_channels" step. "mamba"
+        # is just the temporal_node_mamba/temporal_node_gru call.
+        _profile = PROFILE_TEMPORAL_GRAPH_STEPS
+        if _profile:
+            _sync_device(dense_edge_raw.device)
+            _t_e2n0 = time.perf_counter()
+
         if (
             getattr(self, "temporal_graph_edge_drop_significance", False)
             and self.temporal_edge_cproj is None
@@ -5382,7 +5429,18 @@ class SparseEvidenceGNNCore(nn.Module):
             # "pre" path below, just applied after the Mamba instead of
             # before. __init__ guarantees temporal_graph_mode == "mamba" here.
             edge_in = msg.permute(0, 3, 1, 2)  # [B, hidden_dim, E, T]
+            if _profile:
+                _sync_device(edge_in.device)
+                self._profile_e2n_s = getattr(self, "_profile_e2n_s", 0.0) + (
+                    time.perf_counter() - _t_e2n0
+                )
+                _t_mamba0 = time.perf_counter()
             edge_out = self.temporal_node_mamba(edge_in)  # [B, hidden_dim, E, 1]
+            if _profile:
+                _sync_device(edge_out.device)
+                self._profile_mamba_s = getattr(self, "_profile_mamba_s", 0.0) + (
+                    time.perf_counter() - _t_mamba0
+                )
             edge_summary = edge_out.squeeze(-1).permute(0, 2, 1)  # [B, E, hidden_dim]
             evidence = torch.zeros(
                 batch_size_actual, self.n_channels, self.hidden_dim,
@@ -5413,6 +5471,12 @@ class SparseEvidenceGNNCore(nn.Module):
         )
         node_seq.scatter_add_(1, dst_idx_expand, msg)
         node_seq = node_seq / node_in_degree.view(batch_size_actual, -1, 1, 1)
+        if _profile:
+            _sync_device(node_seq.device)
+            self._profile_e2n_s = getattr(self, "_profile_e2n_s", 0.0) + (
+                time.perf_counter() - _t_e2n0
+            )
+            _t_mamba0 = time.perf_counter()
 
         # Weight-shared-across-nodes GRU: nodes folded into the batch dim
         # (same spirit as dense_edge_conv's/_DenseEdgeGRUTemporal's own
@@ -5432,10 +5496,20 @@ class SparseEvidenceGNNCore(nn.Module):
             conv_in = node_seq.permute(0, 3, 1, 2)  # [B, hidden_dim, n_channels, T]
             out = self.temporal_node_mamba(conv_in)  # [B, hidden_dim, n_channels, 1]
             evidence = out.squeeze(-1).permute(0, 2, 1)  # [B, n_channels, hidden_dim]
+            if _profile:
+                _sync_device(evidence.device)
+                self._profile_mamba_s = getattr(self, "_profile_mamba_s", 0.0) + (
+                    time.perf_counter() - _t_mamba0
+                )
             return evidence
         gru_in = node_seq.reshape(batch_size_actual * self.n_channels, n_time, self.hidden_dim)
         _, h_n = self.temporal_node_gru(gru_in)  # h_n: [1, B*n_channels, hidden_dim]
         evidence = h_n.squeeze(0).reshape(batch_size_actual, self.n_channels, self.hidden_dim)
+        if _profile:
+            _sync_device(evidence.device)
+            self._profile_mamba_s = getattr(self, "_profile_mamba_s", 0.0) + (
+                time.perf_counter() - _t_mamba0
+            )
         return evidence
 
     def _cwt_node_embeddings(
@@ -7873,7 +7947,7 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         # progress line above) since this adds a _sync_device call per
         # chunk -- a real, if small, cost of its own -- so it's opt-in, not
         # part of every run's overhead.
-        profile = self.verbose >= 2
+        profile = self.verbose >= 2 or PROFILE_TEMPORAL_GRAPH_STEPS
         t_transfer = 0.0
         t_compute = 0.0
         t_copy_back = 0.0
@@ -8014,6 +8088,14 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         if profile and chunk_starts:
             n_chunks = len(chunk_starts)
             total = t_threshold + t_transfer + t_compute + t_copy_back
+            # Also accumulate into a per-epoch running total (2026-09-18),
+            # same convention as _prepare_features' self._profile_cwt_s --
+            # this method is called multiple times per epoch (once per
+            # dataset chunk-miss batch, since the disk cache defaults off
+            # on CUDA -- see resolve_disable_disk_cache), so the per-call
+            # line above is the fine-grained view and this is what
+            # _train_loop sums into the end-of-epoch step-timing summary.
+            self._profile_dense_edge_s = getattr(self, "_profile_dense_edge_s", 0.0) + total
             self._vprint(
                 2,
                 f"[SparseEvidenceGNN] dense-edges[{mode_label}] phase timing "

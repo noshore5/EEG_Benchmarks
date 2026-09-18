@@ -22,6 +22,25 @@ try:
 except ImportError:  # pragma: no cover - Windows
     fcntl = None
 
+# 2026-09-18: same knob as cwt_gnn_classifiers.py's PROFILE_TEMPORAL_GRAPH_
+# STEPS (read independently here, not imported, to avoid adding a
+# common.py -> cwt_gnn_classifiers.py import edge for one flag) -- gates
+# the forward/backward/optimizer-step timing added to _train_loop below,
+# which is the classifier-agnostic third of the "why is an epoch N
+# seconds" breakdown (CWT + dense-edge live in cwt_gnn_classifiers.py;
+# this file owns the actual train step).
+_PROFILE_STEPS = bool(os.environ.get("EEG_BENCHMARKS_PROFILE_STEPS"))
+
+
+def _profile_sync(device: torch.device) -> None:
+    """Same blocking-sync need as cwt_gnn_classifiers.py's _sync_device --
+    duplicated rather than imported for the same reason as _PROFILE_STEPS
+    above (no cross-module import for one helper)."""
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    elif device.type == "mps":
+        torch.mps.synchronize()
+
 import numpy as np
 import pandas as pd
 from scipy.signal import resample
@@ -1864,12 +1883,20 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
                 val_alpha_specs
             )
             optimizer_steps = 0
+            t_forward_total = 0.0
+            t_backward_total = 0.0
+            t_optimizer_total = 0.0
 
             def take_optimizer_step() -> None:
                 nonlocal alpha_val_iter
                 nonlocal alpha_val_update_credit
                 nonlocal optimizer_steps
                 nonlocal pending_gradient_samples
+                nonlocal t_optimizer_total
+
+                if _PROFILE_STEPS and pending_gradient_samples > 0:
+                    _profile_sync(self.device_)
+                    _t_opt0 = time.perf_counter()
 
                 if pending_gradient_samples <= 0:
                     return
@@ -1886,6 +1913,9 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
                 optimizer.zero_grad(set_to_none=True)
                 pending_gradient_samples = 0
                 optimizer_steps += 1
+                if _PROFILE_STEPS:
+                    _profile_sync(self.device_)
+                    t_optimizer_total += time.perf_counter() - _t_opt0
 
                 if use_val_alpha_updates:
                     if val_loader is None or alpha_val_iter is None:
@@ -1932,8 +1962,14 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
                         slice_size = batch_size
                     batch_slice = _slice_tensor_batch(batch, start, start + slice_size)
                     *batch_inputs, batch_y = batch_slice
+                    if _PROFILE_STEPS:
+                        _profile_sync(self.device_)
+                        _t_fwd0 = time.perf_counter()
                     with _temporarily_requires_grad(val_alpha_params, False):
                         logits, aux_value = self._model_forward(tuple(batch_inputs))
+                        if _PROFILE_STEPS:
+                            _profile_sync(self.device_)
+                            t_forward_total += time.perf_counter() - _t_fwd0
                         _record_selector_diagnostics(
                             train_selector_accumulators,
                             selector_specs,
@@ -1941,7 +1977,13 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
                         loss = criterion(logits, batch_y)
                         # Train batches regularize only selectors updated on train.
                         loss = loss + _selector_extra_loss(train_selector_specs, loss)
+                    if _PROFILE_STEPS:
+                        _profile_sync(self.device_)
+                        _t_bwd0 = time.perf_counter()
                     (loss * slice_size).backward()
+                    if _PROFILE_STEPS:
+                        _profile_sync(self.device_)
+                        t_backward_total += time.perf_counter() - _t_bwd0
                     pending_gradient_samples += slice_size
                     weighted_loss += float(loss.item()) * slice_size
                     logits_parts.append(logits.detach())
@@ -2094,6 +2136,56 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
 
             epoch_time = time.perf_counter() - epoch_start
             self.epoch_time_history_.append(epoch_time)
+            if _PROFILE_STEPS:
+                # Combine this loop's own forward/backward/optimizer timers
+                # with the classifier-level CWT/dense-edge accumulators
+                # (cwt_gnn_classifiers.py's _prepare_features/
+                # _precompute_dense_edge_inputs) and the model-level
+                # edge-to-node/mamba accumulators
+                # (_temporal_graph_node_states) -- see each one's own
+                # PROFILE_TEMPORAL_GRAPH_STEPS/_PROFILE_STEPS docstring.
+                # NOTE 1: epoch_time above already includes this epoch's
+                # validation-loader pass (see val_loader block just above),
+                # which nothing below covers -- so "accounted" is expected
+                # to be somewhat LESS than epoch_time, not equal to it; the
+                # gap is roughly the val pass plus DataLoader/Python
+                # overhead between steps.
+                # NOTE 2: edge_to_node/mamba are a BREAKDOWN OF
+                # forward_total (both happen inside the same
+                # self._model_forward call forward_total times), not
+                # additional time on top of it -- forward_total minus
+                # (edge_to_node + mamba) is the classifier head + readout +
+                # n_hops propagation this breakdown doesn't itemize
+                # separately. "accounted" below sums cwt + dense_edge +
+                # forward_total + backward + optimizer only, to avoid
+                # double-counting edge_to_node/mamba.
+                cwt_s = getattr(self, "_profile_cwt_s", 0.0)
+                dense_edge_s = getattr(self, "_profile_dense_edge_s", 0.0)
+                e2n_s = getattr(self.model_, "_profile_e2n_s", 0.0)
+                mamba_s = getattr(self.model_, "_profile_mamba_s", 0.0)
+                accounted = (
+                    cwt_s + dense_edge_s
+                    + t_forward_total + t_backward_total + t_optimizer_total
+                )
+                self._vprint(
+                    1,
+                    f"[Train][Epoch {epoch + 1}/{self.epochs}] step timing: "
+                    f"cwt={cwt_s:.3f}s dense_edge={dense_edge_s:.3f}s "
+                    f"forward_total={t_forward_total:.3f}s "
+                    f"(of which edge_to_node={e2n_s:.3f}s mamba={mamba_s:.3f}s) "
+                    f"backward={t_backward_total:.3f}s "
+                    f"optimizer={t_optimizer_total:.3f}s "
+                    f"accounted={accounted:.3f}s epoch_time={epoch_time:.3f}s "
+                    f"(accounted excludes val pass + loader/Python overhead)",
+                )
+                # Reset for a clean per-epoch measurement next time around --
+                # these live on self/self.model_ (not epoch-scoped locals)
+                # because _prepare_features and _temporal_graph_node_states
+                # can't see this loop's own local variables.
+                self._profile_cwt_s = 0.0
+                self._profile_dense_edge_s = 0.0
+                self.model_._profile_e2n_s = 0.0
+                self.model_._profile_mamba_s = 0.0
             # getattr default True: most models don't set _log_aux_metric at
             # all and keep printing whenever they return an aux value (old
             # behavior, unchanged). SparseEvidenceGNNClassifier sets it False
