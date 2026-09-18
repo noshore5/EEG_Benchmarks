@@ -81,6 +81,12 @@ class DenseEdgeMemCache:
         self.hits = 0
         self.misses = 0
         self.evictions = 0
+        # 2026-09-18 debug (nfreqs=16 0%-hit-rate investigation): counts
+        # sets rejected outright for being bigger than the whole budget --
+        # distinguishes "every entry always evicts everything else, net
+        # churn" from "every entry is simply too big to ever be stored" (a
+        # 0% hit rate looks identical from the outside in both cases).
+        self.oversized_rejections = 0
 
     @staticmethod
     def _tensor_bytes(tensor: torch.Tensor) -> int:
@@ -103,6 +109,21 @@ class DenseEdgeMemCache:
         # A single entry bigger than the whole budget can never fit -- skip
         # it rather than evicting everything else for nothing.
         if size > self.max_bytes:
+            if self.oversized_rejections == 0:
+                # Print once, not per-call -- this fires on EVERY set() at
+                # nfreqs configs where a single trial's tensor exceeds
+                # max_bytes, which would otherwise spam the log identically
+                # every time.
+                print(
+                    f"[dense-edge mem cache] WARNING: entry size {size} bytes "
+                    f"exceeds max_bytes={self.max_bytes} -- this entry (and "
+                    f"every future one of the same shape/dtype) can never be "
+                    f"cached; hit rate will be 0% regardless of budget. "
+                    f"Raise --dense-edge-gpu-cache-gb above single-entry size, "
+                    f"or shrink nfreqs/chunk_size/dense-edge-amp-bf16.",
+                    flush=True,
+                )
+            self.oversized_rejections += 1
             return
         while self._nbytes + size > self.max_bytes and self._store:
             _, evicted = self._store.popitem(last=False)  # oldest (LRU)

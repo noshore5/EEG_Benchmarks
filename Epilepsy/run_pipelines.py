@@ -1749,6 +1749,22 @@ def leave_one_seizure_out_prediction(
             **clf_params,
         )
         clf.fit(X_train, y_train)
+        # 2026-09-18 debug (nfreqs=16 OOM investigation): predict_proba
+        # allocates fresh dense-edge tensors for the held-out fold on top
+        # of whatever training + the mem cache already left resident --
+        # print the headroom right at that boundary so a crash here shows
+        # exactly how much was already committed, not just the allocator's
+        # own (less legible) "X GiB in use" message.
+        import torch as _torch_debug
+        if _torch_debug.cuda.is_available():
+            _torch_debug.cuda.synchronize()
+            print(
+                f"[eval boundary] cuda allocated={_torch_debug.cuda.memory_allocated()/1e9:.2f}GB "
+                f"reserved={_torch_debug.cuda.memory_reserved()/1e9:.2f}GB "
+                f"mem_cache_nbytes={(shared_dense_edge_mem_cache.nbytes/1e9) if shared_dense_edge_mem_cache is not None else 0:.2f}GB "
+                f"X_test.shape={X_test.shape}",
+                flush=True,
+            )
         proba = clf.predict_proba(X_test)
         y_score = proba[:, 1]
         y_pred = clf.classes_[np.argmax(proba, axis=1)]
