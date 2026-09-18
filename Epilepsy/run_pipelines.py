@@ -815,6 +815,7 @@ def _apply_dense_family_cli_overrides(clf_params: dict, args: argparse.Namespace
     clf_params["train_amp_bf16"] = args.train_amp_bf16
     clf_params["channel_subset_k"] = args.channel_subset_k
     clf_params["channel_subset_metric"] = args.channel_subset_metric
+    clf_params["temporal_graph_edge_complex_native"] = args.temporal_graph_edge_complex_native
     if args.verbose is not None:
         clf_params["verbose"] = args.verbose
     if args.validation_split is not None:
@@ -1388,6 +1389,7 @@ def leave_one_seizure_out_detection(
     disable_disk_cache: bool = False,
     max_folds: int | None = None,
     skip_folds: set[int] | None = None,
+    dense_edge_gpu_cache: bool = False,
 ) -> pd.DataFrame:
     """Leave-one-seizure-out CV for label_mode="detection": hold out one
     recording's windows at a time.
@@ -1426,6 +1428,15 @@ def leave_one_seizure_out_detection(
         unique_groups = unique_groups[: max(1, int(max_folds))]
     shared_cwt_cache = DISABLE_CWT_CACHE if disable_disk_cache else DiskCWTCache(default_cwt_cache_root())
     shared_dense_edge_cache_dir = None if disable_disk_cache else default_dense_edge_cache_root()
+    # 2026-09-18: opt-in GPU-resident dense-edge cache, shared across every
+    # fold's classifier instance below (same sharing convention as
+    # shared_cwt_cache/shared_dense_edge_cache_dir) -- a window's dense-
+    # edge tensor computed in fold 1 is then a hit in every later epoch of
+    # fold 1 AND in folds 2-6 too (~5/6 of any two folds' windows overlap
+    # under LOSO). See SparseEvidenceGNNClassifier's dense_edge_mem_cache
+    # docstring for why this is opt-in rather than defaulted on like
+    # shared_cwt_cache: a dense-edge entry is far larger than a CWT one.
+    shared_dense_edge_mem_cache = {} if dense_edge_gpu_cache else None
 
     rows = []
     for fold_i, group in enumerate(unique_groups):
@@ -1450,6 +1461,7 @@ def leave_one_seizure_out_detection(
             epochs=epochs,
             cwt_cache=shared_cwt_cache,
             dense_edge_cache_dir=shared_dense_edge_cache_dir,
+            dense_edge_mem_cache=shared_dense_edge_mem_cache,
             **clf_params,
         )
         clf.fit(X_train, y_train)
@@ -1520,6 +1532,7 @@ def leave_one_seizure_out_prediction(
     max_folds: int | None = None,
     skip_folds: set[int] | None = None,
     dump_window_scores: bool = False,
+    dense_edge_gpu_cache: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame | None]:
     """Leave-one-seizure-out CV for label_mode="prediction".
 
@@ -1609,6 +1622,8 @@ def leave_one_seizure_out_prediction(
     # docstring for the full rationale and the 2026-08-22 restoration note.
     shared_cwt_cache = DISABLE_CWT_CACHE if disable_disk_cache else DiskCWTCache(default_cwt_cache_root())
     shared_dense_edge_cache_dir = None if disable_disk_cache else default_dense_edge_cache_root()
+    # 2026-09-18: see leave_one_seizure_out_detection's matching comment.
+    shared_dense_edge_mem_cache = {} if dense_edge_gpu_cache else None
 
     subject_arr = metadata["subject"].to_numpy()
     run_arr = metadata["run"].to_numpy()
@@ -1715,6 +1730,7 @@ def leave_one_seizure_out_prediction(
             epochs=epochs,
             cwt_cache=shared_cwt_cache,
             dense_edge_cache_dir=shared_dense_edge_cache_dir,
+            dense_edge_mem_cache=shared_dense_edge_mem_cache,
             **clf_params,
         )
         clf.fit(X_train, y_train)
@@ -3238,6 +3254,45 @@ def _build_argument_parser() -> argparse.ArgumentParser:
             "--no-disable-disk-cache to force either way."
         ),
     )
+    parser.add_argument(
+        "--temporal-graph-edge-complex-native",
+        action="store_true",
+        help=(
+            "--pipeline=temporal_graph_mamba only, event_mode='temporal_graph': "
+            "replace temporal_edge_proj's usual 4-channel [coh, sinφ, cosφ, "
+            "significance] input with the CORRECTLY-normalized 2-channel "
+            "complex [re, im] = [sqrt(coherence)*cosφ, sqrt(coherence)*sinφ] "
+            "(algebraically Re(X)/sqrt(auto1*auto2), Im(X)/sqrt(auto1*auto2)), "
+            "run through a _ComplexLinear instead. Only 2 channels are ever "
+            "computed/cached -- see temporal_graph_edge_complex_native's "
+            "docstring in cwt_gnn_classifiers.py for the algebra and for why "
+            "this fixes a real amplitude bug in the older (never-completed) "
+            "temporal_graph_edge_complex flag. Unset (default): the usual "
+            "4-channel stack via temporal_edge_proj."
+        ),
+    )
+    parser.add_argument(
+        "--dense-edge-gpu-cache",
+        action="store_true",
+        help=(
+            "temporal_graph_mamba/dense_edge_* (event_mode in 'dense', "
+            "'temporal_graph') only, coherence_threshold_mode='fixed' only: "
+            "opt-in GPU-resident dense-edge cache, shared across every "
+            "LOSO fold in this run. Unlike --disable-disk-cache's disk-"
+            "backed cache (off by default on CUDA -- measured slower than "
+            "recompute there), this never touches disk: a hit is a plain "
+            "dict lookup on an already-GPU-resident tensor. Since the same "
+            "physical windows recur across every epoch of one fold AND "
+            "across 5/6 of any two LOSO folds, this turns the dominant "
+            "per-epoch dense-edge recompute cost into a one-time cost paid "
+            "once per unique window across the whole run. Off by default: "
+            "a dense-edge cache entry is far larger than a CWT cache "
+            "entry (full edge mesh x up to 4 channels), so this is a real "
+            "VRAM commitment (the whole dataset's entries accumulate over "
+            "the run) worth an explicit opt-in, not a default for every "
+            "dense-edge pipeline regardless of GPU size."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--shuffle-labels",
@@ -3715,6 +3770,7 @@ def main(args: argparse.Namespace) -> None:
             max_folds=args.max_folds,
             skip_folds=set(args.skip_folds) if args.skip_folds else None,
             dump_window_scores=args.dump_window_scores,
+            dense_edge_gpu_cache=args.dense_edge_gpu_cache,
         )
 
         # Separate output path (task 6, bullet 1): never pooled with
@@ -3785,6 +3841,7 @@ def main(args: argparse.Namespace) -> None:
             disable_disk_cache=args.disable_disk_cache,
             max_folds=args.max_folds,
             skip_folds=set(args.skip_folds) if args.skip_folds else None,
+            dense_edge_gpu_cache=args.dense_edge_gpu_cache,
         )
 
         # --shuffle-labels: same separate-subdirectory reasoning as the

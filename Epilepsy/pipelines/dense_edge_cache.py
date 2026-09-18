@@ -79,6 +79,7 @@ def dense_edge_cache_key(
     channel_subset_metric: str = "abs_cosine",
     dense_edge_source: str = "disk_cache",
     dense_edge_ch3: str = "significance",
+    temporal_graph_edge_complex_native: bool = False,
 ) -> str:
     """`raw_trial` is one trial's FULL [n_channels, n_time] raw (pre-
     normalization, post-channel-subset) window -- the whole trial in one
@@ -126,6 +127,12 @@ def dense_edge_cache_key(
     # so it must not collide with a "significance" entry for the same bytes.
     if str(dense_edge_ch3) != "significance":
         config_tuple = config_tuple + (f"ch3={dense_edge_ch3}",)
+    # Same discipline again (2026-09-18): this flag changes the stack from
+    # 4 channels [coh, sinφ, cosφ, sig] to 2 [re, im] entirely -- MUST not
+    # collide with a plain 4-channel entry for the same raw bytes, or the
+    # first two of those 4 channels get silently misread as [re, im].
+    if bool(temporal_graph_edge_complex_native):
+        config_tuple = config_tuple + ("edge_complex_native",)
     hasher.update(repr(config_tuple).encode("utf-8"))
     return hasher.hexdigest()
 

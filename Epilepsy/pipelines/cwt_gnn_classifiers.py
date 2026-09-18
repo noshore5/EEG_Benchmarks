@@ -3095,6 +3095,39 @@ class SparseEvidenceGNNCore(nn.Module):
         # edge representation -- no [Re, Im] flatten at the front. Cache
         # untouched. See _temporal_graph_node_states.
         temporal_graph_edge_complex: bool = False,
+        # 2026-09-18. temporal_graph event_mode only, mutually exclusive
+        # with temporal_graph_edge_complex (see __init__ validation).
+        # Fixes a real discrepancy in that flag: its docstring's formula
+        #   coh_f = (Re X_f + i Im X_f) / sqrt(|W_i|^2_f |W_j|^2_f + eps)
+        # needs the RAW cross-spectrum real/imag + both auto-spectra, but
+        # temporal_graph_edge_complex reconstructs from the already-
+        # cached (coherence, phase) pair using `coherence` itself as the
+        # amplitude -- coherence is |coh_f|^2 (magnitude-SQUARED), not
+        # |coh_f|, so that reconstruction's magnitude is coherence, not
+        # sqrt(coherence), silently over-weighting high-coherence edges'
+        # phase contribution relative to the documented formula.
+        #
+        # This flag computes the CORRECT normalized real/imag directly at
+        # precompute time -- sqrt(coherence)*cos(phase), sqrt(coherence)*
+        # sin(phase), which is algebraically exactly Re X/sqrt(auto1*auto2)
+        # and Im X/sqrt(auto1*auto2) (no need to keep the raw auto-spectra
+        # around separately; verify: coherence = (Re^2+Im^2)/(a1*a2), so
+        # sqrt(coherence)*cos(atan2(Im,Re)) = sqrt(Re^2+Im^2)/sqrt(a1*a2) *
+        # Re/sqrt(Re^2+Im^2) = Re/sqrt(a1*a2), and likewise for Im) -- AND,
+        # unlike temporal_graph_edge_complex, persists ONLY these 2
+        # channels to the dense-edge cache/dataset tensors instead of the
+        # usual 4 ([coh, sinφ, cosφ, significance]): significance and the
+        # separate phase/magnitude channels are never computed at all in
+        # this mode, since re/im alone already carry that information (a
+        # real 2-degrees-of-freedom encoding -- [coh, sinφ, cosφ] has a
+        # redundant one, since sin^2+cos^2=1). Halves the dense-edge
+        # cache's channel count (4 -> 2) on top of whatever dtype it's
+        # stored in. `_temporal_graph_node_states` consumes
+        # dense_edge_raw[:, 0] + i*dense_edge_raw[:, 1] directly as the
+        # complex input to the SAME _ComplexLinear temporal_graph_edge_
+        # complex uses -- no mag/phase reconstruction needed, since the
+        # cache already holds the normalized real/imag pair.
+        temporal_graph_edge_complex_native: bool = False,
         # 2026-08-31 (item 3). temporal_graph event_mode only. False
         # (default, bit-identical): temporal_edge_proj sees all 4 stack
         # components [coherence, sin(phase), cos(phase), significance].
@@ -3475,6 +3508,14 @@ class SparseEvidenceGNNCore(nn.Module):
         self.temporal_graph_mode = temporal_graph_mode
         self.temporal_graph_aggregate = temporal_graph_aggregate
         self.temporal_graph_edge_complex = bool(temporal_graph_edge_complex)
+        self.temporal_graph_edge_complex_native = bool(temporal_graph_edge_complex_native)
+        if self.temporal_graph_edge_complex and self.temporal_graph_edge_complex_native:
+            raise ValueError(
+                "temporal_graph_edge_complex and temporal_graph_edge_complex_native "
+                "are mutually exclusive -- both pick a complex-valued edge "
+                "representation, native's whole point is fixing the other's "
+                "amplitude bug, not stacking on top of it."
+            )
         self.temporal_graph_edge_drop_significance = bool(
             temporal_graph_edge_drop_significance
         )
@@ -3799,7 +3840,9 @@ class SparseEvidenceGNNCore(nn.Module):
         # _temporal_graph_node_states for the forward branch.
         self.temporal_edge_cproj = None
         self.temporal_edge_cproj_out = None
-        if self.event_mode == "temporal_graph" and self.temporal_graph_edge_complex:
+        if self.event_mode == "temporal_graph" and (
+            self.temporal_graph_edge_complex or self.temporal_graph_edge_complex_native
+        ):
             self.temporal_edge_cproj = _ComplexLinear(
                 self.nfreqs, self.temporal_graph_edge_dim
             )
@@ -4733,16 +4776,25 @@ class SparseEvidenceGNNCore(nn.Module):
                 stride=(1, 1),
             )
 
-            threshold = (
-                self.coherence_threshold
-                if coherence_threshold_override is None
-                else coherence_threshold_override
-            )
-            threshold_full = (
-                threshold if torch.is_tensor(threshold)
-                else torch.full_like(coh, float(threshold))
-            )
-            significance = (coh - threshold_full) / threshold_full.clamp_min(1e-6)
+            # temporal_graph_edge_complex_native: skip significance/threshold
+            # entirely -- this mode never uses it (see the flag's own
+            # docstring: re/im alone are a complete, non-redundant 2-DOF
+            # encoding, so there is nothing for a 3rd/4th channel to add),
+            # and computing it here would be pure waste (an elementwise op
+            # over the full [B,E,T,F] tensor for a value never stacked).
+            native_complex = bool(getattr(self, "temporal_graph_edge_complex_native", False))
+            significance = None
+            if not native_complex:
+                threshold = (
+                    self.coherence_threshold
+                    if coherence_threshold_override is None
+                    else coherence_threshold_override
+                )
+                threshold_full = (
+                    threshold if torch.is_tensor(threshold)
+                    else torch.full_like(coh, float(threshold))
+                )
+                significance = (coh - threshold_full) / threshold_full.clamp_min(1e-6)
 
             # dense_edge_cwt_predownsample > 1: w_real/w_imag arrived already
             # mean-pooled over T by this factor, so the cone lives on a grid
@@ -4759,16 +4811,32 @@ class SparseEvidenceGNNCore(nn.Module):
                 ).to(coh.dtype)
                 coh = coh * coi_valid
                 phase = phase * coi_valid
-                significance = significance * coi_valid
-                if getattr(self, "dense_edge_ch3", "significance") == "coi_mask":
-                    # item 3b: ch3 carries ONLY the cone boundary, not a
-                    # scaled coherence copy. (SparseEvidenceGNNClassifier
-                    # guarantees fixed mode + coi_enabled when this is set.)
-                    significance = coi_valid.expand_as(coh).clone()
+                if not native_complex:
+                    significance = significance * coi_valid
+                    if getattr(self, "dense_edge_ch3", "significance") == "coi_mask":
+                        # item 3b: ch3 carries ONLY the cone boundary, not a
+                        # scaled coherence copy. (SparseEvidenceGNNClassifier
+                        # guarantees fixed mode + coi_enabled when this is set.)
+                        significance = coi_valid.expand_as(coh).clone()
 
-            stacked = torch.stack(
-                [coh, torch.sin(phase), torch.cos(phase), significance], dim=1
-            )  # [B, 4, E, T, F]
+            if native_complex:
+                # sqrt(coherence) is the correct amplitude here, NOT
+                # coherence itself -- see temporal_graph_edge_complex_
+                # native's docstring for the algebraic derivation (this is
+                # exactly Re X/sqrt(auto1*auto2), Im X/sqrt(auto1*auto2),
+                # the normalized cross-spectrum's real/imag parts). coh was
+                # already clamped to [0, 1] by _smooth_wct_maps, so
+                # clamp_min(0) here is just a defensive floor before sqrt
+                # (guards float error taking a masked/COI-zeroed coh
+                # fractionally negative, not an expected real case).
+                sqrt_coh = torch.sqrt(coh.clamp_min(0.0))
+                re = sqrt_coh * torch.cos(phase)
+                im = sqrt_coh * torch.sin(phase)
+                stacked = torch.stack([re, im], dim=1)  # [B, 2, E, T, F]
+            else:
+                stacked = torch.stack(
+                    [coh, torch.sin(phase), torch.cos(phase), significance], dim=1
+                )  # [B, 4, E, T, F]
 
             if predown > 1:
                 # CWT already coarse -- neither time_averaged_graph nor
@@ -5369,19 +5437,33 @@ class SparseEvidenceGNNCore(nn.Module):
         edge_seq_in = folded.permute(0, 2, 3, 1)  # [B, E, T, 4F]
 
         if self.temporal_edge_cproj is not None:
-            # De-engineered edge representation (temporal_graph_edge_complex,
-            # 2026-08-30). `_build_dense_edge_input` stacks
-            # dense_edge_raw[:, 0..3] = [coherence magnitude, sin(phase),
-            # cos(phase), significance] (NOT re/im/auto). The complex
-            # wavelet coherence is exactly
-            #   coh = |coh| * (cos phi + i sin phi)  ==  ch0 * (ch2 + i ch1)
-            # -- magnitude already |.|<=1, COI/invalid cells already zeroed.
-            # Run a _ComplexLinear over the frequency axis; no [Re, Im]
-            # flatten at the front. (Channel 3, significance, is dropped --
-            # it is a function of the same magnitude vs the surrogate null.)
-            mag = dense_edge_raw[:, 0]                              # [B,E,T,F]
-            sin_p, cos_p = dense_edge_raw[:, 1], dense_edge_raw[:, 2]
-            coh = torch.complex(mag * cos_p, mag * sin_p)          # [B,E,T,F] complex
+            if getattr(self, "temporal_graph_edge_complex_native", False):
+                # 2026-09-18. `_build_dense_edge_input` already cached
+                # ONLY [re, im] = [sqrt(coh)*cosφ, sqrt(coh)*sinφ] -- the
+                # correctly-normalized cross-spectrum's real/imag parts
+                # (see temporal_graph_edge_complex_native's own docstring)
+                # -- so there is no mag/phase reconstruction to do here,
+                # unlike the temporal_graph_edge_complex branch below.
+                coh = torch.complex(dense_edge_raw[:, 0], dense_edge_raw[:, 1])  # [B,E,T,F]
+            else:
+                # De-engineered edge representation (temporal_graph_edge_complex,
+                # 2026-08-30). `_build_dense_edge_input` stacks
+                # dense_edge_raw[:, 0..3] = [coherence magnitude, sin(phase),
+                # cos(phase), significance] (NOT re/im/auto). NOTE this
+                # reconstruction's amplitude is `mag` = coherence itself,
+                # i.e. |coh_f|^2 (magnitude-SQUARED), not |coh_f| -- a real
+                # discrepancy from the mathematically correct normalized
+                # complex coherency (see temporal_graph_edge_complex_
+                # native above, which fixes this by caching the correct
+                # value directly rather than reconstructing it from a
+                # magnitude-squared quantity). Left as-is (not retroactively
+                # "fixed" here) since this flag's own recorded intent
+                # never ran to completion either way -- native is the
+                # replacement to use going forward, this branch stays for
+                # anyone who already has an in-flight comparison against it.
+                mag = dense_edge_raw[:, 0]                              # [B,E,T,F]
+                sin_p, cos_p = dense_edge_raw[:, 1], dense_edge_raw[:, 2]
+                coh = torch.complex(mag * cos_p, mag * sin_p)          # [B,E,T,F] complex
             z = self.temporal_edge_cproj(coh)                       # [B,E,T,edge_dim] complex
             z = torch.complex(F.gelu(z.real), F.gelu(z.imag))       # split-GELU
             z = torch.view_as_real(z).flatten(-2)                   # [B,E,T,2*edge_dim]
@@ -6049,6 +6131,10 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         # projection (_ComplexLinear) instead of the flattened real one;
         # see Core's matching docstring (2026-08-30).
         temporal_graph_edge_complex: bool = False,
+        # Forwarded to SparseEvidenceGNNCore -- the corrected (sqrt(coh),
+        # not coh, as amplitude), 2-channel-cached version of the above;
+        # see Core's matching docstring (2026-09-18).
+        temporal_graph_edge_complex_native: bool = False,
         # Forwarded to SparseEvidenceGNNCore -- drop the significance stack
         # component from temporal_edge_proj's input (item 3, 2026-08-31).
         temporal_graph_edge_drop_significance: bool = False,
@@ -6096,6 +6182,30 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         # "surrogate"/"surrogate_cluster", which calibrate against
         # raw_x_native directly.
         dense_edge_cache_dir: str | None = None,
+        # 2026-09-18. GPU-resident counterpart to dense_edge_cache_dir --
+        # None (default): disabled, zero behavior change. A dict: an
+        # in-memory {cache_key: GPU tensor} cache checked/populated the
+        # same way the disk cache is (same dense_edge_cache_key hashing),
+        # but never touches disk, so a hit costs one dict lookup instead
+        # of a numpy deserialize + CPU->GPU transfer -- strictly cheaper
+        # than BOTH the disk-cache path (measured slower than recompute on
+        # CUDA, see resolve_disable_disk_cache's docstring in
+        # run_pipelines.py) and recompute itself. Opt-in, not defaulted to
+        # a private {} the way cwt_cache is (see that param's own
+        # convention): a dense-edge entry is ~11-44x a CWT entry's size
+        # (full E-edge mesh x up to 4 channels vs. one channel), so
+        # accumulating one per trial for a whole fold's train set has a
+        # real VRAM cost worth an explicit opt-in, not an unconditional
+        # default for every dense-edge pipeline. Same convention as
+        # cwt_cache/dense_edge_cache_dir for cross-fold sharing: a caller
+        # (run_pipelines.py) can pass the SAME dict across every fold's
+        # classifier instance so a window seen in fold 1 is a hit in fold
+        # 2-6 too, not just across epochs within one fold's own fit().
+        # Restricted to coherence_threshold_mode="fixed", same as the disk
+        # cache and for the identical reason (see that cache's docstring):
+        # only "fixed" mode's dense-edge output is provably independent of
+        # which fold's normalization stats produced it.
+        dense_edge_mem_cache: dict | None = None,
         # 2026-08-31: dense-edge input provenance for event_mode in
         # ("dense", "temporal_graph"), coherence_threshold_mode="fixed".
         #   "disk_cache" (default): the [4, E, T, F] edge stack itself is the
@@ -6491,6 +6601,7 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         self.temporal_graph_mode = temporal_graph_mode
         self.temporal_graph_aggregate = temporal_graph_aggregate
         self.temporal_graph_edge_complex = temporal_graph_edge_complex
+        self.temporal_graph_edge_complex_native = temporal_graph_edge_complex_native
         self.temporal_graph_edge_drop_significance = (
             temporal_graph_edge_drop_significance
         )
@@ -6569,6 +6680,7 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         self.surrogate_cache_dir = surrogate_cache_dir
         self.surrogate_cache_enabled = surrogate_cache_enabled
         self.dense_edge_cache_dir = dense_edge_cache_dir
+        self.dense_edge_mem_cache = dense_edge_mem_cache
         self.dense_edge_source = str(dense_edge_source)
         if self.dense_edge_source not in ("disk_cache", "recompute"):
             raise ValueError(
@@ -6695,6 +6807,19 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
             channel_subset_metric=self.channel_subset_metric,
             dense_edge_source=getattr(self, "dense_edge_source", "disk_cache"),
             dense_edge_ch3=getattr(self, "dense_edge_ch3", "significance"),
+            # 2026-09-18: temporal_graph_edge_complex_native changes what
+            # _build_dense_edge_input actually PERSISTS (2 channels
+            # [re, im] instead of the usual 4 [coh, sinφ, cosφ, sig]) --
+            # unlike temporal_graph_edge_drop_significance, which only
+            # slices the model's INPUT after an unchanged 4-channel cache
+            # load, this flag must be part of the key or a stale 4-channel
+            # cache entry gets silently reused as if its first two
+            # channels were [re, im] (wrong values, no crash -- caught
+            # locally 2026-09-18 via a suspicious 100% cache-hit rate on
+            # what should have been this representation's first-ever run).
+            temporal_graph_edge_complex_native=getattr(
+                self, "temporal_graph_edge_complex_native", False
+            ),
         )
 
     def _dense_edge_fat_cache_kwargs(self, n_channels: int) -> dict:
@@ -7853,9 +7978,15 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         # (~6.6ms/trial, see save_dense_edge's docstring); every later
         # epoch's repeat windows become disk reads instead of WCT recompute.
         cache_dir = None
+        mem_cache = None
         resolved_keys = cache_keys
-        if mode_label == "fixed" and self.dense_edge_cache_dir is not None:
+        use_disk_cache = mode_label == "fixed" and self.dense_edge_cache_dir is not None
+        use_mem_cache = mode_label == "fixed" and self.dense_edge_mem_cache is not None
+        if use_disk_cache:
             cache_dir = Path(self.dense_edge_cache_dir)
+        if use_mem_cache:
+            mem_cache = self.dense_edge_mem_cache
+        if use_disk_cache or use_mem_cache:
             # raw_x_native/raw_x are already statically channel-subset
             # (self.channel_subset) by the time they reach here -- the
             # dynamic channel_subset_k path does NOT slice them (full C
@@ -7875,15 +8006,39 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
 
         fat_kw = self._dense_edge_fat_cache_kwargs(int(n_channels))
 
-        # results[i] is filled in from disk (cache hit) or computed below
-        # (cache miss, or caching disabled entirely -- every trial is then a
-        # "miss" and this reduces to the original always-compute behavior).
+        # results[i] is filled in from the in-memory cache (checked first --
+        # cheapest, no disk/CPU-GPU round trip), disk (cache hit), or
+        # computed below (cache miss, or caching disabled entirely -- every
+        # trial is then a "miss" and this reduces to the original
+        # always-compute behavior).
         results: list[torch.Tensor | None] = [None] * n_samples
         miss_indices = list(range(n_samples))
-        if resolved_keys is not None:
+        n_mem_hits = 0
+        if use_mem_cache:
+            still_missing = []
+            for i, key in enumerate(resolved_keys):
+                cached = mem_cache.get(str(key))
+                if cached is not None:
+                    results[i] = cached.to(fixed_torch_device) if cached.device != fixed_torch_device else cached
+                    n_mem_hits += 1
+                else:
+                    still_missing.append(i)
+            miss_indices = still_missing
+            if self.verbose >= 1 and n_samples > 0:
+                print(
+                    f"[dense-edge mem cache] {n_mem_hits}/{n_samples} trials reused from VRAM "
+                    f"({100 * n_mem_hits / n_samples:.1f}%)"
+                )
+        if use_disk_cache:
+            # Only re-check disk for what the (possibly-empty) mem-cache
+            # pass above left missing -- not every sample -- so the two
+            # caches compose instead of the disk pass redundantly
+            # rescanning mem-cache hits.
+            checked = miss_indices
             miss_indices = []
             n_hits = 0
-            for i, key in enumerate(resolved_keys):
+            for i in checked:
+                key = resolved_keys[i]
                 cached = load_dense_edge(cache_dir, str(key), **fat_kw)
                 if cached is not None:
                     # load_dense_edge always returns a CPU tensor (disk-
@@ -7895,12 +8050,14 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
                         cached = cached.to(fixed_torch_device)
                     results[i] = cached
                     n_hits += 1
+                    if use_mem_cache:
+                        mem_cache[str(key)] = cached.to(fixed_torch_device)
                 else:
                     miss_indices.append(i)
-            if self.verbose >= 1 and n_samples > 0:
+            if self.verbose >= 1 and checked:
                 print(
-                    f"[dense-edge cache] {n_hits}/{n_samples} trials reused from disk "
-                    f"({100 * n_hits / n_samples:.1f}%)"
+                    f"[dense-edge cache] {n_hits}/{len(checked)} trials reused from disk "
+                    f"({100 * n_hits / len(checked):.1f}%)"
                 )
 
         # Same memory-vs-throughput cap as _precompute_sparse_events above
@@ -8074,6 +8231,11 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
                 t3 = time.perf_counter()
                 t_compute += t3 - t2
 
+            # Captured before the possible .cpu() move below, so a mem-cache
+            # store always holds the GPU-resident value regardless of
+            # keep_on_device (results/disk-save still follow the existing
+            # keep_on_device convention unchanged).
+            dense_gpu = dense if use_mem_cache else None
             if not keep_on_device:
                 dense = dense.cpu()
 
@@ -8084,6 +8246,8 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
                 results[i] = dense[j]
                 if cache_dir is not None:
                     save_dense_edge(cache_dir, str(resolved_keys[i]), dense[j])
+                if use_mem_cache:
+                    mem_cache[str(resolved_keys[i])] = dense_gpu[j].detach()
 
         if profile and chunk_starts:
             n_chunks = len(chunk_starts)
@@ -8172,6 +8336,7 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
             temporal_graph_mode=self.temporal_graph_mode,
             temporal_graph_aggregate=self.temporal_graph_aggregate,
             temporal_graph_edge_complex=self.temporal_graph_edge_complex,
+            temporal_graph_edge_complex_native=self.temporal_graph_edge_complex_native,
             temporal_graph_edge_drop_significance=(
                 self.temporal_graph_edge_drop_significance
             ),
