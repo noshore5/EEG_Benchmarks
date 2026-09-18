@@ -816,6 +816,8 @@ def _apply_dense_family_cli_overrides(clf_params: dict, args: argparse.Namespace
     clf_params["channel_subset_k"] = args.channel_subset_k
     clf_params["channel_subset_metric"] = args.channel_subset_metric
     clf_params["temporal_graph_edge_complex_native"] = args.temporal_graph_edge_complex_native
+    if args.nfreqs is not None:
+        clf_params["nfreqs"] = args.nfreqs
     if args.verbose is not None:
         clf_params["verbose"] = args.verbose
     if args.validation_split is not None:
@@ -3265,6 +3267,22 @@ def _build_argument_parser() -> argparse.ArgumentParser:
             "faster for 30s prediction tensors on this Windows box and the "
             "2026-08-21 pod), enabled on MPS/CPU. Pass --disable-disk-cache or "
             "--no-disable-disk-cache to force either way."
+        ),
+    )
+    parser.add_argument(
+        "--nfreqs",
+        type=int,
+        default=None,
+        help=(
+            "Dense-family pipelines only: override _SHARED_ARCH_PARAMS's "
+            "nfreqs=8 (frequency-scale resolution of the CWT/dense-edge "
+            "stack). CWT and dense-edge cache sizes (disk or, with "
+            "--dense-edge-gpu-cache, VRAM-resident) scale LINEARLY in this. "
+            "8 was chosen 2026-08-16 for a disk-cache budget that no "
+            "longer applies once --dense-edge-gpu-cache-gb is sized for "
+            "the new nfreqs (see DenseEdgeMemCache's docstring in "
+            "dense_edge_cache.py for the graceful-degradation behavior if "
+            "the working set doesn't fully fit). Unset: leaves 8 alone."
         ),
     )
     parser.add_argument(
