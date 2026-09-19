@@ -1982,8 +1982,17 @@ def leave_one_seizure_out_prediction(
         # reachable through reference cycles until the cyclic GC happens to
         # run -- on a 16GB machine the footprint climbed monotonically
         # across the LOSO loop (fold 1 ~50s/epoch, fold 4 ~4000s/epoch as
-        # the machine started swapping). Explicit del + collect + MPS pool
-        # release keeps the working set flat fold-to-fold.
+        # the machine started swapping). Explicit del + collect + MPS/CUDA
+        # pool release keeps the working set flat fold-to-fold.
+        # 2026-09-19: this block only ever called torch.mps.empty_cache() --
+        # CUDA was never covered, so del+gc.collect() only returned fold N's
+        # tensors to PyTorch's own caching allocator (reusable in-process,
+        # but not released/defragmented), and a later fold's differently-
+        # shaped allocations couldn't always reuse those blocks -- allocated
+        # memory crept up fold-to-fold until a late fold OOM'd on a 22GB
+        # A10G (e.g. seed17: 19.23GB allocated at crash, not just
+        # fragmentation). torch.cuda.empty_cache() actually releases cached
+        # blocks back for reuse/defragmentation, mirroring the MPS branch.
         del clf, proba, y_score, y_pred, y_pred_smoothed
         del X_train, y_train, X_test, y_test, meta_test
         _gc.collect()
@@ -1992,6 +2001,8 @@ def leave_one_seizure_out_prediction(
 
             if _torch.backends.mps.is_available():
                 _torch.mps.empty_cache()
+            if _torch.cuda.is_available():
+                _torch.cuda.empty_cache()
         except Exception:
             pass
 
