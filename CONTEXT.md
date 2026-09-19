@@ -19,6 +19,14 @@ driving remotely from a local Mac / Grok shell (the Mac has admin creds).
 Skip it if you're only editing code / running tests; nothing in the
 pipelines depends on it yet.
 
+**`LAUNCH_CHECKLIST.md`** (repo root) -- the current best-known-good GPU
+spot launch command (flags, commit, required env) for the active
+experiment. Copy from it, don't hand-assemble a launch command from
+memory or from an old session's flags -- see its own evidence trail for
+why (nfreqs=16 burned a full night 2026-09-19 re-deriving fixes that were
+already known). Update it once a run under a new commit/config is
+verified good.
+
 **2026-09-17 (most recent):** GPU spot IS working now (the "quota 0"
 notes below and in `AWS_INFRA.md`'s header are stale) via
 `scripts/eeg-run-spot.sh` on branch `spot-tgm-nosig-checkpoint` (NOT

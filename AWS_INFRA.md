@@ -1,5 +1,13 @@
 # AWS infrastructure
 
+**`LAUNCH_CHECKLIST.md`** (repo root) -- the current best-known-good GPU
+spot launch command for `temporal_graph_mamba`/nfreqs=16 (flags, commit,
+required env, gotchas already paid for). Check it before hand-assembling
+a launch command from scratch -- this file's per-launch history below is
+useful case-by-case context, but the checklist is what to actually copy.
+Update the checklist (not just append a note here) once a run under a
+new commit/config is verified good.
+
 **Who this is for:** any agent shell that touches the shared AWS account --
 whether it runs *on* an ephemeral AWS box (an `eeg-run` worker, a GPU box)
 or drives the cloud remotely from a local Mac / Grok / cloud-Claude shell.
