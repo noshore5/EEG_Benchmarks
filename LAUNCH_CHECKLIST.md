@@ -1,12 +1,11 @@
 ## CURRENT BEST LAUNCH COMMAND (overwrite this block, don't append below it — last updated 2026-09-19)
 
 branch: main
-commit: 7e010af (has the CUDA per-fold empty_cache fix below — do not
-  launch nfreqs=16 on an older commit, it will OOM in a later fold)
+commit: 7e010af (has the CUDA per-fold empty_cache fix — real but NOT what's
+  currently failing; see eval-time OOM finding below)
 verified-good full-6-fold run: NOT YET CONFIRMED — tgm-nfreqs16-native-leakfix-seed42
-  is the first attempt with all fixes below combined, currently in flight.
-  Update this line (and the commit above, if it moves) once a run actually
-  completes all 6 folds and lands a commit on origin/main.
+  OOM'd inside fold 1's OWN eval step (never reached fold 2). Root cause
+  found 2026-09-19 below. Next attempt must lower --dense-edge-gpu-cache-gb.
 
 scripts/eeg-run-spot.sh \
   --name <run-name> \
@@ -14,7 +13,7 @@ scripts/eeg-run-spot.sh \
   --docker-image ghcr.io/noshore5/eeg_benchmarks-mamba:latest \
   --cmd 'python Epilepsy/run_pipelines.py --pipeline temporal_graph_mamba \
     --label-mode prediction --device cuda --seed 42 --nfreqs 16 \
-    --dense-edge-gpu-cache \
+    --dense-edge-gpu-cache --dense-edge-gpu-cache-gb 10 \
     --temporal-graph-edge-complex-native \
     --checkpoint-dir /root/checkpoint' \
   --session-note '<what changed since last verified run>'
@@ -23,15 +22,35 @@ Known-required flags for nfreqs=16 (all confirmed present on main as of
 this commit — recheck with --help before trusting this list):
   --temporal-graph-edge-complex-native   (2ch cache, ~half footprint vs the old 4ch stack)
   --checkpoint-dir /root/checkpoint      (fold-level resume on spot reclaim)
-  --dense-edge-gpu-cache                 (DO NOT pass --dense-edge-gpu-cache-gb --
-    the code default of 15.0 is close to the real working-set size and is
-    what let seed10/15/17/18/20 reach 100% cache reuse in fold 1 at
-    ~3.45-3.48s/epoch. Explicit overrides of 6 or 8 tried 2026-09-19 both
-    UNDER-sized it and caused cache churn back to 0% reuse -- don't repeat
-    that mistake. If a future run OOMs from the cache itself specifically
-    -- distinguishable from the fold-to-fold leak below via the
-    [dense-edge mem cache] WARNING about oversized_rejections -- retune
-    from the default, don't just guess smaller.)
+  --dense-edge-gpu-cache --dense-edge-gpu-cache-gb 10   (2026-09-19 REVISION:
+    the code default of 15.0 gets train-time cache reuse to 100% at
+    ~3.45s/epoch, BUT leaves no headroom for eval-time dense-edge computation
+    -- see the eval-boundary OOM finding directly below. 10GB is an
+    unverified first guess at leaving ~5-6GB headroom for eval; watch the
+    next run's `[eval boundary] cuda allocated=` line and adjust. Do NOT
+    go back to explicit 6 or 8 either -- those were tried 2026-09-19 BEFORE
+    native-complex-edges was added to the same launch and caused train-time
+    cache churn back to 0% reuse; not directly comparable to this new
+    eval-headroom problem, but still too small for good train-time hit rate.)
+
+EVAL-TIME OOM finding (2026-09-19, tgm-nfreqs16-native-leakfix-seed42,
+instance i-0afdc4455758fbdcd, g5.xlarge): the run did NOT hit the
+cross-fold leak below -- it never got past fold 1. Training completed all
+20 epochs cleanly (3.45s/epoch, 100% cache hit rate throughout). At the
+train->eval boundary:
+  [eval boundary] cuda allocated=13.48GB reserved=23.18GB mem_cache_nbytes=13.46GB
+i.e. the dense-edge cache was already sitting near its 15GB budget from
+training. Eval uses a different (held-out) window set than training, so
+it's a cache MISS -- `[dense-edge mem cache] 0/32 trials reused (0.0%)` --
+and computing fresh dense-edge tensors for the test set on top of an
+already-13.46GB-full cache pushed allocated memory to 21.88GB and OOM'd
+(`Tried to allocate 476.00 MiB` on the 22.06GB card). This is a genuinely
+different failure mode from the cross-fold leak below: the 15GB default
+cache budget doesn't leave enough VRAM headroom for eval-time dense-edge
+compute on uncached windows. Fix direction: lower --dense-edge-gpu-cache-gb
+to leave headroom (untested guess: 10GB), or evict/shrink the cache before
+eval starts, or chunk eval's dense-edge computation smaller. NOT a
+leak/accumulation issue -- don't confuse with the empty_cache fix below.
 
 Cross-fold memory leak fix (commit 7e010af, 2026-09-19): the per-fold
 teardown in leave_one_seizure_out_prediction called torch.mps.empty_cache()
