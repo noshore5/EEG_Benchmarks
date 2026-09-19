@@ -2005,6 +2005,21 @@ def leave_one_seizure_out_prediction(
         # blocks back for reuse/defragmentation, mirroring the MPS branch.
         del clf, proba, y_score, y_pred, y_pred_smoothed
         del X_train, y_train, X_test, y_test, meta_test
+        # 2026-09-19: the pre-eval clear() above stops FOLD's training
+        # entries from starving eval of headroom, but predict_proba's own
+        # dense-edge computation writes straight back into this same shared
+        # cache (mem-cache reads/writes aren't train/eval-aware -- see
+        # _precompute_dense_edge_inputs) -- so by the time eval finishes the
+        # cache is full again, just with this fold's eval-set entries
+        # instead of its training entries. Those are equally dead weight to
+        # the NEXT fold (disjoint windows again), and were the actual cause
+        # of evalclear-seed42 OOM'ing early in fold 2's training (20.82GB
+        # allocated before even finishing one dense-edge chunk -- consistent
+        # with cache sitting near its 15GB cap from eval leftovers, on top
+        # of fold 2's own model/optimizer/batch overhead). Clear here too so
+        # every fold starts training from a genuinely empty cache.
+        if shared_dense_edge_mem_cache is not None:
+            shared_dense_edge_mem_cache.clear()
         _gc.collect()
         try:
             import torch as _torch
