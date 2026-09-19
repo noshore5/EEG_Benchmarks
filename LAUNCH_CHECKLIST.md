@@ -1,13 +1,20 @@
 ## CURRENT BEST LAUNCH COMMAND (overwrite this block, don't append below it — last updated 2026-09-19)
 
 branch: main
-commit: a3a776c (has BOTH the CUDA per-fold empty_cache fix AND the
-  eval-boundary cache-clear fix below — do not launch nfreqs=16 on
-  anything older, both are load-bearing for getting past fold 1)
-verified-good full-6-fold run: NOT YET CONFIRMED — tgm-nfreqs16-native-leakfix-seed42
-  OOM'd inside fold 1's OWN eval step (never reached fold 2). Root cause
-  found and fixed 2026-09-19 (see below). This is the first launch with
-  the fix; update this line once a run actually completes all 6 folds.
+commit: bf4339f (has the CUDA per-fold empty_cache fix, the pre-eval
+  cache-clear fix, AND the post-eval cache-clear fix below — do not launch
+  nfreqs=16 on anything older, all three are load-bearing)
+verified-good full-6-fold run: NOT YET CONFIRMED.
+  tgm-nfreqs16-native-leakfix-seed42 OOM'd inside fold 1's OWN eval step.
+  tgm-nfreqs16-evalclear-seed42 (commit a3a776c, pre-eval clear only) got
+  PAST fold 1's eval cleanly (eval boundary: 0.02GB allocated -- the fix
+  worked) but then OOM'd early in fold 2's training (20.82GB allocated
+  before finishing one dense-edge chunk) -- predict_proba's own dense-edge
+  writes had refilled the cache with fold 1's eval entries by the time
+  eval returned, equally dead weight to fold 2. Fixed at bf4339f by
+  clearing again in the post-eval teardown too. This is the first launch
+  with all three fixes combined; update this line once a run actually
+  completes all 6 folds.
 
 scripts/eeg-run-spot.sh \
   --name <run-name> \
