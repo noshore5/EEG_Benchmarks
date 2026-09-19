@@ -121,6 +121,7 @@ from __future__ import annotations
 
 import argparse
 import gc as _gc
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -545,6 +546,25 @@ PREDICTION_TEMPORAL_GRAPH_MAMBA_PARAMS: dict[str, object] = dict(
     # own weight_decay=1e-4, temporal_graph_mamba_dropout=0.0) until
     # decision-threshold calibration (the actually-promising lever) is
     # implemented instead.
+    #
+    # 2026-09-15 (user directive, repeated over several sessions): drop the
+    # 4th dense-edge channel PERMANENTLY. In coherence_threshold_mode=
+    # "fixed" (what this config uses -- always has), "significance" is
+    # `(coh - 0.90) / 0.90`, an affine rescale of channel 0 with the SAME
+    # threshold for every edge/frequency/window -- not a real significance
+    # test (that's only meaningful under coherence_threshold_mode=
+    # "surrogate", not used here). temporal_edge_proj was getting a
+    # deterministic linear function of its own ch0 input relabeled as a 4th
+    # "feature". item-3's 2026-08-31 ablation (NEGATIVES.md) found dropping
+    # it cost ~0.10 mean AP (0.542 vs pre_repro's 0.644) -- that number
+    # stands, but the user has asked repeatedly for this gone regardless of
+    # the accuracy tradeoff, on correctness grounds (it isn't what its name
+    # claims), so it's flipped on here rather than left an opt-in flag
+    # nobody was actually setting. Only affects event_mode="temporal_graph"
+    # (_edge_proj_comps: 3 vs 4, see cwt_gnn_classifiers.py ~3704) --
+    # 3/4/GRU/plain-dense_edge configs are untouched. Changes this
+    # pipeline's dense-edge cache key -- next run rebuilds it.
+    temporal_graph_edge_drop_significance=True,
 )
 
 # --pipeline=continuous_cwt_mamba -- the continuous-cwt-mamba paradigm's
@@ -1545,6 +1565,7 @@ def leave_one_seizure_out_prediction(
     dump_window_scores: bool = False,
     dense_edge_gpu_cache: bool = False,
     dense_edge_gpu_cache_gb: float = 15.0,
+    checkpoint_dir: "Path | None" = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame | None]:
     """Leave-one-seizure-out CV for label_mode="prediction".
 
@@ -1609,6 +1630,26 @@ def leave_one_seizure_out_prediction(
         checks). No effect on training or on the two existing return
         values -- pure additional logging of already-computed y_score/
         y_pred/y_pred_smoothed.
+
+    checkpoint_dir : Path | None (default None)
+        2026-09-15, added for spot-interruptible runs (scripts/eeg-run-spot.sh
+        has no per-fold resume of its own -- a spot reclaim mid-run loses
+        everything unless the run itself checkpoints). If given:
+          - any fold already present in `<checkpoint_dir>/fold_rows.csv`
+            (by its `fold_i` column) is auto-skipped, merged with the
+            caller's own `skip_folds`, and its row is preloaded so the
+            final returned DataFrame still includes it.
+          - after EVERY fold finishes, the accumulated fold_rows /
+            per_seizure_rows are written to `<checkpoint_dir>/{fold_rows,
+            per_seizure_rows}.csv` (atomic tmp-file + os.replace, so a kill
+            mid-write can't corrupt the checkpoint). A run that dies after
+            fold 4/6 leaves folds 0-3 on disk; rerunning the exact same
+            command with the same checkpoint_dir picks up at fold 4, not 0.
+          - fold_i is written into every row (previously absent) so this
+            resume logic (and any other by-fold post-hoc analysis) has a
+            stable key independent of row order.
+        No effect on any other caller -- `main()` only passes this when
+        `--checkpoint-dir` is given on the CLI.
     """
     if "seizure_id" not in metadata.columns:
         raise ValueError(
@@ -1700,6 +1741,36 @@ def leave_one_seizure_out_prediction(
     fold_rows = []
     per_seizure_rows = []
     window_score_rows = [] if dump_window_scores else None
+
+    ckpt_fold_csv = ckpt_seizure_csv = None
+    if checkpoint_dir is not None:
+        checkpoint_dir = Path(checkpoint_dir)
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        ckpt_fold_csv = checkpoint_dir / "fold_rows.csv"
+        ckpt_seizure_csv = checkpoint_dir / "per_seizure_rows.csv"
+        if ckpt_fold_csv.exists():
+            prev_folds = pd.read_csv(ckpt_fold_csv)
+            prev_seizures = pd.read_csv(ckpt_seizure_csv) if ckpt_seizure_csv.exists() else pd.DataFrame()
+            done = set(int(v) for v in prev_folds["fold_i"].tolist())
+            print(f"  [checkpoint] {checkpoint_dir} has {len(done)} fold(s) already done: "
+                  f"{sorted(done)} -- resuming, not redoing them")
+            fold_rows = prev_folds.to_dict("records")
+            per_seizure_rows = prev_seizures.to_dict("records")
+            skip_folds = (skip_folds or set()) | done
+
+    def _write_checkpoint() -> None:
+        if ckpt_fold_csv is None:
+            return
+        # tmp-file + os.replace: an mid-write kill (spot SIGTERM/poweroff)
+        # can't leave a truncated/corrupt checkpoint the next launch would
+        # then trust.
+        tmp = ckpt_fold_csv.with_suffix(".tmp")
+        pd.DataFrame(fold_rows).to_csv(tmp, index=False)
+        os.replace(tmp, ckpt_fold_csv)
+        tmp2 = ckpt_seizure_csv.with_suffix(".tmp")
+        pd.DataFrame(per_seizure_rows).to_csv(tmp2, index=False)
+        os.replace(tmp2, ckpt_seizure_csv)
+
     for fold_i, seizure in enumerate(unique_seizures):
         subject, run, seizure_id = seizure["subject"], seizure["run"], seizure["seizure_id"]
         onset, offset = seizure["seizure_onset"], seizure["seizure_offset"]
@@ -1867,6 +1938,7 @@ def leave_one_seizure_out_prediction(
         row["hit_smoothed"] = smoothed_events["hit"]
         row["n_false_alarms_smoothed"] = smoothed_events["n_false_alarms"]
         row["false_alarms_per_hour_smoothed"] = smoothed_events["false_alarms_per_hour"]
+        row["fold_i"] = fold_i
         fold_rows.append(row)
 
         # --- per-seizure outcome log (task: cheap now, expensive to
@@ -1894,6 +1966,7 @@ def leave_one_seizure_out_prediction(
                 "false_alarms_per_hour_smoothed": smoothed_events["false_alarms_per_hour"],
             }
         )
+        _write_checkpoint()
 
         print(
             f"  seizure {seizure_id}: n_test={row['n_test']} preictal={n_preictal}  "
@@ -2942,6 +3015,20 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--checkpoint-dir", type=str, default=None, metavar="DIR",
+        help=(
+            "label_mode=prediction only (leave_one_seizure_out_prediction): after "
+            "each fold, write its accumulated results to <DIR>/{fold_rows,"
+            "per_seizure_rows}.csv; on the NEXT run with the same --checkpoint-dir, "
+            "folds already present there are auto-skipped (merged with "
+            "--skip-folds) and their rows are preloaded into the final output. "
+            "Built for spot-interruptible runs (scripts/eeg-run-spot.sh) -- a "
+            "reclaim mid-run loses progress only back to the last completed fold, "
+            "not the whole run; just rerun the identical command. Unset (default): "
+            "no checkpointing, original all-or-nothing behavior."
+        ),
+    )
+    parser.add_argument(
         "--dump-window-scores", action="store_true",
         help=(
             "label_mode=prediction (dense-family pipelines: dense_edge*, "
@@ -3837,6 +3924,7 @@ def main(args: argparse.Namespace) -> None:
             dump_window_scores=args.dump_window_scores,
             dense_edge_gpu_cache=args.dense_edge_gpu_cache,
             dense_edge_gpu_cache_gb=args.dense_edge_gpu_cache_gb,
+            checkpoint_dir=Path(args.checkpoint_dir) if args.checkpoint_dir else None,
         )
 
         # Separate output path (task 6, bullet 1): never pooled with
