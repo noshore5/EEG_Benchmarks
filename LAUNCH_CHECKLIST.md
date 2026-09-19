@@ -1,20 +1,25 @@
 ## CURRENT BEST LAUNCH COMMAND (overwrite this block, don't append below it — last updated 2026-09-19)
 
 branch: main
-commit: bf4339f (has the CUDA per-fold empty_cache fix, the pre-eval
-  cache-clear fix, AND the post-eval cache-clear fix below — do not launch
-  nfreqs=16 on anything older, all three are load-bearing)
+commit: de837d0 (CUDA per-fold empty_cache, pre-eval cache-clear, post-eval
+  cache-clear, and a post-teardown diagnostic print — all load-bearing)
 verified-good full-6-fold run: NOT YET CONFIRMED.
   tgm-nfreqs16-native-leakfix-seed42 OOM'd inside fold 1's OWN eval step.
-  tgm-nfreqs16-evalclear-seed42 (commit a3a776c, pre-eval clear only) got
-  PAST fold 1's eval cleanly (eval boundary: 0.02GB allocated -- the fix
-  worked) but then OOM'd early in fold 2's training (20.82GB allocated
-  before finishing one dense-edge chunk) -- predict_proba's own dense-edge
-  writes had refilled the cache with fold 1's eval entries by the time
-  eval returned, equally dead weight to fold 2. Fixed at bf4339f by
-  clearing again in the post-eval teardown too. This is the first launch
-  with all three fixes combined; update this line once a run actually
-  completes all 6 folds.
+  tgm-nfreqs16-evalclear-seed42 (a3a776c, pre-eval clear only) got past
+  fold 1's eval cleanly but OOM'd early in fold 2's training -- fixed at
+  bf4339f (also clear post-eval).
+  tgm-nfreqs16-evalclear2-seed42 (bf4339f) and tgm-nfreqs16-diag-seed42
+  (de837d0) BOTH got through folds 1-3 cleanly then died entering fold 4's
+  training, at nearly identical numbers both times (20.75-20.82GB
+  allocated, crash mid dense-edge chunk-build). The diag run's new
+  [post-fold teardown] print PROVES this is NOT a cross-fold leak: every
+  teardown read allocated=0.02GB/reserved=0.04GB, flat across all 3
+  completed folds -- fully clean. So it's a real, reproducible per-fold
+  peak (whatever fold 4's own cache-build burst needs) that happens to sit
+  just over the ceiling with cache-gb=15 -- not carryover. Next attempt:
+  --dense-edge-gpu-cache-gb 12, unverified, chosen for headroom now that
+  teardown is confirmed to cost nothing extra (every fold already rebuilds
+  from empty regardless of budget size, since we clear twice per fold).
 
 scripts/eeg-run-spot.sh \
   --name <run-name> \
@@ -22,7 +27,7 @@ scripts/eeg-run-spot.sh \
   --docker-image ghcr.io/noshore5/eeg_benchmarks-mamba:latest \
   --cmd 'python Epilepsy/run_pipelines.py --pipeline temporal_graph_mamba \
     --label-mode prediction --device cuda --seed 42 --nfreqs 16 \
-    --dense-edge-gpu-cache \
+    --dense-edge-gpu-cache --dense-edge-gpu-cache-gb 12 \
     --temporal-graph-edge-complex-native \
     --checkpoint-dir /root/checkpoint' \
   --session-note '<what changed since last verified run>'
