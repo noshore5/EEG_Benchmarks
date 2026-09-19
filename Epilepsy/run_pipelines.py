@@ -2028,6 +2028,22 @@ def leave_one_seizure_out_prediction(
                 _torch.mps.empty_cache()
             if _torch.cuda.is_available():
                 _torch.cuda.empty_cache()
+                # 2026-09-19 diagnostic (evalclear2-seed42: died entering
+                # fold 4's training at 20.75GB allocated despite both mem
+                # caches confirmed at 0.02GB right before this teardown ran
+                # -- something survives del+gc.collect()+empty_cache() that
+                # isn't the dense-edge cache). Print what's actually left
+                # resident right after teardown so the NEXT run's log shows
+                # whether this is a genuine per-fold climb (allocated grows
+                # fold-over-fold here) or a within-fold-only spike (stays
+                # flat here, so the OOM is from fold N+1's own peak, not
+                # carryover) -- don't guess the mechanism without this.
+                print(
+                    f"[post-fold teardown] cuda allocated="
+                    f"{_torch.cuda.memory_allocated()/1e9:.2f}GB "
+                    f"reserved={_torch.cuda.memory_reserved()/1e9:.2f}GB",
+                    flush=True,
+                )
         except Exception:
             pass
 
