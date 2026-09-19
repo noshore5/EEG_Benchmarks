@@ -139,6 +139,24 @@ class DenseEdgeMemCache:
     def nbytes(self) -> int:
         return self._nbytes
 
+    def clear(self) -> None:
+        """Drop every resident tensor and free its VRAM.
+
+        2026-09-19: added for the train->eval boundary in
+        leave_one_seizure_out_prediction. Eval windows are disjoint from
+        the training windows that filled this cache during fit(), so
+        every entry is guaranteed-dead weight from eval's perspective --
+        cache misses 100% of the time (see the eval-boundary OOM: cache
+        sat at 13.46GB from training, 0/32 reused during eval, and
+        computing eval's own dense-edge tensors on top of that pushed a
+        22GB card over the edge). Clearing here trades away nothing
+        (training for this fold is already done) to give eval its own
+        full budget of headroom instead of splitting it with dead
+        training-window entries.
+        """
+        self._store.clear()
+        self._nbytes = 0
+
 
 def default_dense_edge_cache_root() -> Path:
     """Same env-var precedence as cwt_window_cache.default_cwt_cache_root

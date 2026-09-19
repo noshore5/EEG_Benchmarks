@@ -1820,6 +1820,15 @@ def leave_one_seizure_out_prediction(
             **clf_params,
         )
         clf.fit(X_train, y_train)
+        # 2026-09-19 fix (eval-boundary OOM: tgm-nfreqs16-native-leakfix-seed42
+        # OOM'd here with cache sitting at 13.46GB from training, 0/32 reused
+        # during eval -- the held-out fold's windows are disjoint from
+        # training's, so training's cache entries are guaranteed dead weight
+        # by the time we reach eval). Clear it before predict_proba so eval
+        # gets the whole --dense-edge-gpu-cache-gb budget as headroom instead
+        # of splitting it with entries eval can never hit.
+        if shared_dense_edge_mem_cache is not None:
+            shared_dense_edge_mem_cache.clear()
         # 2026-09-18 debug (nfreqs=16 OOM investigation): predict_proba
         # allocates fresh dense-edge tensors for the held-out fold on top
         # of whatever training + the mem cache already left resident --
@@ -1828,6 +1837,7 @@ def leave_one_seizure_out_prediction(
         # own (less legible) "X GiB in use" message.
         import torch as _torch_debug
         if _torch_debug.cuda.is_available():
+            _torch_debug.cuda.empty_cache()
             _torch_debug.cuda.synchronize()
             print(
                 f"[eval boundary] cuda allocated={_torch_debug.cuda.memory_allocated()/1e9:.2f}GB "
