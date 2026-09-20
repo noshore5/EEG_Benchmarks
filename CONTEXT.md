@@ -27,7 +27,25 @@ why (nfreqs=16 burned a full night 2026-09-19 re-deriving fixes that were
 already known). Update it once a run under a new commit/config is
 verified good.
 
-**2026-09-17 (most recent):** GPU spot IS working now (the "quota 0"
+**2026-09-20 decision: the historical 0.644-0.674 AP is NOT a target to
+chase back to.** It came from the old 4-channel dense-edge stack
+(`[coh, sinφ, cosφ, significance]`) with `temporal_graph_edge_drop_
+significance=False` -- exactly the config the user directed removed
+*permanently, regardless of accuracy tradeoff* (correctness grounds:
+`significance` is a deterministic affine rescale of `coh`, not a real
+test; see `PREDICTION_TEMPORAL_GRAPH_MAMBA_PARAMS`' comment at
+`run_pipelines.py:567`). `--temporal-graph-edge-coh-affine-rescale` was
+built to recover that ~0.10 AP under `complex_native` without
+reintroducing the correctness problem, but measured on 2026-09-20 at both
+nfreqs=16 (0.484->0.491) and nfreqs=8 (0.583->0.583) it recovers
+essentially nothing -- the fix doesn't work as designed, and nobody should
+re-derive/re-test this without a new idea. **Decision (user, 2026-09-20):
+accept nfreqs=8 without affine (AP~0.58) as the real current best, stop
+chasing 0.67.** Don't re-enable `drop_significance=False` to chase the old
+number; if a future session is asked to explain the "regression" from
+0.67, point here instead of re-investigating from scratch.
+
+**2026-09-17:** GPU spot IS working now (the "quota 0"
 notes below and in `AWS_INFRA.md`'s header are stale) via
 `scripts/eeg-run-spot.sh` on branch `spot-tgm-nosig-checkpoint` (NOT
 merged to `main` -- see "Branch map"), `--docker-image
