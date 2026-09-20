@@ -3003,6 +3003,43 @@ def leave_one_seizure_out_raw_classifier_prediction(
             f"precision={row['precision']:.3f} recall={row['recall']:.3f} f1={row['f1']:.3f}"
         )
 
+        # Per-fold teardown + host-RAM diagnostic (2026-09-20, FAILURE_LOG.md
+        # #14: nonstgm-mamba-smoke was SIGKILL'd/rc=137 entering fold 2 on a
+        # 16GB-host-RAM spot box -- a bare "Killed", not a caught CUDA OOM,
+        # so this is the OS OOM killer on host RAM, not GPU VRAM). This loop
+        # (shared by dbconformer/slimseiz/cg_mambanet/godoy_tmc/nonstgm_*)
+        # never had ANY per-fold teardown, unlike leave_one_seizure_out_
+        # prediction's dense-edge/CWT loop a few hundred lines up, which
+        # already needed the identical del+gc.collect()+empty_cache() fix
+        # for the identical reason ("each fold's classifier stays reachable
+        # through reference cycles until the cyclic GC happens to run" --
+        # see that block's own comment). Porting it here rather than
+        # guessing a different fix for a different loop with the same shape
+        # of bug. The RSS print is new: no host-RAM instrumentation existed
+        # anywhere in this pipeline before, so there's no evidence yet of
+        # whether this teardown alone is sufficient -- the print is what
+        # will show a next run's fold-over-fold growth (or the lack of it)
+        # instead of leaving that as another guess.
+        del clf, proba, y_score, y_pred, y_pred_smoothed
+        del X_train, y_train, X_test, y_test, meta_test
+        _gc.collect()
+        try:
+            import resource
+
+            rss_gb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6  # KB -> GB on Linux
+            print(f"[fold {fold_i} teardown] host RSS (peak so far)={rss_gb:.2f}GB", flush=True)
+        except Exception:
+            pass
+        try:
+            import torch as _torch
+
+            if _torch.backends.mps.is_available():
+                _torch.mps.empty_cache()
+            if _torch.cuda.is_available():
+                _torch.cuda.empty_cache()
+        except Exception:
+            pass
+
     return pd.DataFrame(fold_rows), pd.DataFrame(per_seizure_rows)
 
 
