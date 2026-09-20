@@ -174,9 +174,16 @@ fi
 
 # --- auth: pull the write deploy key from SSM, use it just for this push ---
 mkdir -p /root/.ssh
-if ! aws ssm get-parameter --name "$DEPLOY_KEY_SSM" --with-decryption \
-       --query 'Parameter.Value' --output text > /root/.ssh/eeg_deploy 2>/dev/null; then
-  say "could not read deploy key from SSM ($DEPLOY_KEY_SSM) -- cannot push"
+# 2026-09-20: this has failed 4 times (FAILURE_LOG.md #13) and every one was
+# diagnosed BLIND -- stderr went to /dev/null, so nobody ever saw the actual
+# AWS error text, only this generic message. A prior "fix" (KMS decrypt on
+# alias/aws/ssm) was a plausible guess from that blindness and did NOT
+# actually resolve it (still failing identically after). Capture stderr
+# instead of discarding it so the next occurrence is diagnosable from
+# boot.log directly, not guessed at again.
+if ! SSM_ERR=$(aws ssm get-parameter --name "$DEPLOY_KEY_SSM" --with-decryption \
+       --query 'Parameter.Value' --output text 2>&1 1>/root/.ssh/eeg_deploy); then
+  say "could not read deploy key from SSM ($DEPLOY_KEY_SSM) -- cannot push. AWS error: $SSM_ERR"
   exit 4
 fi
 chmod 600 /root/.ssh/eeg_deploy

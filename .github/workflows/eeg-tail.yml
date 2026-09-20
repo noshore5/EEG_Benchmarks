@@ -61,6 +61,20 @@ jobs:
           echo "== boot.log tail (promote_results.sh output), if shipped =="
           aws s3 cp "$PFX/boot.log" - 2>&1 | tail -n 60 || echo "(not present)"
           echo
+          # eeg-run-spot.sh's finish() ships /root/repo/Epilepsy/results to
+          # exports/runs/<name>/results/ regardless of whether promote_results.sh's
+          # git push succeeded -- this is the recovery path when auto-push fails
+          # (checkpoints/* is deliberately NOT readable by this role, see
+          # setup_gh_launcher_tail.sh, but this exports/ copy is). Dump every CSV
+          # found so a failed-push run's results can still be recovered and
+          # committed manually without needing real AWS creds.
+          echo "== results/ CSVs (exports/runs/<name>/results/), for manual recovery if auto-push failed =="
+          for key in $(aws s3 ls --recursive "$PFX/results/" 2>/dev/null | awk '{print $4}'); do
+            echo "--- s3://$BUCKET/$key ---"
+            aws s3 cp "s3://$BUCKET/$key" - 2>&1
+            echo
+          done
+          echo
           if [ -n "$IID" ]; then
             echo "== instance state ($IID) =="
             aws ec2 describe-instances --instance-ids "$IID" \

@@ -252,6 +252,33 @@ it. Fixed by adding a second `kms:Decrypt` statement scoped to
 end-to-end (no run has completed since the policy change) -- confirm the
 next run's `boot.log` shows a real `git push` succeeding, not the same
 error a 4th time.
+
+**Fourth occurrence (2026-09-20), and the "fix" did NOT work:** both
+`tgm-nfreqs16-ssmverify-seed42` and `tgm-nfreqs8-complexnative-seed42`
+(launched specifically to verify the KMS fix above) hit the IDENTICAL
+`could not read deploy key from SSM (/eeg/github-deploy-key) -- cannot
+push`, with no change in behavior from before the policy change.
+**Root cause of root-cause failure:** `promote_results.sh`'s SSM read
+(`aws ssm get-parameter ... 2>/dev/null`) has ALWAYS discarded the actual
+AWS CLI error text — every occurrence of this failure, including the one
+"fixed" above, was diagnosed completely blind, working from plausible
+theory (a KMS key mismatch) rather than the real error message. That
+"fix" was therefore a guess, and evidently the wrong one — the real cause
+is still unknown. **Fixed the diagnostic gap** (not yet the underlying
+cause) in `promote_results.sh`: stderr is now captured into `$SSM_ERR` and
+included in the failure message, so the NEXT occurrence's `boot.log` will
+show the real AWS error (AccessDenied / ParameterNotFound / a KMS error /
+something else) instead of this same uninformative one-liner. Also added
+an `eeg-tail.yml` results/-CSV dump section so a run whose auto-push fails
+can still have its results recovered and committed manually without
+needing real AWS creds (checkpoints/* is deliberately unreadable by the
+tail role, but the results/ copy under exports/ is).
+**Lesson:** don't declare an IAM/permissions fix verified from theory
+alone when the actual error was never observed — the stderr redirect
+silently converted 4 separate failures (possibly with different root
+causes each time) into one indistinguishable message. Always capture and
+surface the real error before proposing a fix for anything infra-auth
+related.
 ---
 
 ## Patterns worth remembering across all of the above
