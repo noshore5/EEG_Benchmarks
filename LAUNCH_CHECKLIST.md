@@ -13,35 +13,25 @@ time, not reconstructed from memory later.
 ## CURRENT BEST LAUNCH COMMAND (overwrite this block, don't append below it — last updated 2026-09-19)
 
 branch: main
-commit: de837d0 (CUDA per-fold empty_cache, pre-eval cache-clear, post-eval
-  cache-clear, and a post-teardown diagnostic print — all load-bearing)
-verified-good full-6-fold run: NOT YET CONFIRMED.
-  tgm-nfreqs16-native-leakfix-seed42 OOM'd inside fold 1's OWN eval step.
-  tgm-nfreqs16-evalclear-seed42 (a3a776c, pre-eval clear only) got past
-  fold 1's eval cleanly but OOM'd early in fold 2's training -- fixed at
-  bf4339f (also clear post-eval).
-  tgm-nfreqs16-evalclear2-seed42 (bf4339f) and tgm-nfreqs16-diag-seed42
-  (de837d0), BOTH at cache-gb=15 (default), got through folds 1-3 cleanly
-  then died entering fold 4's training at nearly identical numbers both
-  times (20.75-20.82GB allocated, crash mid dense-edge chunk-build). The
-  diag run's [post-fold teardown] print PROVES this is NOT a cross-fold
-  leak: every teardown read allocated=0.02GB/reserved=0.04GB, flat across
-  all 3 completed folds. So it's a real per-fold peak, fold 4
-  specifically, only ~0.7-0.8GB over the 22GB ceiling.
-  tgm-nfreqs16-cachegb12-seed42 (--dense-edge-gpu-cache-gb 12): WRONG
-  direction, disproved the "clearing makes shrinking safe" theory --
-  didn't even survive fold 1 (churn in epoch 2).
-  tgm-nfreqs16-cachegb14-seed42 (--dense-edge-gpu-cache-gb 14): died at the
-  EXACT SAME 20.75GB/chunk-3-of-8 spot as the cache-gb=15 runs -- proves
-  cache-gb is NOT the lever for this symptom at all (see FAILURE_LOG.md
-  #12 for the full writeup). STOP tuning --dense-edge-gpu-cache-gb for the
-  fold-4 OOM -- three attempts (10, 12, 14) have shown it either
-  destabilizes training or does nothing to the crash point.
-  Next attempt: --dense-edge-gpu-cache-gb back to 15 (default, known-good
-  for folds 1-3) PLUS --precompute-chunk-size 2 (default is
-  min(batch_size,4)=4 -- lowering it reduces concurrent dense-edge
-  working memory during chunk-building, a genuinely different lever this
-  time, not another cache-gb guess).
+commit: d175a9c (CUDA per-fold empty_cache, pre-eval cache-clear, post-eval
+  cache-clear, post-teardown diagnostic print, AND --precompute-chunk-size 2
+  as the actual fold-4 OOM fix — all load-bearing)
+verified-good full-6-fold run: CONFIRMED 2026-09-20.
+  tgm-nfreqs16-chunk2-seed42 (i-05b0363c9f2a0ab5e) completed all 6 folds
+  cleanly -- see Epilepsy/Session_notes/2026_09_20/tgm-nfreqs16-chunk2-seed42.md
+  for full results (mean AP=0.484, roc_auc=0.941, 6/6 raw hit rate).
+  Results committed manually (box's own auto-push failed: SSM deploy-key
+  unreadable -- see note in that session-notes file, needs fixing before
+  relying on auto-push again).
+
+  Full attempt history (10 failed runs before this one) is in
+  FAILURE_LOG.md entries #7-12 -- the short version: neither the eval-time
+  OOM nor the fold-4 OOM were cache-BUDGET problems (shrinking
+  --dense-edge-gpu-cache-gb to 10/12/14 either destabilized training or did
+  nothing). The real fixes were (a) clearing the dense-edge mem cache both
+  before AND after eval each fold (a3a776c, bf4339f) and (b)
+  --precompute-chunk-size 2 to lower the transient VRAM peak during
+  dense-edge chunk-building, which is what actually got past fold 4.
 
 scripts/eeg-run-spot.sh \
   --name <run-name> \

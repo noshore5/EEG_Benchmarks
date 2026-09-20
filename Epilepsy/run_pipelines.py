@@ -836,6 +836,7 @@ def _apply_dense_family_cli_overrides(clf_params: dict, args: argparse.Namespace
     clf_params["channel_subset_k"] = args.channel_subset_k
     clf_params["channel_subset_metric"] = args.channel_subset_metric
     clf_params["temporal_graph_edge_complex_native"] = args.temporal_graph_edge_complex_native
+    clf_params["temporal_graph_edge_coh_affine_rescale"] = args.temporal_graph_edge_coh_affine_rescale
     if args.nfreqs is not None:
         clf_params["nfreqs"] = args.nfreqs
     if args.verbose is not None:
@@ -3455,6 +3456,25 @@ def _build_argument_parser() -> argparse.ArgumentParser:
             "this fixes a real amplitude bug in the older (never-completed) "
             "temporal_graph_edge_complex flag. Unset (default): the usual "
             "4-channel stack via temporal_edge_proj."
+        ),
+    )
+    parser.add_argument(
+        "--temporal-graph-edge-coh-affine-rescale",
+        action="store_true",
+        help=(
+            "--temporal-graph-edge-complex-native only (no-op with a warning "
+            "otherwise): recompute the old 'significance' feature -- (coh - "
+            "threshold)/threshold, an affine RESCALE of coherence under one "
+            "fixed global threshold, not a real significance test, see "
+            "temporal_graph_edge_drop_significance's docstring in "
+            "cwt_gnn_classifiers.py -- from the already-cached [re, im] pair "
+            "at forward() time instead of as a 3rd cached channel. The "
+            "2026-08-31 ablation found dropping this feature cost ~0.10 mean "
+            "AP (NEGATIVES.md item 3); this gets that back under "
+            "complex_native without giving up its ~half-memory-footprint win "
+            "(a 3rd cached channel would undo that, and nfreqs=16's VRAM "
+            "budget is already tight -- see FAILURE_LOG.md). Unset (default): "
+            "complex_native uses [re, im] alone, no affine feature."
         ),
     )
     parser.add_argument(

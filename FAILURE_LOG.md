@@ -213,6 +213,26 @@ type, or accepting nfreqs=16 needs its own diagnostic print showing
 allocated memory WITHIN a chunk-build (not just at fold boundaries) to see
 where inside those first 3 chunks the jump to 20GB actually happens.
 
+## 13. `tgm-nfreqs16-chunk2-seed42` (i-05b0363c9f2a0ab5e) — the run that finally worked, with one auto-push gap
+
+**Symptom:** All 6 folds completed cleanly (mean AP=0.484, roc_auc=0.941,
+6/6 raw event-level hit rate) -- the actual fix. But `boot.log` showed
+`promote: could not read deploy key from SSM (/eeg/github-deploy-key) --
+cannot push`, so the box self-terminated WITHOUT landing the results commit
+on `origin/main`.
+**Root cause:** Not a training/memory bug at all — an infra gap in the SSM
+parameter the auto-push step reads its GitHub deploy key from.
+**What was done:** Results were still safe in S3
+(`s3://.../checkpoints/tgm-nfreqs16-chunk2-seed42/`), so they were
+downloaded and committed manually instead of being lost.
+**Lesson / follow-up needed:** Don't assume "instance terminated with no
+error in run.log" means the results made it to `origin/main` — check
+`boot.log` for the promote step's own output too. The SSM parameter
+`/eeg/github-deploy-key` needs to actually be checked/fixed before relying
+on auto-push for a future run; until then, always verify with `git log
+origin/main` after a run claims to finish, and fall back to manual S3
+recovery if the commit didn't land.
+
 ---
 
 ## Patterns worth remembering across all of the above

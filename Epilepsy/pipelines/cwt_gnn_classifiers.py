@@ -3128,6 +3128,31 @@ class SparseEvidenceGNNCore(nn.Module):
         # complex uses -- no mag/phase reconstruction needed, since the
         # cache already holds the normalized real/imag pair.
         temporal_graph_edge_complex_native: bool = False,
+        # 2026-09-20. temporal_graph_edge_complex_native only (no-op, with a
+        # one-time warning, if that's off). Recomputes the OLD "significance"
+        # stack component -- (coh - threshold)/threshold, see
+        # temporal_graph_edge_drop_significance's docstring for why that
+        # name was always wrong (it's an affine RESCALING of coherence
+        # under a single fixed global threshold, not a real significance
+        # test) -- but does NOT add it to the cached dense-edge tensor.
+        # Under complex_native, coherence is exactly |coh|^2 where
+        # coh = re + i*im (re/im are already sqrt(coherence)*cos/sinφ --
+        # see that flag's docstring), so this is one elementwise op on
+        # values already in VRAM from the [re, im] cache entry, computed
+        # fresh every forward() call rather than stored as a 3rd cached
+        # channel. That's the whole point: the 2026-08-31 ablation found
+        # dropping this feature cost ~0.10 mean AP (NEGATIVES.md item 3),
+        # but adding a 3rd channel back to the dense-edge cache would
+        # un-halve complex_native's whole memory win (see FAILURE_LOG.md
+        # #7-13 for how tight nfreqs=16's VRAM budget already is) --
+        # recomputing it downstream of the cache instead gets the AP back
+        # at effectively zero extra memory cost. Concatenated onto
+        # temporal_edge_cproj's output (widens temporal_edge_cproj_out's
+        # input by nfreqs) rather than fed through the complex Linear
+        # itself, since it's real-valued, not part of the complex
+        # coherency. Named for what it actually IS, not what the legacy
+        # 4-channel stack's component 3 was mislabeled as.
+        temporal_graph_edge_coh_affine_rescale: bool = False,
         # 2026-08-31 (item 3). temporal_graph event_mode only. False
         # (default, bit-identical): temporal_edge_proj sees all 4 stack
         # components [coherence, sin(phase), cos(phase), significance].
@@ -3137,7 +3162,11 @@ class SparseEvidenceGNNCore(nn.Module):
         # significance is a deterministic function of the same magnitude vs
         # the fixed-mode threshold -- does it add anything over
         # coherence+phase? Disk cache untouched (same [B,4,E,T,F] stack;
-        # the slice happens in-forward).
+        # the slice happens in-forward). NOTE (2026-09-20): "significance"
+        # is a misleading name for this quantity -- see
+        # temporal_graph_edge_coh_affine_rescale's docstring above, which
+        # reintroduces the same underlying feature under complex_native
+        # with an honest name and without the cache-memory cost.
         temporal_graph_edge_drop_significance: bool = False,
         # 2026-08-31 (item 3b). "significance" (default, bit-identical):
         # stack component 3 is (coh - threshold)/threshold. In fixed-
@@ -3519,6 +3548,20 @@ class SparseEvidenceGNNCore(nn.Module):
         self.temporal_graph_edge_drop_significance = bool(
             temporal_graph_edge_drop_significance
         )
+        self.temporal_graph_edge_coh_affine_rescale = bool(
+            temporal_graph_edge_coh_affine_rescale
+        )
+        if self.temporal_graph_edge_coh_affine_rescale and not self.temporal_graph_edge_complex_native:
+            import warnings as _warnings
+
+            _warnings.warn(
+                "temporal_graph_edge_coh_affine_rescale has no effect without "
+                "temporal_graph_edge_complex_native -- the legacy 4-channel "
+                "stack already carries this feature as its 'significance' "
+                "component (temporal_graph_edge_drop_significance=False, the "
+                "default, keeps it). No-op, not an error.",
+                stacklevel=2,
+            )
         self.dense_edge_ch3 = str(dense_edge_ch3)
         self.cwt_encoder = bool(cwt_encoder)
         self.node_embedding_dim = int(
@@ -3846,8 +3889,21 @@ class SparseEvidenceGNNCore(nn.Module):
             self.temporal_edge_cproj = _ComplexLinear(
                 self.nfreqs, self.temporal_graph_edge_dim
             )
+            # +nfreqs when coh_affine_rescale is on (native only, enforced
+            # by the warning above -- this widening is silently correct
+            # even if the flag is set without native since the forward
+            # branch below only ever concats the extra feature under
+            # native_complex too, but the constructor can't easily assert
+            # that ordering, hence the warning instead of a hard error):
+            # the recomputed real-valued affine-rescaled-coherence feature
+            # (nfreqs-wide, one value per frequency) gets concatenated onto
+            # z (2*edge_dim wide) before this layer, in place of the old
+            # cached 4th channel.
+            _cproj_out_in = 2 * self.temporal_graph_edge_dim
+            if self.temporal_graph_edge_coh_affine_rescale and self.temporal_graph_edge_complex_native:
+                _cproj_out_in += self.nfreqs
             self.temporal_edge_cproj_out = nn.Linear(
-                2 * self.temporal_graph_edge_dim, self.temporal_graph_edge_dim
+                _cproj_out_in, self.temporal_graph_edge_dim
             )
 
     def configure_summary_context(
@@ -5445,6 +5501,21 @@ class SparseEvidenceGNNCore(nn.Module):
                 # -- so there is no mag/phase reconstruction to do here,
                 # unlike the temporal_graph_edge_complex branch below.
                 coh = torch.complex(dense_edge_raw[:, 0], dense_edge_raw[:, 1])  # [B,E,T,F]
+                coh_affine = None
+                if getattr(self, "temporal_graph_edge_coh_affine_rescale", False):
+                    # Recompute the old "significance" feature -- an affine
+                    # rescale of coherence under the SAME fixed global
+                    # threshold for every edge/frequency/window, see
+                    # temporal_graph_edge_coh_affine_rescale's docstring for
+                    # why that name was wrong -- from values already in
+                    # VRAM, instead of a 3rd cached channel. |re+i*im|^2 ==
+                    # coherence exactly (re/im are sqrt(coherence)*cos/sinφ,
+                    # see temporal_graph_edge_complex_native's docstring),
+                    # so this is one elementwise op on the SAME coh tensor
+                    # just built above, not a recompute from raw CWT.
+                    coh_mag = coh.abs() ** 2  # [B,E,T,F], == coherence
+                    threshold = float(self.coherence_threshold)
+                    coh_affine = (coh_mag - threshold) / max(threshold, 1e-6)
             else:
                 # De-engineered edge representation (temporal_graph_edge_complex,
                 # 2026-08-30). `_build_dense_edge_input` stacks
@@ -5464,9 +5535,12 @@ class SparseEvidenceGNNCore(nn.Module):
                 mag = dense_edge_raw[:, 0]                              # [B,E,T,F]
                 sin_p, cos_p = dense_edge_raw[:, 1], dense_edge_raw[:, 2]
                 coh = torch.complex(mag * cos_p, mag * sin_p)          # [B,E,T,F] complex
+                coh_affine = None  # temporal_graph_edge_coh_affine_rescale is native-only, see its docstring
             z = self.temporal_edge_cproj(coh)                       # [B,E,T,edge_dim] complex
             z = torch.complex(F.gelu(z.real), F.gelu(z.imag))       # split-GELU
             z = torch.view_as_real(z).flatten(-2)                   # [B,E,T,2*edge_dim]
+            if coh_affine is not None:
+                z = torch.cat([z, coh_affine], dim=-1)              # [B,E,T,2*edge_dim+nfreqs]
             edge_embed = self.temporal_edge_cproj_out(z)            # [B,E,T,edge_dim]
         else:
             edge_embed = self.temporal_edge_proj(edge_seq_in)  # [B, E, T, temporal_graph_edge_dim]
@@ -6135,6 +6209,11 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         # not coh, as amplitude), 2-channel-cached version of the above;
         # see Core's matching docstring (2026-09-18).
         temporal_graph_edge_complex_native: bool = False,
+        # Forwarded to SparseEvidenceGNNCore -- recompute the affine-
+        # rescaled-coherence feature (formerly mislabeled "significance")
+        # downstream of the [re, im] cache instead of as a 3rd cached
+        # channel; native-only, see Core's matching docstring (2026-09-20).
+        temporal_graph_edge_coh_affine_rescale: bool = False,
         # Forwarded to SparseEvidenceGNNCore -- drop the significance stack
         # component from temporal_edge_proj's input (item 3, 2026-08-31).
         temporal_graph_edge_drop_significance: bool = False,
@@ -6602,6 +6681,7 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         self.temporal_graph_aggregate = temporal_graph_aggregate
         self.temporal_graph_edge_complex = temporal_graph_edge_complex
         self.temporal_graph_edge_complex_native = temporal_graph_edge_complex_native
+        self.temporal_graph_edge_coh_affine_rescale = temporal_graph_edge_coh_affine_rescale
         self.temporal_graph_edge_drop_significance = (
             temporal_graph_edge_drop_significance
         )
@@ -8337,6 +8417,9 @@ class SparseEvidenceGNNClassifier(_BaseCWTGNNClassifier):
             temporal_graph_aggregate=self.temporal_graph_aggregate,
             temporal_graph_edge_complex=self.temporal_graph_edge_complex,
             temporal_graph_edge_complex_native=self.temporal_graph_edge_complex_native,
+            temporal_graph_edge_coh_affine_rescale=(
+                self.temporal_graph_edge_coh_affine_rescale
+            ),
             temporal_graph_edge_drop_significance=(
                 self.temporal_graph_edge_drop_significance
             ),
