@@ -293,6 +293,77 @@ was aimed at the wrong layer entirely. **Fixed** by exporting
 everywhere else in this repo) near the top of `promote_results.sh`. Not
 yet verified end-to-end — confirm the next run's `boot.log` shows an actual
 `git push` succeeding.
+
+## 14. `nonstgm-mamba-smoke` (2026-09-20) — first non-temporal_graph_mamba entry: host-RAM OOM, not GPU/CUDA
+
+**Pipeline:** `nonstgm_mamba` (new NonStGM covariance/precision-graph
+pipeline, not dense-edge CWT — see `Epilepsy/pipelines/nonstgm_graph.py`).
+1-subject smoke test on a `g5`/`g6`/`g4dn`.xlarge spot box
+(`eeg-run-spot.sh`'s candidate list — all of these are 4 vCPU / **16GB
+host RAM**, regardless of which GPU landed).
+
+**Symptom:** Fold 1 (`1_03_0`) completed cleanly end-to-end — 15 epochs,
+early stopping, eval, real CUDA + fused Mamba kernel path
+(`use_cuda_kernel=True`, ~6s/epoch). Partway into fold 2's setup, the
+python process was killed: `boot.log` shows the shell's own `Killed`
+message and `RC=137` (SIGKILL) — **not** a Python traceback, not a caught
+`CUDA out of memory` `RuntimeError`. That distinction matters: every prior
+OOM in this file (mistakes #2, #3, #7-#12) was PyTorch's CUDA allocator
+raising an exception that the training loop could have caught; a bare
+`Killed`+137 with no exception is the Linux OOM killer terminating the
+process for exceeding **host RAM**, not GPU VRAM. `promote_results.sh`
+correctly saw the nonzero rc and refused to commit anything (`promote: job
+rc=137 -- not committing anything`), so no results/session-note landed on
+`main` for this run — only `run.log`/`boot.log` in S3.
+
+**Root cause: NOT YET DIAGNOSED — this section is the honest "what's next," not a confirmed fix.**
+No host-RAM print exists anywhere in this pipeline or in
+`eeg-run-spot.sh`/`leave_one_seizure_out_raw_classifier_prediction`, so
+there is zero direct evidence of what actually grew between fold 1 and
+fold 2. Resist the temptation to guess a specific leaky line (see mistakes
+#8/#11 in this same file for what happens when a fix is picked from
+plausible theory instead of a measurement). What IS known:
+- The "clean fold 1, dies entering fold 2" shape matches the signature
+  this file already flagged in mistake #2 ("something accumulating across
+  iterations, not a per-fold peak") — but #2's specific fix
+  (`torch.cuda.empty_cache()`) is a GPU-allocator fix and does nothing for
+  host RAM, so it does not transfer here.
+- `NonStGMClassifier._prepare_features` (nonstgm_classifier.py:228-236)
+  calls `apply_global_zscore(X, ...)` on the full window array every
+  `fit()`/`predict_proba()` call. If that (or the caller in
+  `leave_one_seizure_out_raw_classifier_prediction`) returns a fresh copy
+  rather than normalizing in place, each fold materializes another
+  full-size copy of X (the log's own line: `X: (4241, 23, 7680)`, ~3-6GB
+  per copy depending on dtype) — plausible but **unverified** contributor,
+  not a confirmed cause.
+- The covariance/precision graph itself (`LocalCovariancePrecisionGraph`)
+  is computed inside `forward()` per-batch, not precomputed/cached to a
+  file or dict the way the dense-edge CWT pipelines are — so it is
+  *less* likely to be the leak than those pipelines' disk/GPU cache was,
+  but nothing rules out a Python-level reference (e.g. `diagnostics`
+  dicts, `_last_diagnostics`) pinning tensors across folds without ever
+  being cleared.
+
+**What to actually do next (in order, per this file's own "add a
+diagnostic before guessing again" lesson from #10):**
+1. Add a one-line host-RAM print (`import resource;
+   resource.getrusage(resource.RUSAGE_SELF).ru_maxrss` or `psutil`) at
+   the same fold-boundary points `leave_one_seizure_out_raw_classifier_
+   prediction` already logs at, and relaunch — this is the cheap,
+   necessary step before touching any code, exactly like the `[eval
+   boundary]`/`[post-fold teardown]` prints that actually solved #9/#10.
+2. Only once that print shows WHERE the growth happens (during
+   normalization, during graph construction, or genuinely in the temporal
+   backend), fix that specific spot. Don't pre-emptively add `del`/`gc.
+   collect()` calls everywhere as a shotgun fix.
+3. As an orthogonal, safe-now mitigation (not a diagnosis): relaunch on
+   a bigger-RAM candidate (`g5.2xlarge`/`g6.2xlarge`, 32GB host RAM vs.
+   16GB) to get a full 6-fold run's worth of data while the real leak (if
+   any) is still being tracked down — unlike the GPU-cache-size mistakes
+   above (#8, #11), a host-RAM bump is not fighting the wrong resource
+   here, since this OOM is confirmed host-side (bare `Killed`, no CUDA
+   exception), so a bigger box is a legitimate stopgap, not a repeat of
+   the "wrong lever" mistake.
 ---
 
 ## Patterns worth remembering across all of the above
