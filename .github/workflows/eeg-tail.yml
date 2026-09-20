@@ -23,6 +23,11 @@ on:
         required: false
         default: ""
         type: string
+      skip_results_dump:
+        description: "Skip the results/ CSV recovery dump (set true when you just need run.log/boot.log -- the CSV dump can be 100KB+ and the GitHub Actions log API/MCP get_job_logs truncates from the FRONT when the total log is large, silently dropping the earlier run.log/boot.log sections)"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   id-token: write
@@ -41,6 +46,7 @@ jobs:
         env:
           RUN_NAME: ${{ inputs.run_name }}
           IID: ${{ inputs.instance_id }}
+          SKIP_RESULTS_DUMP: ${{ inputs.skip_results_dump }}
         run: |
           set -uo pipefail
           BUCKET=noshore-eeg-benchmarks-827938107865
@@ -68,12 +74,16 @@ jobs:
           # setup_gh_launcher_tail.sh, but this exports/ copy is). Dump every CSV
           # found so a failed-push run's results can still be recovered and
           # committed manually without needing real AWS creds.
-          echo "== results/ CSVs (exports/runs/<name>/results/), for manual recovery if auto-push failed =="
-          for key in $(aws s3 ls --recursive "$PFX/results/" 2>/dev/null | awk '{print $4}'); do
-            echo "--- s3://$BUCKET/$key ---"
-            aws s3 cp "s3://$BUCKET/$key" - 2>&1
-            echo
-          done
+          if [ "$SKIP_RESULTS_DUMP" = "true" ]; then
+            echo "== results/ CSVs: skipped (skip_results_dump=true) =="
+          else
+            echo "== results/ CSVs (exports/runs/<name>/results/), for manual recovery if auto-push failed =="
+            for key in $(aws s3 ls --recursive "$PFX/results/" 2>/dev/null | awk '{print $4}'); do
+              echo "--- s3://$BUCKET/$key ---"
+              aws s3 cp "s3://$BUCKET/$key" - 2>&1
+              echo
+            done
+          fi
           echo
           if [ -n "$IID" ]; then
             echo "== instance state ($IID) =="
