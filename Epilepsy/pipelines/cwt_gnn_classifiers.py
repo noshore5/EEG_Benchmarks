@@ -5516,6 +5516,25 @@ class SparseEvidenceGNNCore(nn.Module):
                     coh_mag = coh.abs() ** 2  # [B,E,T,F], == coherence
                     threshold = float(self.coherence_threshold)
                     coh_affine = (coh_mag - threshold) / max(threshold, 1e-6)
+                    if self.coi_enabled:
+                        # 2026-09-20 fix. `_build_dense_edge_input` zeroes
+                        # coh (hence re/im, hence coh_mag here) outside the
+                        # cone of influence BEFORE this feature exists, so
+                        # coh_mag==0 there -- but (0 - threshold)/threshold
+                        # = -1, a nonzero constant, not 0. The legacy
+                        # "significance" channel explicitly re-multiplied by
+                        # coi_valid to force exact zeros outside the cone
+                        # (see _build_dense_edge_input's `significance =
+                        # significance * coi_valid`); this replicates that
+                        # instead of silently leaking a constant -1 into
+                        # every COI-invalid cell. re/im aren't literally 0.0
+                        # only where coi_valid masked them (coi_valid is a
+                        # strict 0/1 mask, see _coi_valid_mask) -- a cell
+                        # with genuine exactly-zero coherence inside the
+                        # cone is possible in principle but not in practice
+                        # with real floating-point CWT output, so this is
+                        # exact in the cases that matter.
+                        coh_affine = coh_affine * (coh_mag != 0).to(coh_affine.dtype)
             else:
                 # De-engineered edge representation (temporal_graph_edge_complex,
                 # 2026-08-30). `_build_dense_edge_input` stacks
