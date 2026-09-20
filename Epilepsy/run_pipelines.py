@@ -1403,6 +1403,32 @@ def _subsample_negative_windows(
     return X[keep_idx], y[keep_idx], metadata.iloc[keep_idx].reset_index(drop=True)
 
 
+def _resolve_dense_edge_cache_gb(dense_edge_gpu_cache_gb: float | None, headroom_gb: float) -> float:
+    """Auto-size --dense-edge-gpu-cache-gb from the card's actual VRAM when
+    not explicitly overridden, instead of one fixed number that has to be
+    manually retuned for every (nfreqs, instance-type) combo -- see
+    FAILURE_LOG.md's nfreqs=16 saga for what guessing this by hand costs.
+    Model/activation/optimizer footprint is roughly constant regardless of
+    nfreqs (only the cache's own tensors scale with it, linearly -- see
+    --nfreqs's help), so `total_vram - fixed_headroom` generalizes the
+    empirical 23GB-A10G -> 15GB-cache/~8GB-headroom ratio to any card
+    instead of hardcoding a number measured on one specific GPU.
+    """
+    if dense_edge_gpu_cache_gb is not None:
+        return dense_edge_gpu_cache_gb
+    import torch as _torch
+    if not _torch.cuda.is_available():
+        return 15.0  # CPU/MPS: nothing to query, keep the old measured default
+    total_gb = _torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+    cache_gb = max(1.0, total_gb - headroom_gb)
+    print(
+        f"[dense-edge mem cache] auto-sized budget: {cache_gb:.2f} GiB "
+        f"(total VRAM {total_gb:.2f} GiB - headroom {headroom_gb:.2f} GiB)",
+        flush=True,
+    )
+    return cache_gb
+
+
 def leave_one_seizure_out_detection(
     X: np.ndarray,
     y: np.ndarray,
@@ -1413,7 +1439,8 @@ def leave_one_seizure_out_detection(
     max_folds: int | None = None,
     skip_folds: set[int] | None = None,
     dense_edge_gpu_cache: bool = False,
-    dense_edge_gpu_cache_gb: float = 15.0,
+    dense_edge_gpu_cache_gb: float | None = None,
+    dense_edge_gpu_cache_headroom_gb: float = 8.0,
 ) -> pd.DataFrame:
     """Leave-one-seizure-out CV for label_mode="detection": hold out one
     recording's windows at a time.
@@ -1466,7 +1493,10 @@ def leave_one_seizure_out_detection(
     # a mid-run CUDA OOM once the resident set exceeds --dense-edge-gpu-
     # cache-gb.
     shared_dense_edge_mem_cache = (
-        DenseEdgeMemCache(max_bytes=int(dense_edge_gpu_cache_gb * (1024 ** 3)))
+        DenseEdgeMemCache(max_bytes=int(
+            _resolve_dense_edge_cache_gb(dense_edge_gpu_cache_gb, dense_edge_gpu_cache_headroom_gb)
+            * (1024 ** 3)
+        ))
         if dense_edge_gpu_cache else None
     )
 
@@ -1565,7 +1595,8 @@ def leave_one_seizure_out_prediction(
     skip_folds: set[int] | None = None,
     dump_window_scores: bool = False,
     dense_edge_gpu_cache: bool = False,
-    dense_edge_gpu_cache_gb: float = 15.0,
+    dense_edge_gpu_cache_gb: float | None = None,
+    dense_edge_gpu_cache_headroom_gb: float = 8.0,
     checkpoint_dir: "Path | None" = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame | None]:
     """Leave-one-seizure-out CV for label_mode="prediction".
@@ -1678,7 +1709,10 @@ def leave_one_seizure_out_prediction(
     shared_dense_edge_cache_dir = None if disable_disk_cache else default_dense_edge_cache_root()
     # 2026-09-18: see leave_one_seizure_out_detection's matching comment.
     shared_dense_edge_mem_cache = (
-        DenseEdgeMemCache(max_bytes=int(dense_edge_gpu_cache_gb * (1024 ** 3)))
+        DenseEdgeMemCache(max_bytes=int(
+            _resolve_dense_edge_cache_gb(dense_edge_gpu_cache_gb, dense_edge_gpu_cache_headroom_gb)
+            * (1024 ** 3)
+        ))
         if dense_edge_gpu_cache else None
     )
 
@@ -3502,19 +3536,38 @@ def _build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dense-edge-gpu-cache-gb",
         type=float,
-        default=15.0,
+        default=None,
         help=(
             "Byte budget (GiB) for --dense-edge-gpu-cache's resident set "
             "(DenseEdgeMemCache, dense_edge_cache.py). LRU-evicted, not a "
             "plain unbounded dict (2026-09-18 fix): a working set bigger "
             "than this degrades to a smooth partial hit rate instead of a "
-            "mid-run CUDA OOM. Default (15GB) matches the measured size of "
-            "the whole CHB-MIT prediction run's unique windows at "
-            "nfreqs=8/2-channel-native-complex/bf16 on a 23GB A10G, "
-            "leaving headroom for model/activations/optimizer state. Raise "
-            "this (with more VRAM, or a smaller batch size to free room) "
-            "to let a higher nfreqs stay fully resident; ignored unless "
+            "mid-run CUDA OOM. Unset (default): AUTO-SIZED from the actual "
+            "GPU's total VRAM minus --dense-edge-gpu-cache-headroom-gb (see "
+            "that flag) -- e.g. ~15GB on a 23GB A10G, the number this used "
+            "to be hardcoded to (measured for nfreqs=8/2-channel-native-"
+            "complex/bf16), but now scales automatically to whatever card "
+            "the launcher actually lands on instead of needing a manual "
+            "recompute per (nfreqs, instance-type) combo -- see "
+            "FAILURE_LOG.md for how much hand-tuning this used to cost. "
+            "Pass an explicit value to override the auto-sizing (e.g. to "
+            "leave more headroom for a bigger batch size). Ignored unless "
             "--dense-edge-gpu-cache is also passed."
+        ),
+    )
+    parser.add_argument(
+        "--dense-edge-gpu-cache-headroom-gb",
+        type=float,
+        default=8.0,
+        help=(
+            "GiB of VRAM to reserve for model/activations/optimizer state "
+            "when auto-sizing --dense-edge-gpu-cache-gb (ignored if that "
+            "flag is passed explicitly). Default 8.0 matches the empirical "
+            "ratio measured on a 23GB A10G (15GB cache + ~8GB everything "
+            "else). Model size is roughly constant regardless of nfreqs "
+            "(only the cache's own tensors scale with it -- see --nfreqs), "
+            "so this one number should transfer across instance types; "
+            "raise it if a run still OOMs after the cache is auto-sized."
         ),
     )
     parser.add_argument("--seed", type=int, default=42)
@@ -3996,6 +4049,7 @@ def main(args: argparse.Namespace) -> None:
             dump_window_scores=args.dump_window_scores,
             dense_edge_gpu_cache=args.dense_edge_gpu_cache,
             dense_edge_gpu_cache_gb=args.dense_edge_gpu_cache_gb,
+            dense_edge_gpu_cache_headroom_gb=args.dense_edge_gpu_cache_headroom_gb,
             checkpoint_dir=Path(args.checkpoint_dir) if args.checkpoint_dir else None,
         )
 
@@ -4069,6 +4123,7 @@ def main(args: argparse.Namespace) -> None:
             skip_folds=set(args.skip_folds) if args.skip_folds else None,
             dense_edge_gpu_cache=args.dense_edge_gpu_cache,
             dense_edge_gpu_cache_gb=args.dense_edge_gpu_cache_gb,
+            dense_edge_gpu_cache_headroom_gb=args.dense_edge_gpu_cache_headroom_gb,
         )
 
         # --shuffle-labels: same separate-subdirectory reasoning as the

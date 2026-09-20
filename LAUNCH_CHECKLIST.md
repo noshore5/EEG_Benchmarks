@@ -49,11 +49,14 @@ this commit — recheck with --help before trusting this list):
   --temporal-graph-edge-complex-native   (2ch cache, ~half footprint vs the old 4ch stack)
   --checkpoint-dir /root/checkpoint      (fold-level resume on spot reclaim)
   --dense-edge-gpu-cache                 (DO NOT pass --dense-edge-gpu-cache-gb --
-    back to the code default of 15.0. An explicit override of 10, tried
-    2026-09-19 to fix the eval OOM below, was the WRONG lever: it dropped
-    train-time cache hit rate from 100% to 62.5% and epoch_time from 3.45s
-    to 56.23s. The real fix is the cache CLEAR before eval below, which
-    needs the full 15GB training budget to still work.)
+    an explicit override of 10, tried 2026-09-19 to fix the eval OOM below,
+    was the WRONG lever: it dropped train-time cache hit rate from 100% to
+    62.5% and epoch_time from 3.45s to 56.23s. The real fix is the cache
+    CLEAR before eval below, which needs the full training budget to still
+    work. 2026-09-20: leaving this flag unset now AUTO-SIZES the budget
+    from the box's actual VRAM (total - 8GB headroom, see --help) instead
+    of the old hardcoded 15.0 default -- still ~15GB on a g5.xlarge's 23GB
+    A10G, but now correct if the launcher lands on a different card too.)
 
 EVAL-TIME OOM finding + fix (2026-09-19, tgm-nfreqs16-native-leakfix-seed42,
 instance i-0afdc4455758fbdcd, g5.xlarge): the run did NOT hit the
