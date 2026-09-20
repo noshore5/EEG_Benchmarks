@@ -184,6 +184,35 @@ this attempt before it launched, not after.
 (14GB, not 12) since the fold-4 overshoot was under 1GB, not several GB —
 match the size of the fix to the size of the gap.
 
+## 12. `tgm-nfreqs16-cachegb14-seed42` (i-0af8d1a1d1829e336) — DISPROVES the cache-gb=14 theory too
+
+**Symptom:** Got through folds 1-3 cleanly (all eval boundaries and
+post-fold teardowns flat at 0.02GB, same as cache-gb=15 runs), then died
+entering fold 4's training at **the exact same 20.75GB allocated, the
+exact same "chunk 3/8" location** as BOTH prior cache-gb=15 runs (#10).
+**Why this matters:** Two different `--dense-edge-gpu-cache-gb` values (14
+and 15) produced an IDENTICAL crash number. If the dense-edge cache's
+budget were actually what fills up and overflows at fold 4, changing that
+budget by 1GB should have shifted the crash point measurably. It didn't
+move at all.
+**Conclusion:** `--dense-edge-gpu-cache-gb` is NOT the right lever for the
+fold-4 peak — something else, NOT bounded by that flag, is responsible for
+the ~20GB baseline fold 4 hits within its first few dense-edge chunks.
+Checked fold 4's own train-set size against folds 1-3 (903 vs 868/861/847
+samples, 150 vs 143 positives) — only ~6% larger, not enough on its own to
+explain a clean-to-OOM cliff.
+**Lesson:** Stop tuning `--dense-edge-gpu-cache-gb` for this specific
+symptom — three attempts (12, 14, and implicitly 15 itself) have now shown
+it either destabilizes training (12) or does nothing to the crash point
+(14 vs 15, identical numbers). The next lever must be something that
+changes fold 4's OWN peak transient memory during its first few chunks —
+candidates: `--precompute-chunk-size` (trials-per-torch-call during
+dense-edge precompute, default `min(batch_size, 4)` — lowering it reduces
+concurrent working memory during chunk-building), a bigger-VRAM instance
+type, or accepting nfreqs=16 needs its own diagnostic print showing
+allocated memory WITHIN a chunk-build (not just at fold boundaries) to see
+where inside those first 3 chunks the jump to 20GB actually happens.
+
 ---
 
 ## Patterns worth remembering across all of the above

@@ -30,16 +30,18 @@ verified-good full-6-fold run: NOT YET CONFIRMED.
   specifically, only ~0.7-0.8GB over the 22GB ceiling.
   tgm-nfreqs16-cachegb12-seed42 (--dense-edge-gpu-cache-gb 12): WRONG
   direction, disproved the "clearing makes shrinking safe" theory --
-  didn't even survive fold 1. Cache hit rate held 100% through epoch 1's
-  cold build, then started CHURNING in epoch 2 (68-100% oscillating,
-  repeated evict/rebuild) and OOM'd there. 15GB isn't a comfortable
-  default with slack to trim -- it's close to nfreqs=16's real minimum
-  working set; going to 12 destabilizes fold 1 itself, nowhere near fold
-  4. Do not repeat -- shrinking cache-gb is the wrong lever for the fold-4
-  peak, confirmed twice now (10 and 12 both).
-  Next attempt: --dense-edge-gpu-cache-gb 14 (small trim, not a big one --
-  15 died over ceiling by <1GB, so aiming for just enough headroom without
-  crossing into the churn regime that killed the gb=12 attempt).
+  didn't even survive fold 1 (churn in epoch 2).
+  tgm-nfreqs16-cachegb14-seed42 (--dense-edge-gpu-cache-gb 14): died at the
+  EXACT SAME 20.75GB/chunk-3-of-8 spot as the cache-gb=15 runs -- proves
+  cache-gb is NOT the lever for this symptom at all (see FAILURE_LOG.md
+  #12 for the full writeup). STOP tuning --dense-edge-gpu-cache-gb for the
+  fold-4 OOM -- three attempts (10, 12, 14) have shown it either
+  destabilizes training or does nothing to the crash point.
+  Next attempt: --dense-edge-gpu-cache-gb back to 15 (default, known-good
+  for folds 1-3) PLUS --precompute-chunk-size 2 (default is
+  min(batch_size,4)=4 -- lowering it reduces concurrent dense-edge
+  working memory during chunk-building, a genuinely different lever this
+  time, not another cache-gb guess).
 
 scripts/eeg-run-spot.sh \
   --name <run-name> \
@@ -47,7 +49,7 @@ scripts/eeg-run-spot.sh \
   --docker-image ghcr.io/noshore5/eeg_benchmarks-mamba:latest \
   --cmd 'python Epilepsy/run_pipelines.py --pipeline temporal_graph_mamba \
     --label-mode prediction --device cuda --seed 42 --nfreqs 16 \
-    --dense-edge-gpu-cache --dense-edge-gpu-cache-gb 14 \
+    --dense-edge-gpu-cache --precompute-chunk-size 2 \
     --temporal-graph-edge-complex-native \
     --checkpoint-dir /root/checkpoint' \
   --session-note '<what changed since last verified run>'
