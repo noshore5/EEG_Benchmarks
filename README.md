@@ -222,30 +222,88 @@ into one feature representation") so a sweep can attribute any benefit to
 covariance information, conditional dependence, or explicitly modeling
 nonstationarity separately.
 
-**10. How to launch AWS experiments, and expected compute/memory
-(design-only — not executed in this session; no AWS credentials or CHB-MIT
-dataset were available in the sandbox this pipeline was built in).**
-Recommended initial target: `g4dn.xlarge` (1× NVIDIA T4, 16GB GPU memory,
-4 vCPU, 16GB RAM) — this repo's existing `scripts/eeg-run-spot.sh` /
-`Dockerfile.mamba` GPU-pod path applies unchanged (`nonstgm_mamba` needs
-the same `mambapy`/CUDA-kernel setup `dense_edge_mamba` already documents
-in `AWS_INFRA.md`). Mixed precision: bf16 for the model forward/backward
-(`--train-amp-bf16`, already a repo-wide flag), but the covariance
-accumulation and the regularization/inversion step should stay fp32 (this
-is what `nonstgm_graph.py`'s `_local_covariance`/`_regularized_precision`
-already force internally, regardless of the surrounding autocast context)
-— ill-conditioned EEG channel covariances are exactly the case reduced
-precision breaks first. S3 layout: `preprocessed/`, `cache/`,
-`checkpoints/`, `results/`, `logs/`, `configs/` under the existing bucket
-(`AWS_INFRA.md`), with a cache key following `hermitian_ssm_cache.py`'s
-own pattern (`HermitianSpectralConfig.cache_key()`: a sorted-JSON hash of
-a frozen, versioned config dataclass) — for NonStGM that config would
-include `dataset, subject, window_length, sampling_rate, representation,
-temporal_segments, overlap, regularization, static, version`. **None of
-this was run** in the session this pipeline was built in (no AWS access,
-no cached CHB-MIT data) — treat it as a reproducible recipe to launch from
-the AWS-capable side of this repo's split-shell workflow (see
-`CONTEXT.md`), not as a reported result.
+**10. How to launch AWS experiments, and expected compute/memory** (launch
+mechanics verified by reading `AWS_INFRA.md`, `LAUNCH_CHECKLIST.md`,
+`Dockerfile.mamba`, `scripts/eeg-run-spot.sh`/`eeg-run.sh`/
+`promote_results.sh` — no box was actually launched: this sandbox has no
+AWS credentials or cached CHB-MIT dataset).
+
+**No image rebuild or AMI re-bake is needed to run this pipeline.** Both
+launch scripts `git clone -b "$BRANCH"` a fresh checkout and bind-mount it
+over `/workspace` at `docker run` time (`eeg-run-spot.sh`: "ANY code
+change (new pipeline, new flag, whatever) is usable the instant it's
+pushed — no image rebuild, no AMI re-bake"); only a *dependency* change
+needs one. `nonstgm_gru`/`nonstgm_mamba` add **zero new dependencies** —
+`torch`/`numpy`/`pandas`/`scikit-learn`/`mambapy`/`PyYAML` are all already
+pinned in `requirements.txt` (`mambapy==1.2.0`, `PyYAML==6.0.3`) and
+already installed by both the `eeg_benchmarks-mamba` Docker image's build
+(`Dockerfile.mamba`'s `pip install -r requirements.txt`) and the DLAMI
+path's own `pip install -r reqs.txt`. `nonstgm_mamba` therefore gets the
+same fused-CUDA-kernel auto-detect (`mamba_use_cuda_kernel=None`)
+`dense_edge_mamba`/`temporal_graph_mamba` already get on that image, with
+no extra wiring. No script or workflow hardcodes an allowlist of runnable
+`--pipeline` values (checked `scripts/*.sh` + `.github/workflows/*.yml`),
+and `promote_results.sh` commits by path glob
+(`Epilepsy/results/`, `Epilepsy/Session_notes/`), not by pipeline name, so
+`results/nonstgm_gru/` / `results/nonstgm_mamba/` are picked up
+automatically. **One caveat:** this code currently exists only on branch
+`claude/nonstgm-eeg-pipeline-o5cdcl`, not `main` — pass `--branch
+claude/nonstgm-eeg-pipeline-o5cdcl` (not `--branch main`) until it merges,
+the same caveat `AWS_INFRA.md` already documents for other
+not-yet-merged work.
+
+```bash
+# GPU spot (same docker-image path temporal_graph_mamba/dense_edge_mamba use)
+scripts/eeg-run-spot.sh \
+  --name nonstgm-mamba-smoke \
+  --branch claude/nonstgm-eeg-pipeline-o5cdcl \
+  --docker-image ghcr.io/noshore5/eeg_benchmarks-mamba:latest \
+  --cmd 'python Epilepsy/run_pipelines.py --pipeline nonstgm_mamba \
+    --label-mode prediction --device cuda --subjects 1' \
+  --session-note 'first real NonStGM sanity run'
+
+# cheap CPU sanity check (no CUDA/mambapy path exercised, nonstgm_gru only)
+scripts/eeg-run.sh --cpu \
+  --branch claude/nonstgm-eeg-pipeline-o5cdcl \
+  --cmd 'python Epilepsy/run_pipelines.py --pipeline nonstgm_gru \
+    --label-mode prediction --device cpu --subjects 1' \
+  --session-note 'nonstgm_gru CPU smoke'
+```
+
+Recommended initial GPU target: `g4dn.xlarge` (1× NVIDIA T4, 16GB GPU
+memory, 4 vCPU, 16GB RAM) per the spec's own recommendation — no evidence
+yet that this pipeline needs more (it has no CWT/dense-edge-scale GPU
+cache the way `dense_edge*`/`temporal_graph_*` do; profile before scaling
+up, per spec §10's "do not automatically scale to larger/more expensive
+instances unless memory profiling demonstrates that it is necessary").
+
+**Known gap, unlike `dense_edge*`:** `--train-amp-bf16` (mixed-precision
+forward/backward) is currently wired only into the dense-edge-family CLI
+path (`_apply_dense_family_cli_overrides`, `run_pipelines.py`) — it is a
+no-op for every raw-classifier-family pipeline, `nonstgm_gru`/
+`nonstgm_mamba` included, same as `dbconformer`/`godoy_tmc` today.
+`NonStGMClassifier` trains in fp32 throughout until that flag is
+extended to this family (a small, separate follow-up, not specific to
+NonStGM). The covariance accumulation and regularization/inversion step
+are fp32 regardless (`nonstgm_graph.py`'s `_local_covariance`/
+`_regularized_precision` force this internally) — the right target for a
+future bf16 wiring is only the temporal-model/head forward pass, per the
+"signal ops bf16, covariance/inversion fp32" split spec §13 asks for.
+
+S3 layout: `preprocessed/`, `cache/`, `checkpoints/`, `results/`, `logs/`,
+`configs/` under the existing bucket (`AWS_INFRA.md`), with a cache key
+following `hermitian_ssm_cache.py`'s own pattern
+(`HermitianSpectralConfig.cache_key()`: a sorted-JSON hash of a frozen,
+versioned config dataclass) — for NonStGM that config would include
+`dataset, subject, window_length, sampling_rate, representation,
+temporal_segments, overlap, regularization, static, version`. **No disk
+cache exists for NonStGM yet** (unlike `hermitian_ssm_cache.py`/
+`dense_edge_cache.py`) — the covariance/precision graph is cheap enough
+per-window to compute on the fly every batch (no CWT/eigendecomposition
+step), so a cache was not built in this pass; add one if profiling on a
+real box shows it's worth it. **No actual run has happened yet** (no AWS
+access, no cached CHB-MIT data in this sandbox) — treat the commands
+above as verified-launchable, not as a reported result.
 
 **Validation performed so far / explicit limitations:** `tests/
 test_nonstgm.py` (synthetic data, no dataset needed) checks covariance/

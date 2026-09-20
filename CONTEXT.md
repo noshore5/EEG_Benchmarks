@@ -47,15 +47,31 @@ test_nonstgm.py`, 19 tests, all passing -- covariance/precision symmetry,
 PD after regularization, exact `C(C-1)/2` edge count, no NaN/Inf,
 train-fold-only normalization/no-leakage, both temporal backends): this
 sandbox had no `mne`/`mne_data`/CHB-MIT cache and no AWS credentials, so
-**no real CHB-MIT LOSO run and no AWS run have happened yet**. Before
-trusting any benchmark number from this pipeline, the next session needs
-to: (1) run `python Epilepsy/run_pipelines.py --pipeline nonstgm_gru
---label-mode prediction --subjects 1` for real (1-2 LOSO folds is enough
-for a first sanity check) and verify predictions align with the existing
-benchmark's timestamps/labels (spec's validation-experiment list, items
-9-10, is the only part not yet covered by the unit tests); (2) run the
-same config on AWS per the README's AWS section and compare against the
-existing WCT/dense-edge board. Existing WCT/dense-edge/Mamba pipelines are
+**no real CHB-MIT LOSO run and no AWS run have happened yet**. AWS
+launch mechanics WERE checked though (read `AWS_INFRA.md`/
+`LAUNCH_CHECKLIST.md`/`Dockerfile.mamba`/`scripts/eeg-run-spot.sh`/
+`eeg-run.sh`/`promote_results.sh`): this pipeline needs **no image
+rebuild, no AMI re-bake, no script changes** -- both launch scripts bind-
+mount a fresh `git clone -b "$BRANCH"` over `/workspace` at `docker run`
+time, and nonstgm adds zero new deps (`mambapy`/`PyYAML` are already
+pinned in `requirements.txt` and already baked into the
+`eeg_benchmarks-mamba` image + the DLAMI pip-install path). No script
+hardcodes a pipeline allowlist. The one catch: pass `--branch
+claude/nonstgm-eeg-pipeline-o5cdcl`, not `--branch main`, until this
+branch merges -- see README's NonStGM section (#10) for copy-pasteable
+launch commands (GPU spot + CPU). Before trusting any benchmark number
+from this pipeline, the next session needs to: (1) run `python
+Epilepsy/run_pipelines.py --pipeline nonstgm_gru --label-mode prediction
+--subjects 1` for real (1-2 LOSO folds is enough for a first sanity
+check) and verify predictions align with the existing benchmark's
+timestamps/labels (spec's validation-experiment list, items 9-10, is the
+only part not yet covered by the unit tests); (2) run the same config on
+AWS per the README's AWS section and compare against the existing
+WCT/dense-edge board. Also noted in the README: `--train-amp-bf16` is
+currently a no-op for this pipeline (wired only into the dense-edge-
+family CLI path, same gap `dbconformer`/`godoy_tmc` already have) --
+NonStGM trains in fp32 throughout until that's extended, a small,
+separate follow-up. Existing WCT/dense-edge/Mamba pipelines are
 untouched by this branch -- purely additive.
 
 **2026-09-17:** GPU spot IS working now (the "quota 0"
