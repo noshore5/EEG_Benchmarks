@@ -51,6 +51,16 @@ jobs:
           echo "== eeg-job.log tail, if shipped =="
           aws s3 cp "$PFX/eeg-job.log" - 2>&1 | tail -n 80 || echo "(not present)"
           echo
+          # promote_results.sh's own stdout (deploy-key read, git push, rebase
+          # conflicts) never lands in run.log -- that only captures the
+          # training script's stdout/stderr. It's part of the whole user-data
+          # script's own log (boot.log), captured by the top-level `exec >
+          # /var/log/eeg-run-spot.log` in eeg-run-spot.sh. Tail is enough:
+          # the promote step is always the last thing before self-terminate.
+          # See FAILURE_LOG.md #13 for the auto-push gap this was added to catch.
+          echo "== boot.log tail (promote_results.sh output), if shipped =="
+          aws s3 cp "$PFX/boot.log" - 2>&1 | tail -n 60 || echo "(not present)"
+          echo
           if [ -n "$IID" ]; then
             echo "== instance state ($IID) =="
             aws ec2 describe-instances --instance-ids "$IID" \
