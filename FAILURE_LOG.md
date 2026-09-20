@@ -239,6 +239,19 @@ recovery if the commit didn't land.
 -- confirms this isn't a one-off transient blip, it's a real, persistent
 infra gap. Do not keep manually recovering from S3 as a routine workaround
 -- fix the SSM parameter.
+
+**Root cause found and fixed (2026-09-20):** Not a missing parameter --
+`/eeg/github-deploy-key` is a real SecureString, encrypted with the
+AWS-managed default key `alias/aws/ssm`. The `eeg-gpu` IAM role's
+`eeg-ssm-and-sns` policy granted `kms:Decrypt` only on a DIFFERENT,
+specific customer-managed key (`1a6a51f2-231f-4212-bdef-5d0a46641a87`),
+not the one actually protecting this parameter -- so every box could read
+the ciphertext (`ssm:GetParameter` was granted broadly) but never decrypt
+it. Fixed by adding a second `kms:Decrypt` statement scoped to
+`arn:aws:kms:us-east-1:827938107865:alias/aws/ssm`. Not yet verified
+end-to-end (no run has completed since the policy change) -- confirm the
+next run's `boot.log` shows a real `git push` succeeding, not the same
+error a 4th time.
 ---
 
 ## Patterns worth remembering across all of the above
