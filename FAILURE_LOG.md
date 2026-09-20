@@ -1,10 +1,24 @@
-# nfreqs=16 temporal_graph_mamba spot-run failure log
+# AWS spot-run failure log
 
-Every failed/killed attempt at a full 6-fold nfreqs=16 `temporal_graph_mamba`
-prediction run, in chronological order, with root cause and what should have
-been done differently. **Read this before every launch** (see
+Every failed/killed attempt at an AWS spot-launched pipeline run in this
+repo, across ANY pipeline, in chronological order, with root cause and what
+should have been done differently. **Read this before every launch** (see
 LAUNCH_CHECKLIST.md's pointer) — most of the mistakes below were made more
 than once before the pattern was recognized; don't repeat them a third time.
+
+Entries #1-13 happened during `temporal_graph_mamba`'s nfreqs=16 GPU-memory
+saga specifically (dense-edge CWT cache sizing, cross-fold CUDA leaks, the
+SSM auto-push gap) — most of the concrete numbers in them (cache-gb values,
+VRAM figures, `--nfreqs`) are specific to that pipeline's dense-edge
+architecture and won't transfer literally to a different pipeline. Entry
+#14 onward covers other pipelines and other failure classes (e.g. host-RAM
+OOM, not GPU VRAM) — this file is not scoped to one pipeline or one kind of
+resource exhaustion; it's the standing place to log ANY spot-run failure,
+regardless of which pipeline or box hit it. The **"Patterns worth
+remembering"** section at the bottom is written to generalize across
+pipelines already — read it first if you're debugging a NEW pipeline's
+spot-run failure and don't want to wade through the nfreqs=16-specific
+detail above it.
 
 ---
 
@@ -364,6 +378,23 @@ diagnostic before guessing again" lesson from #10):**
    here, since this OOM is confirmed host-side (bare `Killed`, no CUDA
    exception), so a bigger box is a legitimate stopgap, not a repeat of
    the "wrong lever" mistake.
+
+**Follow-up (2026-09-20, commit `5e6a870`):** rather than add the RSS
+print in isolation and relaunch blind, compared this loop against
+`leave_one_seizure_out_prediction`'s sibling loop (a few hundred lines
+away in the same file) and found the loop nonstgm/dbconformer/slimseiz/
+cg_mambanet/godoy_tmc all share had **no per-fold teardown at all** —
+the sibling loop already needed and got the identical `del`+
+`gc.collect()`+`torch.cuda.empty_cache()` fix for the identical reason
+(a fold's classifier stays reachable through reference cycles until
+cyclic GC runs). Ported that fix here instead of guessing a new one, and
+added the RSS print alongside it as originally planned.
+`nonstgm-mamba-smoke-v2` relaunched on the SAME instance class (not yet
+a bigger box) to isolate whether this fix alone is sufficient before
+spending on a bigger-RAM instance as a separate variable. Not yet
+verified — confirm the next check shows all 6 folds completing and read
+the new `[fold N teardown] host RSS=` prints for whether RSS holds flat
+fold-over-fold or still climbs.
 ---
 
 ## Patterns worth remembering across all of the above
@@ -391,3 +422,16 @@ diagnostic before guessing again" lesson from #10):**
 - **Check branch/flag requirements in AWS_INFRA.md / LAUNCH_CHECKLIST.md
   before constructing a launch command**, not after a crash reveals a
   missing flag (mistake #5).
+- **Host RAM and GPU VRAM are separate resources with separate failure
+  signatures — don't diagnose one as the other.** A caught `CUDA out of
+  memory` `RuntimeError` (a Python traceback in `run.log`) is the GPU
+  allocator; a bare `Killed` / `rc=137` with NO Python exception (visible
+  only in `boot.log`, since the process never got to print anything more)
+  is the Linux OOM killer on host RAM. They need different fixes
+  (`torch.cuda.empty_cache()` / cache-gb sizing vs. `del`+`gc.collect()` on
+  plain Python/numpy objects, or a bigger-RAM instance type) — applying a
+  GPU-side fix to a host-RAM OOM (or vice versa) will look like it "does
+  nothing" the same way #8/#11's wrong-lever mistakes did (mistake #14).
+  This is a repo-wide loop bug, not just NonStGM's: every pipeline sharing
+  `leave_one_seizure_out_raw_classifier_prediction` had the same missing
+  per-fold teardown until fixed alongside #14.

@@ -1,10 +1,14 @@
 ## BEFORE EVERY LAUNCH: read FAILURE_LOG.md
 
 FAILURE_LOG.md (repo root) is the full chronological list of every failed
-nfreqs=16 spot run, its root cause, and what should have been done
-differently. Consult it before every launch to avoid repeating a mistake
-already made once (shrinking cache-gb as a blind fix, launching on the
-wrong branch, assuming a fix is deployed without grepping for it, etc.).
+AWS spot run across ANY pipeline in this repo, its root cause, and what
+should have been done differently — not just `temporal_graph_mamba`'s
+nfreqs=16 saga (entries #1-13); later entries cover other pipelines and
+other failure classes (e.g. host-RAM OOM, not GPU VRAM). Consult it before
+every launch to avoid repeating a mistake already made once (shrinking
+cache-gb as a blind fix, launching on the wrong branch, assuming a fix is
+deployed without grepping for it, conflating a host-RAM OOM with a GPU-VRAM
+one, etc.).
 **Every time a run fails, add a new entry to FAILURE_LOG.md** (symptom,
 root cause, what should have been done differently, fix if any) before
 relaunching — this list only stays useful if it's kept current in real
