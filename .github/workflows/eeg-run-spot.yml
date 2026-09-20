@@ -1,0 +1,109 @@
+name: eeg-run-spot (launch a spot GPU training box)
+
+# Fire-and-forget a pipeline run on an interruptible spot GPU box, from anywhere:
+#   - GitHub mobile app / any browser -> Actions -> this workflow -> "Run workflow"
+#   - any shell (incl. Claude Code on a phone):
+#       gh workflow run eeg-run-spot.yml -f name=... -f cmd=...
+#
+# This job only *launches* the box (scripts/eeg-run-spot.sh: tries
+# (instance type, AZ) candidates in order until one has spot capacity) and
+# exits in well under a minute. Everything else happens ON the box: clone ->
+# deps (or docker pull, if docker_image is set) -> run -> on success commit
+# the result CSV(s) (+ optional session note) straight to main via
+# promote_results.sh -> ship logs to S3 -> SNS on failure/spot-reclaim ->
+# self-terminate. Watch progress at the S3 run.log path printed in the job
+# log; a successful run shows up as an "auto: <name> results" commit on main.
+#
+# Unlike eeg-run.yml (on-demand, GPU quota currently 0 -- see CONTEXT.md),
+# this is the verified-working GPU path: LAUNCH_CHECKLIST.md's current best
+# nfreqs=16 command was run this way. Single-shot, not auto-resumable if
+# reclaimed -- rerun by hand with the same --name to resume from the last
+# checkpointed fold (see eeg-run-spot.sh's --checkpoint-dir note) if your
+# --cmd uses run_pipelines.py's --checkpoint-dir flag.
+#
+# Auth: GitHub OIDC -> AWS role eeg-gh-launcher (no stored credentials) --
+# the same role eeg-spot-keepalive.yml already uses to launch spot boxes, so
+# no new IAM setup is needed beyond scripts/setup_gh_launcher.sh (already run).
+
+on:
+  workflow_dispatch:
+    inputs:
+      name:
+        description: "Short run slug (S3 prefix + checkpoint prefix + commit msg + note filename)"
+        required: true
+        type: string
+      cmd:
+        description: "Command to run in the repo root, e.g. python Epilepsy/run_pipelines.py --pipeline temporal_graph_mamba --label-mode prediction --device cuda --seed 42 --nfreqs 16 --dense-edge-gpu-cache --precompute-chunk-size 2 --temporal-graph-edge-complex-native --checkpoint-dir /root/checkpoint"
+        required: true
+        type: string
+      session_note:
+        description: "Optional: why this run. Non-empty -> a session note is written and committed alongside the CSV."
+        required: false
+        default: ""
+        type: string
+      docker_image:
+        description: "Optional: docker image (e.g. ghcr.io/noshore5/eeg_benchmarks-mamba:latest). Blank = plain DLAMI + pip install path."
+        required: false
+        default: ""
+        type: string
+      docker_env:
+        description: "Optional: space-separated KEY=VAL pairs passed as -e flags into the docker run (only used when docker_image is set)."
+        required: false
+        default: ""
+        type: string
+      disk:
+        description: "Root disk GB"
+        required: false
+        default: "150"
+        type: string
+      branch:
+        description: "Repo branch the box checks out and commits to"
+        required: false
+        default: main
+        type: string
+      keep:
+        description: "Debug: don't self-terminate (stop instead of terminate on exit)"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  id-token: write   # mint the OIDC token
+  contents: read
+
+concurrency:
+  group: eeg-run-spot-launch
+  cancel-in-progress: false
+
+jobs:
+  launch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::827938107865:role/eeg-gh-launcher
+          aws-region: us-east-1
+
+      - name: Launch
+        env:
+          IN_NAME: ${{ inputs.name }}
+          IN_CMD: ${{ inputs.cmd }}
+          IN_NOTE: ${{ inputs.session_note }}
+          IN_DOCKER_IMAGE: ${{ inputs.docker_image }}
+          IN_DOCKER_ENV: ${{ inputs.docker_env }}
+          IN_DISK: ${{ inputs.disk }}
+          IN_BRANCH: ${{ inputs.branch }}
+          IN_KEEP: ${{ inputs.keep }}
+        run: |
+          set -euo pipefail
+          args=( --name "$IN_NAME" --cmd "$IN_CMD" --branch "$IN_BRANCH" )
+          if [ -n "$IN_NOTE" ]; then args+=( --session-note "$IN_NOTE" ); fi
+          if [ -n "$IN_DOCKER_IMAGE" ]; then args+=( --docker-image "$IN_DOCKER_IMAGE" ); fi
+          if [ -n "$IN_DOCKER_ENV" ]; then
+            for kv in $IN_DOCKER_ENV; do args+=( --docker-env "$kv" ); done
+          fi
+          if [ -n "$IN_DISK" ]; then args+=( --disk "$IN_DISK" ); fi
+          if [ "$IN_KEEP" = "true" ]; then args+=( --keep ); fi
+          bash scripts/eeg-run-spot.sh "${args[@]}"
