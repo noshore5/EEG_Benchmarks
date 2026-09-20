@@ -160,6 +160,7 @@ from Epilepsy.pipelines.dbconformer_classifier import DBConformerClassifier
 from Epilepsy.pipelines.slimseiz_classifier import SlimSeizClassifier
 from Epilepsy.pipelines.cg_mambanet_classifier import CGMambaNetClassifier
 from Epilepsy.pipelines.godoy_tmc_classifier import GodoyTMCClassifier
+from Epilepsy.pipelines.nonstgm_classifier import NonStGMClassifier
 
 
 def resolve_disable_disk_cache(device, explicit: bool | None) -> bool:
@@ -1144,6 +1145,64 @@ PREDICTION_GODOY_TMC_PARAMS: dict[str, object] = dict(
     validation_split=0.2,
 )
 
+# 2026-09-20: NonStGMClassifier -- a practical EEG adaptation (NOT a
+# reproduction) of Basu & Subba Rao (2023) "Graphical Models for
+# Nonstationary Time Series" (arXiv:2109.08709): time-local regularized
+# covariance -> precision -> conditional-dependence graph, fed to a
+# temporal model, see Epilepsy/pipelines/nonstgm_graph.py's module
+# docstring for the exact math and Epilepsy/pipelines/nonstgm_classifier.py
+# for the architecture. nonstgm_mamba's dict below starts as an EXACT copy
+# of nonstgm_gru's (only temporal_backend differs) -- same isolated-
+# single-backend-ablation reasoning DENSE_EDGE_MAMBA_PARAMS documents
+# relative to DENSE_EDGE_GRU_PARAMS: this compares which sequence model
+# reads the graph, not a bundled capacity change.
+_NONSTGM_SHARED_PARAMS: dict[str, object] = dict(
+    seed=42,
+    device="mps",
+    representation="precision",
+    temporal_segments=6,
+    overlap=0.5,
+    regularization=1e-2,
+    static=False,
+    edge_threshold=None,
+    adaptive_regularization=False,
+    temporal_hidden=16,
+    head_hidden=32,
+    head_dropout=0.2,
+    normalize_input=True,
+    weight_decay=1e-4,
+    grad_clip_norm=1.0,
+    early_stopping_patience=5,
+    use_class_weights=True,
+    verbose=1,
+)
+
+NONSTGM_GRU_PARAMS: dict[str, object] = dict(
+    _NONSTGM_SHARED_PARAMS,
+    temporal_backend="gru",
+    batch_size=32,
+    learning_rate=1e-3,
+    validation_split=0.2,
+)
+
+PREDICTION_NONSTGM_GRU_PARAMS: dict[str, object] = dict(
+    _NONSTGM_SHARED_PARAMS,
+    temporal_backend="gru",
+    batch_size=32,
+    learning_rate=1e-3,
+    validation_split=0.2,
+)
+
+NONSTGM_MAMBA_PARAMS: dict[str, object] = dict(
+    NONSTGM_GRU_PARAMS,
+    temporal_backend="mamba",
+)
+
+PREDICTION_NONSTGM_MAMBA_PARAMS: dict[str, object] = dict(
+    PREDICTION_NONSTGM_GRU_PARAMS,
+    temporal_backend="mamba",
+)
+
 
 def _raw_classifier_family_params(pipeline: str, label_mode: str) -> dict:
     """Param dict for --pipeline dbconformer / slimseiz / cg_mambanet /
@@ -1158,6 +1217,10 @@ def _raw_classifier_family_params(pipeline: str, label_mode: str) -> dict:
         return PREDICTION_CG_MAMBANET_PARAMS if label_mode == "prediction" else CG_MAMBANET_PARAMS
     if pipeline == "godoy_tmc":
         return PREDICTION_GODOY_TMC_PARAMS if label_mode == "prediction" else GODOY_TMC_PARAMS
+    if pipeline == "nonstgm_gru":
+        return PREDICTION_NONSTGM_GRU_PARAMS if label_mode == "prediction" else NONSTGM_GRU_PARAMS
+    if pipeline == "nonstgm_mamba":
+        return PREDICTION_NONSTGM_MAMBA_PARAMS if label_mode == "prediction" else NONSTGM_MAMBA_PARAMS
     raise ValueError(f"not a raw-classifier-family pipeline: {pipeline!r}")
 
 
@@ -1228,6 +1291,21 @@ def _apply_raw_classifier_cli_overrides(
             clf_params["channel_select_fixed_indices"] = [
                 CHB01_CHANNEL_NAMES.index(n) for n in names
             ]
+    if pipeline in ("nonstgm_gru", "nonstgm_mamba"):
+        if args.nonstgm_representation is not None:
+            clf_params["representation"] = args.nonstgm_representation
+        if args.nonstgm_temporal_segments is not None:
+            clf_params["temporal_segments"] = args.nonstgm_temporal_segments
+        if args.nonstgm_overlap is not None:
+            clf_params["overlap"] = args.nonstgm_overlap
+        if args.nonstgm_regularization is not None:
+            clf_params["regularization"] = args.nonstgm_regularization
+        if args.nonstgm_static:
+            clf_params["static"] = True
+        if args.nonstgm_edge_threshold is not None:
+            clf_params["edge_threshold"] = args.nonstgm_edge_threshold
+        if args.nonstgm_adaptive_regularization:
+            clf_params["adaptive_regularization"] = True
 
 
 def _build_windowed_dataset(
@@ -2928,8 +3006,61 @@ def leave_one_seizure_out_raw_classifier_prediction(
     return pd.DataFrame(fold_rows), pd.DataFrame(per_seizure_rows)
 
 
+def apply_config_file(args: argparse.Namespace, argv: list[str]) -> argparse.Namespace:
+    """Generic, pipeline-agnostic `--config path/to/file.yaml` support
+    (spec section 16: `python run_pipelines.py --pipeline nonstgm --config
+    configs/nonstgm.yaml`). No such mechanism existed anywhere in this repo
+    before -- every other pipeline is pure CLI-flag + module-level-constant
+    configured (confirmed by grep). This is intentionally small and does
+    NOT special-case any one pipeline: any YAML key matching an argparse
+    dest (`--nonstgm-temporal-segments` -> `nonstgm_temporal_segments`) is
+    applied as a default override, letting any future pipeline reuse it.
+
+    CLI flags always win over the config file -- a YAML key is only
+    applied when the matching flag was NOT explicitly present in `argv`
+    (checked by literal `--dest-name`/`--dest-name=` substring, the same
+    approach argparse itself has no built-in support for). Unknown YAML
+    keys are warned about, not errored, since a config file might be
+    shared across a future pipeline with a slightly different flag set.
+    """
+    if args.config is None:
+        return args
+    import yaml
+
+    config_path = Path(args.config)
+    with open(config_path) as fh:
+        payload = yaml.safe_load(fh) or {}
+    if not isinstance(payload, dict):
+        raise ValueError(f"--config {config_path}: top-level YAML must be a mapping, got {type(payload)}")
+
+    for key, value in payload.items():
+        dest = key.replace("-", "_")
+        if not hasattr(args, dest):
+            print(f"[--config] warning: unknown key {key!r} in {config_path} (no matching CLI flag) -- ignored.")
+            continue
+        flag_spellings = (f"--{key.replace('_', '-')}", f"--{dest.replace('_', '-')}")
+        explicit_on_cli = any(
+            a == spelling or a.startswith(spelling + "=") for a in argv for spelling in flag_spellings
+        )
+        if explicit_on_cli:
+            continue  # CLI always wins
+        setattr(args, dest, value)
+    return args
+
+
 def _build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument(
+        "--config", type=str, default=None, metavar="PATH",
+        help=(
+            "Optional YAML config file (e.g. configs/nonstgm.yaml). Any key "
+            "matching a CLI flag's dest name (e.g. `nonstgm_temporal_segments` "
+            "for --nonstgm-temporal-segments) is applied as that flag's value, "
+            "UNLESS the flag was also passed explicitly on the command line (CLI "
+            "always wins). Pipeline-agnostic -- not specific to any one "
+            "--pipeline. Unknown keys are warned about, not errors."
+        ),
+    )
     parser.add_argument("--subjects", nargs="+", type=int, default=DEFAULT_SUBJECTS)
     parser.add_argument(
         "--pipeline",
@@ -2937,6 +3068,7 @@ def _build_argument_parser() -> argparse.ArgumentParser:
             "dense_edge_gru", "dense_edge", "dense_edge_mamba", "continuous_cwt_mamba",
             "truong_stft_cnn", "dbconformer", "slimseiz", "cg_mambanet", "godoy_tmc",
             "temporal_graph_gru", "temporal_graph_mamba", "hermitian_ssm",
+            "nonstgm_gru", "nonstgm_mamba",
         ],
         default="dense_edge_gru",
         help=(
@@ -3035,7 +3167,34 @@ def _build_argument_parser() -> argparse.ArgumentParser:
             "(reused _DenseEdgeMambaTemporal; Mamba-3 is the documented next step, not "
             "yet wired) -> 2-class head. label_mode=prediction ONLY (forces it). "
             "Recording-preserving dataset like continuous_cwt_mamba. Requires 'mambapy' "
-            "+ scipy. Results go under results/hermitian_ssm/prediction/."
+            "+ scipy. Results go under results/hermitian_ssm/prediction/. "
+            "'nonstgm_gru'/'nonstgm_mamba' (2026-09-20): NonStGMClassifier -- a "
+            "PRACTICAL EEG ADAPTATION, NOT A REPRODUCTION, of Basu & Subba Rao (2023) "
+            "'Graphical Models for Nonstationary Time Series' (arXiv:2109.08709). Each "
+            "window is split into overlapping local time segments; per segment, a "
+            "sample covariance Sigma_t is estimated and ALWAYS ridge-regularized "
+            "(Sigma_t + lambda*I, never an unregularized inverse) before inversion to a "
+            "precision matrix Theta_t (Cholesky-based solve), which is converted into a "
+            "conditional-dependence edge graph (precision magnitude and/or partial "
+            "correlation, --nonstgm-representation) -- see "
+            "Epilepsy/pipelines/nonstgm_graph.py's module docstring for the exact math "
+            "and what is/isn't faithful to the paper. The resulting per-segment edge "
+            "sequence (E=C(C-1)/2 edges) is fed to a temporal model over the SAME "
+            "[B, C_in, E, T] contract dense_edge_gru/dense_edge_mamba already use -- "
+            "'nonstgm_gru' reuses _DenseEdgeGRUTemporal, 'nonstgm_mamba' reuses "
+            "_DenseEdgeMambaTemporal (requires 'mambapy'), unchanged. "
+            "NONSTGM_MAMBA_PARAMS starts as an exact copy of NONSTGM_GRU_PARAMS (only "
+            "temporal_backend differs), same isolated-ablation reasoning as "
+            "dense_edge_mamba vs. dense_edge_gru. Ablation switches: "
+            "--nonstgm-representation {covariance,precision,partial_corr,both}, "
+            "--nonstgm-temporal-segments, --nonstgm-overlap, --nonstgm-regularization, "
+            "--nonstgm-static (collapses to one whole-window segment, the static-"
+            "covariance ablation), --nonstgm-edge-threshold, "
+            "--nonstgm-adaptive-regularization. No CWT/dense-edge disk cache (the graph "
+            "is computed on the fly per batch, like dbconformer/godoy_tmc). Respects "
+            "--label-mode; results go under results/nonstgm_gru/ and "
+            "results/nonstgm_mamba/ respectively. See the README's 'NonStGM' section "
+            "for the full leakage-prevention and reproduction writeup."
         ),
     )
     parser.add_argument(
@@ -3372,6 +3531,76 @@ def _build_argument_parser() -> argparse.ArgumentParser:
             "channel runs since it bypasses the same stage. Unset "
             "(default): stage 1 runs normally per --slimseiz-select-"
             "channels."
+        ),
+    )
+    parser.add_argument(
+        "--nonstgm-representation",
+        choices=["covariance", "precision", "partial_corr", "both"],
+        default=None,
+        help=(
+            "--pipeline=nonstgm_gru/nonstgm_mamba only: which local-graph edge "
+            "feature(s) to feed the temporal model -- 'covariance' (raw local "
+            "covariance, no inversion: does covariance information alone help?), "
+            "'precision' (|Theta_ij|, conditional-dependence magnitude), "
+            "'partial_corr' (normalized partial correlation), 'both' (precision + "
+            "partial_corr concatenated). Unset: NONSTGM_*_PARAMS default "
+            "('precision'). See nonstgm_graph.py's module docstring for the exact "
+            "definitions and sign convention."
+        ),
+    )
+    parser.add_argument(
+        "--nonstgm-temporal-segments", type=int, default=None,
+        help=(
+            "--pipeline=nonstgm_gru/nonstgm_mamba only: number of overlapping local "
+            "segments each window is split into before estimating a covariance/"
+            "precision matrix per segment. Ignored when --nonstgm-static is set. "
+            "Unset: NONSTGM_*_PARAMS default (6)."
+        ),
+    )
+    parser.add_argument(
+        "--nonstgm-overlap", type=float, default=None,
+        help=(
+            "--pipeline=nonstgm_gru/nonstgm_mamba only: fraction in [0, 1) of each "
+            "local segment that overlaps the next. Unset: NONSTGM_*_PARAMS default "
+            "(0.5)."
+        ),
+    )
+    parser.add_argument(
+        "--nonstgm-regularization", type=float, default=None,
+        help=(
+            "--pipeline=nonstgm_gru/nonstgm_mamba only: ridge regularization lambda "
+            "added to each segment's covariance (Sigma + lambda*I) before inversion "
+            "-- always applied, never an unregularized inverse. Unset: "
+            "NONSTGM_*_PARAMS default (1e-2)."
+        ),
+    )
+    parser.add_argument(
+        "--nonstgm-static", action="store_true",
+        help=(
+            "--pipeline=nonstgm_gru/nonstgm_mamba only: collapse to a single "
+            "segment spanning the whole window (static covariance/precision, no "
+            "time-varying structure) -- the ablation that isolates whether "
+            "modeling nonstationarity explicitly matters, vs. just using "
+            "covariance/precision information at all. Off by default (time-varying)."
+        ),
+    )
+    parser.add_argument(
+        "--nonstgm-edge-threshold", type=float, default=None,
+        help=(
+            "--pipeline=nonstgm_gru/nonstgm_mamba only: zero out edge values with "
+            "|value| below this threshold (post-hoc graph sparsification). Unset "
+            "(default): no thresholding."
+        ),
+    )
+    parser.add_argument(
+        "--nonstgm-adaptive-regularization", action="store_true",
+        help=(
+            "--pipeline=nonstgm_gru/nonstgm_mamba only: on a failed Cholesky at the "
+            "configured --nonstgm-regularization, retry at 10x/100x instead of "
+            "falling back to a diagonal-only precision matrix; the effective lambda "
+            "actually used is recorded in NonStGMClassifier.diagnostics_. Off by "
+            "default (spec: adaptive regularization only when explicitly "
+            "configured)."
         ),
     )
     parser.add_argument(
@@ -3945,12 +4174,19 @@ def main(args: argparse.Namespace) -> None:
         print(means.to_string())
         print(f"event-level hit rate (raw):    {n_hits}/{n_seizures} ({100 * n_hits / n_seizures:.1f}%)")
         print(f"event-level hit rate (k-of-n): {n_hits_smoothed}/{n_seizures} ({100 * n_hits_smoothed / n_seizures:.1f}%)")
-    elif pipeline in ("dbconformer", "slimseiz", "cg_mambanet", "godoy_tmc"):
+    elif pipeline in ("dbconformer", "slimseiz", "cg_mambanet", "godoy_tmc", "nonstgm_gru", "nonstgm_mamba"):
         classifier_cls = {
             "dbconformer": DBConformerClassifier,
             "slimseiz": SlimSeizClassifier,
             "cg_mambanet": CGMambaNetClassifier,
             "godoy_tmc": GodoyTMCClassifier,
+            # Both nonstgm_* pipeline names share the same classifier class --
+            # temporal_backend (set via NONSTGM_GRU_PARAMS/NONSTGM_MAMBA_PARAMS)
+            # is what actually picks GRU vs. Mamba, same one-class/two-pipeline-
+            # names pattern dense_edge_gru/dense_edge_mamba use for
+            # SparseEvidenceGNNClassifier.
+            "nonstgm_gru": NonStGMClassifier,
+            "nonstgm_mamba": NonStGMClassifier,
         }[pipeline]
 
         if label_mode == "prediction":
@@ -3975,6 +4211,10 @@ def main(args: argparse.Namespace) -> None:
                 output_dir, pipeline, "prediction", args.shuffle_labels,
             )
             prediction_dir.mkdir(parents=True, exist_ok=True)
+            if pipeline in ("nonstgm_gru", "nonstgm_mamba"):
+                # Spec section 16 reproducibility ask, scoped to just this
+                # pipeline -- see _write_nonstgm_run_metadata's docstring.
+                _write_nonstgm_run_metadata(prediction_dir, args, clf_params, run_id)
             results_path = prediction_dir / f"prediction_leave_one_seizure_out_{run_id}.csv"
             per_seizure_path = prediction_dir / f"prediction_per_seizure_{run_id}.csv"
             results.to_csv(results_path, index=False)
@@ -4150,6 +4390,47 @@ def main(args: argparse.Namespace) -> None:
         print(means.to_string())
 
 
+def _write_nonstgm_run_metadata(run_dir: Path, args: argparse.Namespace, clf_params: dict, run_id: str) -> None:
+    """Spec section 16: every NonStGM run should save config.yaml/
+    git_commit.txt/environment.txt alongside its results. Scoped to just
+    this pipeline (not threaded through every other pipeline's own results
+    writing) to keep the diff additive -- see run_pipelines.py module
+    docstring / README's NonStGM section for the reasoning. Best-effort:
+    a git/env lookup failure writes a short error message into the file
+    rather than aborting the run.
+    """
+    import subprocess
+
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        import yaml
+        config_payload = {"run_id": run_id, "args": {k: v for k, v in vars(args).items()}, "resolved_clf_params": clf_params}
+        (run_dir / f"config_{run_id}.yaml").write_text(yaml.safe_dump(config_payload, sort_keys=True, default_flow_style=False))
+    except Exception as exc:  # pragma: no cover -- best-effort metadata only
+        (run_dir / f"config_{run_id}.yaml").write_text(f"# failed to serialize config: {exc}\n")
+
+    try:
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=str(Path(__file__).resolve().parent), text=True,
+        ).strip()
+    except Exception as exc:  # pragma: no cover -- best-effort metadata only
+        commit = f"unknown (git lookup failed: {exc})"
+    (run_dir / f"git_commit_{run_id}.txt").write_text(commit + "\n")
+
+    try:
+        import torch as _torch
+        env_lines = [
+            f"python={sys.version.split()[0]}",
+            f"torch={_torch.__version__}",
+            f"cuda_available={_torch.cuda.is_available()}",
+            f"mps_available={getattr(_torch.backends, 'mps', None) is not None and _torch.backends.mps.is_available()}",
+        ]
+    except Exception as exc:  # pragma: no cover -- best-effort metadata only
+        env_lines = [f"failed to collect environment info: {exc}"]
+    (run_dir / f"environment_{run_id}.txt").write_text("\n".join(env_lines) + "\n")
+
+
 def _write_results_readme(output_dir: Path) -> None:
     """Task 6, bullet 5: a short, hard-to-miss note that detection and
     prediction scores are not directly comparable. Idempotent -- overwrites
@@ -4219,7 +4500,8 @@ def _write_results_readme(output_dir: Path) -> None:
 
 if __name__ == "__main__":
     argument_parser = _build_argument_parser()
-    main(argument_parser.parse_args())
+    parsed_args = apply_config_file(argument_parser.parse_args(), sys.argv[1:])
+    main(parsed_args)
 
 
 

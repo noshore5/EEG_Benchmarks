@@ -27,7 +27,38 @@ why (nfreqs=16 burned a full night 2026-09-19 re-deriving fixes that were
 already known). Update it once a run under a new commit/config is
 verified good.
 
-**2026-09-17 (most recent):** GPU spot IS working now (the "quota 0"
+**2026-09-20 (most recent):** new pipeline `nonstgm_gru`/`nonstgm_mamba` on
+branch `claude/nonstgm-eeg-pipeline-o5cdcl` (not yet merged to `main`) --
+a practical EEG adaptation (not a reproduction) of Basu & Subba Rao (2023)
+"Graphical Models for Nonstationary Time Series" (arXiv:2109.08709):
+time-local ridge-regularized covariance -> precision -> conditional-
+dependence graph (`Epilepsy/pipelines/nonstgm_graph.py`), fed to a GRU or
+this repo's existing Mamba temporal backend, reusing
+`_DenseEdgeGRUTemporal`/`_DenseEdgeMambaTemporal` from
+`cwt_gnn_classifiers.py` unchanged (`Epilepsy/pipelines/
+nonstgm_classifier.py`). Wired through the existing raw-classifier-family
+LOSO/CLI dispatch (same pattern as `dbconformer`/`godoy_tmc`), plus a new
+generic, pipeline-agnostic `--config path.yaml` flag on `run_pipelines.py`
+(`apply_config_file`) -- `configs/nonstgm.yaml` is the example. Full
+README section ("NonStGM: nonstationary covariance/precision graph")
+covers the math/leakage/ablation-switch/AWS-recipe writeup.
+**Validation this session was synthetic-data-only** (`tests/
+test_nonstgm.py`, 19 tests, all passing -- covariance/precision symmetry,
+PD after regularization, exact `C(C-1)/2` edge count, no NaN/Inf,
+train-fold-only normalization/no-leakage, both temporal backends): this
+sandbox had no `mne`/`mne_data`/CHB-MIT cache and no AWS credentials, so
+**no real CHB-MIT LOSO run and no AWS run have happened yet**. Before
+trusting any benchmark number from this pipeline, the next session needs
+to: (1) run `python Epilepsy/run_pipelines.py --pipeline nonstgm_gru
+--label-mode prediction --subjects 1` for real (1-2 LOSO folds is enough
+for a first sanity check) and verify predictions align with the existing
+benchmark's timestamps/labels (spec's validation-experiment list, items
+9-10, is the only part not yet covered by the unit tests); (2) run the
+same config on AWS per the README's AWS section and compare against the
+existing WCT/dense-edge board. Existing WCT/dense-edge/Mamba pipelines are
+untouched by this branch -- purely additive.
+
+**2026-09-17:** GPU spot IS working now (the "quota 0"
 notes below and in `AWS_INFRA.md`'s header are stale) via
 `scripts/eeg-run-spot.sh` on branch `spot-tgm-nosig-checkpoint` (NOT
 merged to `main` -- see "Branch map"), `--docker-image

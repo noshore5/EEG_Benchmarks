@@ -1,0 +1,62 @@
+# Example config for the NonStGM pipeline (Epilepsy/pipelines/nonstgm_graph.py,
+# nonstgm_classifier.py) -- a practical EEG adaptation of Basu & Subba Rao
+# (2023), "Graphical Models for Nonstationary Time Series" (arXiv:2109.08709).
+#
+# Usage:
+#   python run_pipelines.py --config configs/nonstgm.yaml
+#
+# Any key here matches a CLI flag's argparse dest (e.g. `nonstgm_temporal_segments`
+# <-> --nonstgm-temporal-segments) -- see `apply_config_file` in run_pipelines.py.
+# A flag passed explicitly on the command line always overrides the value here.
+# This file is a documentation-friendly mirror of NONSTGM_GRU_PARAMS' defaults
+# in run_pipelines.py, not a second source of truth -- if the two drift, the
+# module-level constants in run_pipelines.py are what actually runs unless this
+# file is passed with --config.
+
+pipeline: nonstgm_gru        # or nonstgm_mamba for the Mamba temporal backend
+label_mode: prediction
+subjects: [1]
+
+# --- graphical_model block (spec section 4's requested shape) ---
+# representation: which local-graph edge feature(s) feed the temporal model.
+#   covariance   -- raw local covariance, no inversion (does covariance alone help?)
+#   precision    -- |Theta_ij|, conditional-dependence magnitude
+#   partial_corr -- normalized partial correlation
+#   both         -- precision + partial_corr concatenated
+nonstgm_representation: precision
+
+# Number of overlapping local segments per 30s window, and their overlap
+# fraction. Ignored (collapsed to 1 segment = whole window) when
+# nonstgm_static is true.
+nonstgm_temporal_segments: 6
+nonstgm_overlap: 0.5
+
+# Ridge regularization lambda added to each segment's covariance before
+# inversion (Sigma + lambda*I) -- always applied, never an unregularized
+# inverse. See nonstgm_graph.py's module docstring for the exact math.
+nonstgm_regularization: 0.01
+
+# Ablation: collapse to a single whole-window segment (no time-varying
+# structure) -- isolates whether modeling nonstationarity explicitly matters.
+nonstgm_static: false
+
+# Optional post-hoc graph sparsification: zero out |edge value| below this.
+nonstgm_edge_threshold: null
+
+# Off by default (spec: adaptive regularization only when explicitly
+# configured). When true, a failed Cholesky at nonstgm_regularization
+# retries at 10x/100x instead of falling back to a diagonal-only precision.
+nonstgm_adaptive_regularization: false
+
+# frequency_bands: NOT implemented in this pass -- extensibility stub only
+# (see nonstgm_graph.py's frequency_band param / module docstring). Passing
+# a non-null value here has no CLI flag wired to it yet.
+# frequency_bands: null
+
+# --- standard run knobs, shared with every other pipeline ---
+sph: 300.0
+sop: 900.0
+device: mps
+seed: 42
+validation_split: 0.2
+early_stopping_patience: 5
