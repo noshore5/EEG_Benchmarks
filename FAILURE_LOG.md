@@ -233,6 +233,12 @@ on auto-push for a future run; until then, always verify with `git log
 origin/main` after a run claims to finish, and fall back to manual S3
 recovery if the commit didn't land.
 
+
+**Second occurrence (2026-09-20):** `tgm-nfreqs16-chunk2-seed42-v2`
+(reproduction run) hit the SAME `could not read deploy key from SSM` error
+-- confirms this isn't a one-off transient blip, it's a real, persistent
+infra gap. Do not keep manually recovering from S3 as a routine workaround
+-- fix the SSM parameter.
 ---
 
 ## Patterns worth remembering across all of the above
