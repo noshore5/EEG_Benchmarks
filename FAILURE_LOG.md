@@ -279,6 +279,20 @@ silently converted 4 separate failures (possibly with different root
 causes each time) into one indistinguishable message. Always capture and
 surface the real error before proposing a fix for anything infra-auth
 related.
+
+**Fifth occurrence (2026-09-20) — the stderr fix paid off, real root cause
+found:** `tgm-nfreqs8-cohaffine-seed42` hit the same generic message, but
+this time `boot.log` showed the actual AWS error: `You must specify a
+region. You can also configure your region by running "aws configure".`
+Nothing to do with KMS or IAM at all — `promote_results.sh` runs standalone
+on the box outside `eeg-run.sh`'s environment, and nothing ever set
+`AWS_DEFAULT_REGION`/`AWS_REGION` for it, nor is there a CLI config file on
+a freshly-launched box. Every prior occurrence (including the KMS "fix")
+was aimed at the wrong layer entirely. **Fixed** by exporting
+`AWS_DEFAULT_REGION=us-east-1` (same region as the S3 bucket/EC2 launches
+everywhere else in this repo) near the top of `promote_results.sh`. Not
+yet verified end-to-end — confirm the next run's `boot.log` shows an actual
+`git push` succeeding.
 ---
 
 ## Patterns worth remembering across all of the above

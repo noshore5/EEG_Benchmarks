@@ -28,6 +28,14 @@
 
 set -uo pipefail
 
+# 2026-09-20 (FAILURE_LOG.md #13, 5th occurrence): the stderr-capture fix
+# below finally surfaced the real AWS error for the SSM read -- "You must
+# specify a region" -- not a KMS/permissions issue at all. This script runs
+# standalone on the box (not through eeg-run.sh's env), and nothing sets
+# AWS_DEFAULT_REGION for it; the CLI has no config file here to fall back
+# to. Same region as the S3 bucket/EC2 launches everywhere else in this repo.
+export AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
+
 REPO_DIR=${REPO_DIR:-/root/repo}
 RC=${RC:?promote_results.sh: RC (job exit code) not set}
 RUN_NAME=${RUN_NAME:-run}
