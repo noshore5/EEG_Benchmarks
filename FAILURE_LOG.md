@@ -426,6 +426,30 @@ session should also change the diagnostic from `ru_maxrss` to
 `psutil.Process().memory_info().rss` (current RSS) if this recurs on the
 bigger box — that would distinguish "still climbing fold-over-fold" from
 "flat, just large" cleanly, which `ru_maxrss` alone cannot.
+
+**RESOLVED (2026-09-21), `nonstgm-mamba-smoke-v3`:** launched via the new
+`--instance-types g5.2xlarge:...,g6.2xlarge:...` override (commit
+`cf7a892`), landed on a `g6.2xlarge` (8 vCPU, 30GB RAM, NVIDIA L4). All 6
+folds completed cleanly, `rc=0`, ~10min wall. The `[fold N teardown] host
+RSS=` print across folds: 14.24GB -> 15.26GB -> 15.28GB (folds 0, 3, 4,
+5) — essentially flat, ~1GB total creep across 6 folds, not a runaway
+climb. **This confirms the reframing above was correct, not just a lucky
+bigger box**: if it had been a real per-fold leak, RSS should have kept
+climbing roughly linearly fold-over-fold on the bigger box too (just with
+more headroom before hitting a ceiling); instead it plateaued almost
+immediately, consistent with "one fold's own peak is ~15GB, independent
+of prior folds." The teardown fix from the v2 follow-up is still correct
+hygiene (kept, not reverted) but was never the load-bearing fix for this
+symptom — the box size was. **Lesson for this file's patterns list:**
+when a diagnostic print comes back "flat but large" rather than "small
+and climbing," that confirms a sizing problem over a leak — don't keep
+hunting for a leak once the print rules it out.
+
+Mechanically resolved; the resulting model still failed to learn
+(precision/recall/f1=0.0 all 6 folds, mean roc_auc=0.534) — same
+collapse pattern the CPU/GRU smoke test showed. That is a modeling
+question, not an infra one, and is tracked in `CONTEXT.md`'s 2026-09-21
+entry, not here.
 ---
 
 ## Patterns worth remembering across all of the above

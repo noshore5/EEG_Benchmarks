@@ -27,7 +27,51 @@ why (nfreqs=16 burned a full night 2026-09-19 re-deriving fixes that were
 already known). Update it once a run under a new commit/config is
 verified good.
 
-**2026-09-20 (most recent):** new pipeline `nonstgm_gru`/`nonstgm_mamba`,
+**2026-09-21 (most recent): NonStGM's first real CHB-MIT runs are done --
+both backends complete, both fail to learn.** Following up 2026-09-20's
+"not yet run for real" gap:
+
+- `nonstgm_gru`, 1 subject, CPU (`nonstgm-gru-smoke`, results committed
+  `0781428`): completed cleanly, but training loss stayed pinned near
+  ln(2)~0.69-0.70 across all 6 LOSO folds and 0/6 folds hit their seizure
+  (precision/recall/f1 all 0.0, mean roc_auc=0.293 -- worse than random).
+- `nonstgm_mamba`, 1 subject, GPU: took 3 attempts to even finish.
+  `nonstgm-mamba-smoke` (v1) and `-v2` both got SIGKILL'd/`rc=137`
+  entering fold 1 on the launcher's default `g5`/`g6`/`g4dn`.xlarge boxes
+  (4 vCPU / **16GB host RAM** regardless of GPU) -- a bare `Killed`, not a
+  caught CUDA OOM, i.e. the Linux OOM killer on host RAM, not GPU VRAM.
+  v2 added a per-fold teardown (`del`+`gc.collect()`+`torch.cuda.
+  empty_cache()`, ported from `leave_one_seizure_out_prediction`'s sibling
+  loop, which already needed it) and a host-RSS diagnostic print to
+  `leave_one_seizure_out_raw_classifier_prediction` -- the teardown alone
+  did NOT fix it (v2 died at the identical spot), but the RSS print showed
+  fold 0's own peak already at 14.24GB on the 16GB box, pointing to a
+  single fold's working set being intrinsically near the ceiling rather
+  than a fold-to-fold leak. `nonstgm-mamba-smoke-v3` on a `g5.2xlarge`/
+  `g6.2xlarge` (32GB RAM -- new `--instance-types` override on
+  `eeg-run-spot.sh`/`eeg-run-spot.yml` for exactly this) completed all 6
+  folds cleanly (`rc=0`, RSS held flat 14.24->15.28GB across folds,
+  confirming it was never a real leak). Result: same collapse pattern as
+  GRU -- precision/recall/f1=0.0 in all 6 folds, mean roc_auc=0.534 (~coin
+  flip), 0/6 event-level hits. Full trail: `FAILURE_LOG.md` #14.
+
+**Net finding:** the pipeline runs correctly end-to-end on real CHB-MIT
+data on both temporal backends -- this is no longer an open mechanical
+question. What's now confirmed is that **NonStGM's covariance/precision-
+graph representation isn't producing a learnable signal for seizure
+prediction on this subject**, independent of GRU vs. Mamba. This is a
+single-subject smoke-test finding, not a multi-subject benchmark verdict
+-- not yet investigated: whether this is a real negative result for the
+representation, a hyperparameter/regularization issue (fixed lambda=1e-2,
+6 static-ish temporal segments, `representation="precision"` by default),
+or a data/label alignment problem specific to this subject. Next session
+should decide whether to (a) try `--nonstgm-representation partial_corr`/
+`covariance` or a sweep over `--nonstgm-regularization` before writing
+this off, (b) check timestamp/label alignment as originally planned
+(spec's validation-experiment items 9-10, still not done), or (c) log a
+`Epilepsy/NEGATIVES.md` entry and move on if a quick sweep doesn't help.
+
+**2026-09-20:** new pipeline `nonstgm_gru`/`nonstgm_mamba`,
 merged to `main` from branch `claude/nonstgm-eeg-pipeline-o5cdcl` --
 a practical EEG adaptation (not a reproduction) of Basu & Subba Rao (2023)
 "Graphical Models for Nonstationary Time Series" (arXiv:2109.08709):
