@@ -1,0 +1,4 @@
+python=3.12.10
+torch=2.7.0+cu128
+cuda_available=True
+mps_available=False
