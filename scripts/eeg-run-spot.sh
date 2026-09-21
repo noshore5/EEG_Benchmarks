@@ -49,13 +49,23 @@ DEPLOY_KEY_SSM=${DEPLOY_KEY_SSM:-/eeg/github-deploy-key}
 ## 2026-09-16: g5/g6 (Ampere/Ada, real datacenter GPUs) tried before g4dn
 ## (Tesla T4, weak/older, launch-overhead-heavy workloads like this one's
 ## per-batch dense-edge precompute lose to it) -- see CONTEXT.md.
-CANDIDATES=(
+DEFAULT_CANDIDATES=(
   "g5.xlarge:us-east-1a"    "g5.xlarge:us-east-1b"     "g5.xlarge:us-east-1c"
   "g5.xlarge:us-east-1d"    "g5.xlarge:us-east-1f"
   "g6.xlarge:us-east-1a"    "g6.xlarge:us-east-1b"     "g6.xlarge:us-east-1c"
   "g4dn.xlarge:us-east-1c"  "g4dn.xlarge:us-east-1d"  "g4dn.xlarge:us-east-1a"
   "g4dn.xlarge:us-east-1b"  "g4dn.xlarge:us-east-1f"
 )
+# 2026-09-21 (FAILURE_LOG.md #14): every candidate above is 4 vCPU / 16GB
+# HOST RAM regardless of GPU -- fine for GPU-VRAM-bound pipelines
+# (temporal_graph_mamba's dense-edge cache), but nonstgm-mamba-smoke's
+# host RSS hit 14.24GB after just ONE fold, killed (SIGKILL/rc=137, the
+# OS OOM killer, not a CUDA exception) entering fold 1. --instance-types
+# lets a caller override the (type, AZ) candidate list for a run that
+# needs a bigger-RAM box (e.g. g5.2xlarge/g6.2xlarge, 32GB) without
+# touching this default list for every other pipeline that's fine on
+# 16GB. Comma-separated "type:az" pairs, same format as the array above.
+CANDIDATES=("${DEFAULT_CANDIDATES[@]}")
 subnet_for() {
   case "$1" in
     us-east-1a) echo subnet-057fcd8e8ed1ec050;;
@@ -69,14 +79,22 @@ subnet_for() {
 }
 maxprice_for() {
   case "$1" in
-    g4dn.xlarge) echo 0.526;;
-    g5.xlarge)   echo 1.006;;
-    g6.xlarge)   echo 0.8048;;
-    *)           echo 1.00;;
+    g4dn.xlarge)  echo 0.526;;
+    g5.xlarge)    echo 1.006;;
+    g6.xlarge)    echo 0.8048;;
+    # 2026-09-21: 2xlarge sizes double vCPU+RAM (32GB) for the same GPU --
+    # added for pipelines that are host-RAM-, not GPU-VRAM-, bound (see
+    # --instance-types above). Prices are a generous margin over typical
+    # spot rates for these sizes, not a tight optimization -- capacity,
+    # not price, is usually the binding constraint on this launcher.
+    g4dn.2xlarge) echo 0.752;;
+    g5.2xlarge)   echo 1.212;;
+    g6.2xlarge)   echo 0.978;;
+    *)            echo 1.00;;
   esac
 }
 
-NAME=""; CMD=""; NOTE=""; DISK=150; BRANCH=main; KEEP=0; DOCKER_IMAGE=""; DOCKER_ENV=""
+NAME=""; CMD=""; NOTE=""; DISK=150; BRANCH=main; KEEP=0; DOCKER_IMAGE=""; DOCKER_ENV=""; INSTANCE_TYPES=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --name)         NAME=$2; shift 2;;
@@ -90,6 +108,10 @@ while [ $# -gt 0 ]; do
     # hardcoded below) -- added for EEG_BENCHMARKS_PROFILE_STEPS=1
     # diagnostic launches without hand-editing the script each time.
     --docker-env)   DOCKER_ENV="$DOCKER_ENV -e $2"; shift 2;;
+    # 2026-09-21: override the default (type, AZ) candidate list, e.g.
+    # --instance-types "g5.2xlarge:us-east-1a,g5.2xlarge:us-east-1b" for a
+    # host-RAM-bound run (FAILURE_LOG.md #14). Comma-separated "type:az".
+    --instance-types) INSTANCE_TYPES=$2; shift 2;;
     --keep)         KEEP=1; shift;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
@@ -97,6 +119,9 @@ done
 [ -n "$NAME" ] || { echo "--name required" >&2; exit 2; }
 [ -n "$CMD" ]  || { echo "--cmd required"  >&2; exit 2; }
 NAME=$(printf '%s' "$NAME" | tr -c 'A-Za-z0-9._-' '-')
+if [ -n "$INSTANCE_TYPES" ]; then
+  IFS=',' read -r -a CANDIDATES <<< "$INSTANCE_TYPES"
+fi
 
 # When --docker-image is given, use the pre-baked custom AMI
 # (ami-0c131b0c97ed93cda -- env/deps only, no code baked in; code is bind-

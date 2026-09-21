@@ -51,6 +51,11 @@ on:
         required: false
         default: ""
         type: string
+      instance_types:
+        description: "Optional: comma-separated type:az candidates overriding the default g5/g6/g4dn.xlarge list (all 16GB host RAM) -- e.g. g5.2xlarge:us-east-1a,g5.2xlarge:us-east-1b for a host-RAM-bound pipeline (see FAILURE_LOG.md #14). Blank = default list."
+        required: false
+        default: ""
+        type: string
       disk:
         description: "Root disk GB"
         required: false
@@ -96,6 +101,7 @@ jobs:
           IN_DISK: ${{ inputs.disk }}
           IN_BRANCH: ${{ inputs.branch }}
           IN_KEEP: ${{ inputs.keep }}
+          IN_INSTANCE_TYPES: ${{ inputs.instance_types }}
         run: |
           set -euo pipefail
           args=( --name "$IN_NAME" --cmd "$IN_CMD" --branch "$IN_BRANCH" )
@@ -106,4 +112,5 @@ jobs:
           fi
           if [ -n "$IN_DISK" ]; then args+=( --disk "$IN_DISK" ); fi
           if [ "$IN_KEEP" = "true" ]; then args+=( --keep ); fi
+          if [ -n "$IN_INSTANCE_TYPES" ]; then args+=( --instance-types "$IN_INSTANCE_TYPES" ); fi
           bash scripts/eeg-run-spot.sh "${args[@]}"

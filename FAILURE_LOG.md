@@ -391,10 +391,41 @@ cyclic GC runs). Ported that fix here instead of guessing a new one, and
 added the RSS print alongside it as originally planned.
 `nonstgm-mamba-smoke-v2` relaunched on the SAME instance class (not yet
 a bigger box) to isolate whether this fix alone is sufficient before
-spending on a bigger-RAM instance as a separate variable. Not yet
-verified — confirm the next check shows all 6 folds completing and read
-the new `[fold N teardown] host RSS=` prints for whether RSS holds flat
-fold-over-fold or still climbs.
+spending on a bigger-RAM instance as a separate variable.
+
+**Result of v2 (2026-09-21) — the teardown fix was NOT sufficient, and
+the new data changes the diagnosis:** `nonstgm-mamba-smoke-v2` died at
+the EXACT same spot as v1 — SIGKILL/`rc=137` entering fold 1 (the second
+fold), right after fold 0 completes cleanly. The new RSS print fired
+exactly once (fold 0's teardown), showing:
+`[fold 0 teardown] host RSS (peak so far)=14.24GB` — already within
+~2GB of the box's 16GB ceiling after only ONE fold, immediately after a
+teardown that (if it worked) should have released fold 0's tensors.
+**Why this reframes the diagnosis:** `ru_maxrss` is a running HIGH-WATER
+MARK since process start, not current usage — so 14.24GB does not by
+itself prove the teardown failed to free memory; it proves fold 0's OWN
+peak (data load + fold 0's train/test copies/subsampling/normalization/
+model) already came within 2GB of the ceiling on its own. That is a
+materially different, and arguably more likely, explanation than "fold
+N+1 can't fit because fold N's leftovers are still resident": a single
+fold's peak working set may simply be too large for a 16GB box,
+independent of any leak, in which case NO amount of teardown fixing was
+ever going to prevent fold 1 (whose own peak only needs to be slightly
+larger, e.g. its 903 vs. fold 0's 868 training samples) from tipping
+over 16GB. **Do not keep iterating on teardown/GC for this specific
+symptom** — that would repeat mistake #11's error of tuning the wrong
+lever after evidence should have redirected the pursuit. The teardown
+fix itself is not being reverted (it's still correct hygiene, matching
+the sibling loop), but it is not the load-bearing fix here.
+**Next step:** launch on a bigger-RAM instance (`g5.2xlarge`/`g6.2xlarge`,
+32GB host RAM) — this is no longer just a hedge/stopgap alongside an
+unverified diagnosis, it is now the directly-indicated fix given fold
+0's peak alone is already near the 16GB ceiling. To get a current
+per-fold peak number instead of a lifetime high-water mark, a future
+session should also change the diagnostic from `ru_maxrss` to
+`psutil.Process().memory_info().rss` (current RSS) if this recurs on the
+bigger box — that would distinguish "still climbing fold-over-fold" from
+"flat, just large" cleanly, which `ru_maxrss` alone cannot.
 ---
 
 ## Patterns worth remembering across all of the above
