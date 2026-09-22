@@ -27,7 +27,99 @@ why (nfreqs=16 burned a full night 2026-09-19 re-deriving fixes that were
 already known). Update it once a run under a new commit/config is
 verified good.
 
-**2026-09-21 (most recent): NonStGM's first real CHB-MIT runs are done --
+**2026-09-22 (most recent):** New, gated dataset added: Kuhlmann
+NeuroVista (NV) contest data (AES/Kaggle "Melbourne University
+AES-MathWorks-NIH Seizure Prediction" format) -- DUA-restricted, shared
+via a Dropbox folder link, NOT public; see `scripts/download_kuhlmann_nv.py`'s
+docstring before redistributing anything pulled by it. `.env` now carries
+`DROPBOX_APP_KEY`/`DROPBOX_APP_SECRET`/`DROPBOX_REFRESH_TOKEN` (gitignored,
+confirmed). Only **Pat1Train is downloaded** (826 files, 3.2GB, under
+`datasets/epilepsy/kuhlmann_nv/Pat1Train/`) -- Pat2/Pat3 and all Test
+folders are NOT downloaded (out of scope for now per explicit user
+request: "only worry about patient 1"). Loader is
+`datasets/epilepsy/kuhlmann_nv.py`; confirmed empirically: (1) Test's
+labels are 100% placeholder `_0` (Kaggle never shipped the real answer
+key) -- Test is unusable for any local eval, so all benchmarking has to
+happen via an internal split of Train; (2) NV files carry NO seizure/
+event-grouping metadata (only a `data` key) -- true leave-one-seizure-out
+is NOT reconstructable for this dataset, unlike CHB-MIT's
+`seizure_id`-based LOSO; (3) ~2% of Pat1Train segments (17/826) are
+shorter than the canonical 240,000 samples (real intracranial-recording
+dropout, not a bug) -- `load_patient_train` drops these automatically.
+First real benchmark: `scripts/run_nv_pat1.py` -- uses **GodoyTMCClassifier**
+(swapped in for DBConformer per explicit user request)/`GODOY_TMC_PARAMS`
+from `run_pipelines.py` verbatim, slices each 10-min segment into 30s
+sub-windows (feeding the whole 240,000-sample segment through GodoyTMC's
+tokenizer directly OOM's a 13.5GB attention buffer -- channel-major token
+count blows up to n_channels * T/360), and folds with `StratifiedGroupKFold`
+grouped by originating segment (NOT plain k-fold -- that would leak
+sub-windows from one segment across train/test). This is explicitly NOT
+leave-one-seizure-out and its numbers must never be pooled with CHB-MIT's
+LOSO table without that caveat -- see the script's own module docstring
+for the full reasoning.
+
+Also load at **decimate=4 (100Hz)** by default, not native 400Hz --
+`load_patient_train`'s first version stacked all 825 segments then
+np.stack'd a second full copy, transiently hitting ~25GB and driving this
+laptop's system memory into its compressor (confirmed 2026-09-22, killed
+before it crashed the machine like the earlier slimseiz-channel-select
+run did). Fixed via in-place preallocation + decimate=4 (~3GB resident);
+`kuhlmann_nv.load_segment`/`load_patient_train` take `decimate` as a
+param if a future run needs native resolution and has the headroom.
+
+Tried and ABANDONED same session: `kuhlmann_nv.reconstruct_preictal_blocks`
+attempted to recover the contest's true ~6-segment-per-hour preictal
+block grouping via boundary signal continuity (to fix segment-level
+grouping's known blind spot -- different segments from the same block can
+still land on opposite sides of a fold). Built a self-check (best-match
+vs. median-distance ratio, should show genuine matches as outliers near 0)
+and it FAILED on Pat1: after excluding segments with flat/clipped
+boundaries (a real dropout artifact, 51/253 preictal segments), the ratio
+was a smooth 0.41-1.0 continuum with no separation -- no evidence this
+naive amplitude-matching recovers real structure for this dataset. Left
+in `kuhlmann_nv.py`, unused, with that finding in its docstring -- do not
+wire it back into a fold regime without re-running that same check and
+seeing an actual bimodal separation.
+
+A full run (809 valid segments, 6 folds, default epochs) was launched in
+the background this session (`/tmp/nv_pat1_godoy_run.log`); check that
+log / `Epilepsy/results/godoy_tmc/nv/` for the finished CSV before
+trusting any number quoted from it verbally.
+
+**Note (2026-09-20/21 nfreqs=16 first-success + SSM/IAM fix):** these
+happened between the NonStGM and Kuhlmann work below -- not superseded by
+either. `temporal_graph_mamba` nfreqs=16 prediction got its FIRST VERIFIED
+FULL 6-FOLD RUN this session, after ~10 failed/killed spot-GPU attempts
+documented in `FAILURE_LOG.md` #1-13 (read it before touching this config
+again). The OOMs were never a `--dense-edge-gpu-cache-gb` sizing problem
+(6/8/10/12/14 all tried, either destabilized training or did nothing to
+the crash point) -- the real fixes were (a) clearing `DenseEdgeMemCache`
+both before AND after `predict_proba` each fold (`a3a776c`, `bf4339f`: `predict_proba`'s
+own dense-edge writes were refilling the cache with dead-weight entries
+between folds) and (b) `--precompute-chunk-size 2` (lowers
+trials-per-torch-call during dense-edge chunk-building, eliminating a
+transient VRAM peak cache-gb tuning never touched). Confirmed reproducible
+across two runs: mean AP 0.484/0.481, roc_auc 0.941/0.944, 6/6 event-level
+hit rate both times -- `LAUNCH_CHECKLIST.md`'s current-best command
+reflects this. See `Session_notes/2026_09_20/
+nfreqs16_first_success_and_coh_affine_roundup.md` for the full roundup
+(including the `--temporal-graph-edge-coh-affine-rescale` attempt and its
+COI-masking bug fix, superseded by the fuller nfreqs=8 test + stop-chasing
+decision below).
+
+Also fixed same session: `eeg-gpu` IAM role's `promote_results.sh`
+auto-push had been silently failing on every nfreqs=16 GPU run (`could
+not read deploy key from SSM` -- hit 3x, results recovered manually from
+S3 each time). Root cause: `/eeg/github-deploy-key` is encrypted with the
+AWS-managed default key (`alias/aws/ssm`), but the role's
+`eeg-ssm-and-sns` policy only granted `kms:Decrypt` on a different,
+specific customer-managed key -- so every box could read the ciphertext
+but never decrypt it. Fixed via `aws iam put-role-policy`, adding a
+`kms:Decrypt` statement for `alias/aws/ssm`. **Not yet verified
+end-to-end** -- confirm a future run's `boot.log` shows a real push
+succeeding before trusting this is fixed.
+
+**2026-09-21: NonStGM's first real CHB-MIT runs are done --
 both backends complete, both fail to learn.** Following up 2026-09-20's
 "not yet run for real" gap:
 
