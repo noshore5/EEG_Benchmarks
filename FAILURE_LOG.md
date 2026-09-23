@@ -531,8 +531,18 @@ correctness, not sizing.
 **Fix, following #14's precedent exactly:** relaunch with
 `--instance-types` pointed at `g5.2xlarge`/`g6.2xlarge` (32GB host RAM)
 instead of iterating on batch size or windowing as a memory lever.
-Retry launched as `nv-pat1-block-6fold-v2`; this entry will be updated
-with the outcome once it completes.
+
+**Outcome of the `nv-pat1-block-6fold-v2` retry:** never reached the OOM
+question — the launch step itself failed with "no spot capacity on any
+(type, AZ) candidate," exit code 3, across all 8 `g5.2xlarge`/`g6.2xlarge`
+× AZ candidates (`us-east-1{a,b,c,d,f}` / `us-east-1{a,b,c}`). No instance
+was ever created, so there's no `run.log`/`boot.log` for this attempt and
+the OOM fix itself is still unverified. This is AWS spot availability, not
+a code bug — same as the transient capacity failure `nv-pat1-smoke` hit on
+its first launch attempt (see #15's intro). Needs a plain retry (same
+`--instance-types`) once capacity frees up; the memory-sizing fix stays
+the working hypothesis until a `g5.2xlarge`/`g6.2xlarge` box actually
+runs full-scale block-grouped 6-fold to completion.
 
 ---
 
