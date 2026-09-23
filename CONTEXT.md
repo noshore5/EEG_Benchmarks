@@ -86,6 +86,68 @@ the background this session (`/tmp/nv_pat1_godoy_run.log`); check that
 log / `Epilepsy/results/godoy_tmc/nv/` for the finished CSV before
 trusting any number quoted from it verbally.
 
+**Update, same session, later:** `reconstruct_preictal_blocks` got a
+**v2 that PASSED** (contradicts the "ABANDONED" paragraph above, which
+only covers v1 -- left in place for the failure history, but v1's
+"no evidence this recovers real structure" conclusion is superseded).
+v2 z-scores each preictal segment per-channel before comparing boundary
+continuity (undoes v1's mistake of comparing raw amplitude, which a flat/
+clipped-boundary dropout artifact could fake), then uses cosine
+similarity with a gap threshold (best-match sim minus median sim > 0.6).
+Clean separation (~0.95-0.97 cluster vs ~0.4 bulk). Recovered 12 chains
+(sizes 2-5, 34/253 preictal segments) on Pat1. Wired in as `--grouping
+block` on `run_nv_pat1.py` (default remains `segment`).
+
+A second bug was caught via direct user pushback: the first full run's
+precision/recall/F1/ROC-AUC were scored per 30s SUB-WINDOW (~2,700/fold),
+not per real 10-minute segment (~135/fold) -- the wrong unit vs. how the
+actual contest Test task and leaderboard work (one label/prediction per
+segment). **Fixed in `run_nv_pat1.py`**: sub-windows are now windowed on
+the true `segment_ids` (not block/group ids), and each fold's per-window
+probabilities are mean-pooled back to one score per segment
+(`groupby("segment_id").mean()`) before any metric is computed. **This
+fix has been wired in but NOT YET RUN on a full 6-fold pass for either
+grouping** -- every NV Pat1 number produced so far (see below) predates
+it and is sub-window-scored; treat those as a first look, not the number
+to cite.
+
+Two full 6-fold runs completed with the (still sub-window-scored)
+pipeline -- segment-grouped (`nv_pat1_stratified_kfold_20260922-134903.csv`:
+roc_auc 0.854, AP 0.752, accuracy 0.755, precision 0.603, recall 0.736,
+f1 0.654) and block-grouped
+(`nv_pat1_stratified_kfold_blockgrouped_20260922-141154.csv`: roc_auc
+0.882, AP 0.805, accuracy 0.767, precision 0.600, recall 0.792, f1
+0.680). Block-grouped scored HIGHER on every metric but precision --
+opposite of the predicted leakage-reduction direction; read as
+fold-noise, not evidence the fix does nothing (only 34/253 segments were
+affected, folds already swing 0.757-0.905 on their own). Full writeup +
+uncertainty discussion: `Session_notes/2026_09_22/
+nv_pat1_first_benchmark.md` and `.../nv_pat1_block_grouping_and_leaderboard.md`.
+
+A real contest leaderboard was pulled fresh from the published Google
+Sheet embedded on epilepsyecosystem.org/leaderboard and committed at
+`Epilepsy/NV_Contest_results.csv` (a concurrent shell briefly relocated
+it to `datasets/epilepsy/`, moved back per explicit user instruction) --
+68 submissions / 7 teams, a 2024
+private-contest leaderboard (per user correction; NOT the 2016 Kaggle
+contest godoy_tmc's source paper would postdate) scored against the real
+withheld Test answer key we don't have. Ranked on avg rank across Overall
+AUC / per-patient Average AUC / per-patient Minimum AUC. Top single score
+0.867, official winner (best avg rank) 0.807, field Overall AUC mean
+0.711/median 0.728/std 0.103 (n=68). No method/code/write-up per
+submission -- cannot identify what architecture, if any, resembled
+GodoyTMC. **Cannot currently estimate how godoy_tmc would rank on this
+leaderboard**, for 4 independent reasons (any one alone disqualifying):
+still sub-window-scored (wrong unit), Pat1-only vs. the leaderboard's
+pooled/averaged 3-patient metrics, internal CV vs. real held-out Test,
+and our own fold-to-fold noise (0.757-0.915) being more than double the
+leaderboard's entire competitive margin (0.807-0.867 winner-to-top gap).
+
+**Top pending task for a future NV session: re-run both `--grouping
+segment` and `--grouping block` full 6-fold passes with the segment-
+aggregation fix now that it's actually wired in**, and cite THAT number
+instead of anything above.
+
 **Note (2026-09-20/21 nfreqs=16 first-success + SSM/IAM fix):** these
 happened between the NonStGM and Kuhlmann work below -- not superseded by
 either. `temporal_graph_mamba` nfreqs=16 prediction got its FIRST VERIFIED

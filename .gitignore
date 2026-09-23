@@ -35,3 +35,14 @@ Epilepsy/szcore/algo/model_weights.pt
 # Generated visualization output (large; regenerate via exports/coherence-graph/build_coherence_export.py)
 exports/
 !exports/coherence-graph/build_coherence_export.py
+
+# secrets/local env — never commit
+.env
+
+# Kuhlmann NeuroVista contest data -- DUA-restricted, shared via a private
+# Dropbox link, NOT public (see CONTEXT.md's 2026-09-22 entry). This repo
+# is public on GitHub -- never commit the actual downloaded segments.
+# datasets/epilepsy/kuhlmann_nv.py (the loader code) is fine and tracked.
+datasets/epilepsy/kuhlmann_nv/
+datasets/epilepsy/*.mat
+datasets/epilepsy/*.crdownload
