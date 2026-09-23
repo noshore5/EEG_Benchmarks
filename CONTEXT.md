@@ -148,6 +148,14 @@ segment` and `--grouping block` full 6-fold passes with the segment-
 aggregation fix now that it's actually wired in**, and cite THAT number
 instead of anything above.
 
+**2026-09-23:** Pat1Train mirrored to S3 (`s3://noshore-eeg-benchmarks-
+827938107865/datasets/kuhlmann_nv/Pat1Train.tar.gz`, private bucket, no
+extra creds needed on a box) so a spot/GH-Actions-launched box -- including
+one driven from a cloud Claude Code shell with no access to the local
+Mac's Dropbox-downloaded copy -- can run NV benchmarks without touching
+Dropbox. Fetch on a box with `scripts/fetch_kuhlmann_nv_s3.sh` before
+`run_nv_pat1.py`; see `AWS_INFRA.md`'s "Shared storage" section.
+
 **Note (2026-09-20/21 nfreqs=16 first-success + SSM/IAM fix):** these
 happened between the NonStGM and Kuhlmann work below -- not superseded by
 either. `temporal_graph_mamba` nfreqs=16 prediction got its FIRST VERIFIED

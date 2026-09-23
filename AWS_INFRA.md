@@ -418,6 +418,22 @@ versioning **enabled**, no lifecycle policy. Prefixes:
 Old bucket `s3://coheriq-eeg-dense-edge-cache/` (referenced in
 `_to_delete/aws_sync.log`) is **deleted** -- do not sync to it.
 
+**`datasets/kuhlmann_nv/Pat1Train.tar.gz`** (2026-09-23, 2.9GB, 826 files
+tarred as one object) -- mirror of the DUA-restricted Kuhlmann NeuroVista
+data (see CONTEXT.md's 2026-09-22 entry / `datasets/epilepsy/
+kuhlmann_nv.py`'s docstring), uploaded so a launched box (including one
+driven by the `eeg-run.yml` GitHub Actions workflow from a cloud shell
+with no access to the local Mac's Dropbox-downloaded copy) can get this
+data without touching Dropbox at all. Safe to keep private here: this
+bucket has public access fully blocked (confirmed via
+`get-public-access-block`) and every `eeg-run` worker already carries
+`eeg-gpu`'s `s3-eeg-bucket` RW grant, so no extra credentials needed on a
+box. Fetch + extract on a box with `scripts/fetch_kuhlmann_nv_s3.sh
+[Pat1Train]` (skips the download if the target dir is already populated,
+e.g. on a custom AMI that's already baked it in). Only Pat1Train is
+mirrored -- re-`aws s3 cp` by hand first if a future session needs
+another subfolder.
+
 ## IAM
 
 - **User `claude`** -- the local CLI creds (Mac). Admin via group `cli`
