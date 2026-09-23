@@ -450,6 +450,66 @@ Mechanically resolved; the resulting model still failed to learn
 collapse pattern the CPU/GRU smoke test showed. That is a modeling
 question, not an infra one, and is tracked in `CONTEXT.md`'s 2026-09-21
 entry, not here.
+
+## 15. `nv-pat1-smoke` (2026-09-23) — real error hidden by unattended `aws cli` progress spam
+
+First CUDA run of the new Kuhlmann NV (`run_nv_pat1.py`) pipeline, and
+the first run of `kuhlmann_nv.py`'s new S3 auto-fetch (`_try_fetch_from_s3`,
+commit `ae66025`). Exited `rc=1`, but the actual error was unreadable
+through `eeg-tail.yml`/`get_job_logs` — the log came back full of
+duplicate `Completed X GiB/Y GiB... with 1 file(s) remaining` lines and
+nothing else useful.
+
+**Root cause:** `aws s3 cp` (in `fetch_kuhlmann_nv_s3.sh`) writes a full
+new line per progress tick instead of overwriting one line when stdout
+isn't a TTY — on the 2.9GB `Pat1Train.tar.gz` object that's tens of
+thousands of duplicate lines. That fetch runs as a subprocess of
+`run_nv_pat1.py`, so the spam landed directly in `run.log` next to
+training output. `eeg-run-spot.sh`'s own generic `aws s3 sync
+s3://$BUCKET/datasets /root/mne_data` had the identical problem in
+`boot.log` (and was also redundantly re-pulling the same 2.9GB tarball
+into a destination nothing reads from). GitHub's log API truncates a
+large log from the **front**, so this bloat silently ate the real
+traceback every time, not just made logs noisy — a repeat of the same
+failure class as #13's dropped `run.log`/`boot.log` sections, different
+cause.
+
+**Fix (commit `8ac40f8`):** `--no-progress` on both `aws s3 cp` calls;
+the generic sync also gained `--exclude "kuhlmann_nv/*"` since that
+subtree is fetched separately into a different destination.
+
+**Lesson for this file's patterns list:** a large, noisy log is not just
+an annoyance — on this launcher it can actively hide the one line you
+need. Any new `aws s3 cp`/`sync` added to a script whose output lands in
+`run.log`/`boot.log` should get `--no-progress` from the start, not
+after the first time it swallows a real error.
+
+## 16. `nv-pat1-smoke2` (2026-09-23) — fetch script assumed a tarball layout that wasn't real
+
+Re-run of #15 after the log-spam fix made the real error visible:
+```
+find: '/root/repo/datasets/epilepsy/kuhlmann_nv/Pat1Train': No such file or directory
+FileNotFoundError: .../kuhlmann_nv/Pat1Train not found -- run scripts/download_kuhlmann_nv.py Pat1Train first.
+```
+`fetch_kuhlmann_nv_s3.sh` extracted `Pat1Train.tar.gz` straight into
+`$DEST_ROOT` and assumed the tarball itself contained a `Pat1Train/`
+top-level folder matching the S3 object's name — it doesn't; the `.mat`
+files land flat. The download itself was fine (confirmed via the S3
+transfer completing in the log); only the post-extraction path
+assumption was wrong.
+
+**Fix (commit `f663844`):** extract into a scratch staging directory,
+`find` every `*.mat` file wherever it actually landed (flat or nested,
+either way), and move them into `$DEST_DIR` — robust to the tarball's
+real layout instead of assuming one. Also added a loud failure (exit 1)
+if 0 `.mat` files turn up, instead of silently proceeding into training
+against an empty directory.
+
+**Lesson:** don't assume an archive's internal layout mirrors its
+filename/the destination you want — verify (or make the consumer robust
+to either layout) rather than hardcode a path that was never actually
+checked against the real tarball.
+
 ---
 
 ## Patterns worth remembering across all of the above
