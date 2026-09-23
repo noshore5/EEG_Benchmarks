@@ -29,6 +29,7 @@ See scripts/run_nv_pat1.py for the fold regime actually used instead
 from __future__ import annotations
 
 import re
+import subprocess
 from collections import Counter
 from pathlib import Path
 
@@ -41,12 +42,27 @@ _FNAME_RE = re.compile(r"^Pat(\d+)(Train|Test)_(\d+)_(\d+)\.mat$")
 DEFAULT_ROOT = Path(__file__).resolve().parent / "kuhlmann_nv"
 
 
+def _try_fetch_from_s3(subfolder: str) -> None:
+    """Best-effort pull of a missing Pat<N><Train|Test> subfolder from the
+    private S3 mirror (scripts/fetch_kuhlmann_nv_s3.sh) -- lets a spot box
+    run --cmd 'python scripts/run_nv_pat1.py ...' with no separate fetch
+    step, same as chb_mit.py's own auto-download for CHB-MIT. No-op (never
+    raises) if the script or S3 object isn't there; the caller's own
+    FileNotFoundError below is the real error message either way."""
+    script = Path(__file__).resolve().parents[2] / "scripts" / "fetch_kuhlmann_nv_s3.sh"
+    if not script.is_file():
+        return
+    subprocess.run(["bash", str(script), subfolder], check=False)
+
+
 def list_segments(patient: int, split: str, root: Path = DEFAULT_ROOT) -> list[dict]:
     """Return [{"path", "segment_id", "label"}, ...] for one patient/split
     subfolder, sorted by segment_id. label is int(0/1) parsed from the
     filename -- real for split="Train", a meaningless placeholder for
     split="Test" (see module docstring)."""
     subdir = root / f"Pat{patient}{split}"
+    if not subdir.is_dir():
+        _try_fetch_from_s3(f"Pat{patient}{split}")
     if not subdir.is_dir():
         raise FileNotFoundError(
             f"{subdir} not found -- run scripts/download_kuhlmann_nv.py Pat{patient}{split} first."
