@@ -17,18 +17,57 @@ in run_pipelines.py) -- overridden here to match NV's own decimated rate
 (400Hz/--decimate, default 100Hz), or the CWT/coherence band (8-40Hz) would
 be computed against the wrong sample rate entirely.
 
-Does NOT reuse run_pipelines.py's leave_one_seizure_out_prediction (the
-CHB-MIT loop that builds shared cwt_cache/dense_edge_cache_dir/
-dense_edge_mem_cache across folds and does seizure_id-based fold exclusion)
--- that function's caching/exclusion machinery is built around CHB-MIT's
+Does NOT reuse run_pipelines.py's leave_one_seizure_out_prediction's
+seizure_id-based fold *exclusion* logic -- that's built around CHB-MIT's
 metadata contract (real seizure_id/subject/run columns) and doesn't map
-cleanly onto NV's segment/reconstructed-block grouping. Each fold's
-StreamingSparseEvidenceGNNClassifier is constructed with no shared cache
-(cwt_cache/dense_edge_cache_dir/dense_edge_mem_cache all default to None),
-so every fold recomputes its own dense-edge tensors from scratch -- slower
-than CHB-MIT's cross-fold cache reuse, but correct, and NV's much smaller
-scale (hundreds, not tens of thousands, of windows) makes that an
-acceptable tradeoff rather than a real bottleneck.
+onto NV's segment/reconstructed-block grouping.
+
+**2026-09-23 correction -- caching regime rewritten twice in one day:**
+
+*Attempt 1* (this script's very first version) passed no cache at all
+(cwt_cache/dense_edge_cache_dir/dense_edge_mem_cache all None), on the
+stated assumption that NV's "much smaller scale (hundreds, not tens of
+thousands, of windows)" made per-fold recompute an acceptable tradeoff.
+Wrong: full-scale NV Pat1 windows to ~16,180 sub-windows, not hundreds,
+and with no cache every batch of every epoch recomputed its own
+dense-edge/CWT tensors from scratch (no reuse even *within* a single
+fit() call). `nv-pat1-tgm-block-6fold` ran 30+ minutes still stuck on
+fold 0's first epoch before being killed.
+
+*Attempt 2* (this version) does NOT copy CHB-MIT's exact regime either --
+NV's working set is too large for that, not too small. leave_one_seizure_
+out_prediction relies mostly on a GPU-resident dense_edge_mem_cache
+(DenseEdgeMemCache, byte-budgeted LRU, ~15-23GB typical budget). Full-mesh
+dense-edge entries run ~15MB/trial (dense_edge_cache.py's own docstring);
+at 16,180 unique windows that's ~243GB of unique entries -- 10-15x any
+single GPU's VRAM budget, so a GPU-only cache would constantly evict and
+effectively still recompute most trials, same failure mode as no cache at
+all, just with extra bookkeeping overhead on top. CHB-MIT's LOSO runs
+don't hit this because their per-subject/per-seizure working sets are
+smaller and mostly fit the VRAM budget already.
+
+The fix here is two-tier, matching what leave_one_seizure_out_prediction
+*also* does by default (disk cache always on) but relying on the disk
+tier as the real floor instead of treating it as a fallback:
+  1. **Disk cache is the floor** (DiskCWTCache for raw CWT tensors,
+     dense_edge_cache_dir for dense-edge tensors) -- content-addressed,
+     survives across the whole run and across process restarts, and its
+     capacity is bounded by EBS/NVMe, not VRAM, so it comfortably holds
+     NV's full ~243GB working set. First-touch cost per window is paid
+     once; every later hit (same window, any batch/epoch/fold) is a disk
+     read instead of a full CWT+coherence recompute. On by default here;
+     `--disable-disk-cache` turns it off for a from-scratch A/B timing
+     comparison, not for routine use.
+  2. **GPU-resident dense_edge_mem_cache is an opt-in accelerator on top**
+     (`--dense-edge-gpu-cache`), same auto-sizing as run_pipelines.py's
+     flag of the same name -- speeds up whichever subset of windows is
+     currently hot (the active fold's training windows) without needing
+     to hold the whole dataset resident. Cleared at each fold's train->
+     eval boundary (train and test windows are disjoint within a fold,
+     so training's cache entries are dead weight by the time eval runs --
+     same reasoning run_pipelines.py's 2026-09-19 fix documents), but NOT
+     cleared between folds -- NV's folds share most of their windows
+     across each other's training sets too, same as CHB-MIT's LOSO folds.
 
 No fold-level checkpoint/resume (leave_one_seizure_out_prediction's
 --checkpoint-dir doesn't apply here) -- a spot reclaim mid-run loses all
@@ -75,7 +114,18 @@ from datasets.epilepsy.kuhlmann_nv import (  # noqa: E402
 from Epilepsy.pipelines.cwt_gnn_classifiers import (  # noqa: E402
     StreamingSparseEvidenceGNNClassifier,
 )
-from Epilepsy.run_pipelines import PREDICTION_TEMPORAL_GRAPH_MAMBA_PARAMS  # noqa: E402
+from Epilepsy.pipelines.cwt_window_cache import (  # noqa: E402
+    DiskCWTCache,
+    default_cwt_cache_root,
+)
+from Epilepsy.pipelines.dense_edge_cache import (  # noqa: E402
+    DenseEdgeMemCache,
+    default_dense_edge_cache_root,
+)
+from Epilepsy.run_pipelines import (  # noqa: E402
+    PREDICTION_TEMPORAL_GRAPH_MAMBA_PARAMS,
+    _resolve_dense_edge_cache_gb,
+)
 
 
 def run(
@@ -91,6 +141,10 @@ def run(
     grouping: str,
     nfreqs: int,
     precompute_chunk_size: int | None,
+    disable_disk_cache: bool,
+    dense_edge_gpu_cache: bool,
+    dense_edge_gpu_cache_gb: float | None,
+    dense_edge_gpu_cache_headroom_gb: float,
     output_dir: Path,
 ) -> pd.DataFrame:
     native_fs = 400.0
@@ -143,14 +197,39 @@ def run(
     clf_params["temporal_graph_edge_complex_native"] = True
     clf_params["precompute_chunk_size"] = precompute_chunk_size
 
+    # Two-tier cache shared across the WHOLE run (all folds) -- see module
+    # docstring's "caching regime rewritten twice in one day" section for
+    # why disk is the floor here and GPU residency is only an accelerator.
+    shared_cwt_cache = None if disable_disk_cache else DiskCWTCache(default_cwt_cache_root())
+    shared_dense_edge_cache_dir = None if disable_disk_cache else default_dense_edge_cache_root()
+    shared_dense_edge_mem_cache = (
+        DenseEdgeMemCache(max_bytes=int(
+            _resolve_dense_edge_cache_gb(dense_edge_gpu_cache_gb, dense_edge_gpu_cache_headroom_gb)
+            * (1024 ** 3)
+        ))
+        if dense_edge_gpu_cache else None
+    )
+
     sgkf = StratifiedGroupKFold(n_splits=n_folds, shuffle=True, random_state=seed)
     rows = []
     for fold_i, (train_idx, test_idx) in enumerate(sgkf.split(X, y, groups=groups)):
         X_train, y_train = X[train_idx], y[train_idx]
         X_test, y_test_win = X[test_idx], y[test_idx]
 
-        clf = StreamingSparseEvidenceGNNClassifier(epochs=epochs, **clf_params)
+        clf = StreamingSparseEvidenceGNNClassifier(
+            epochs=epochs,
+            cwt_cache=shared_cwt_cache,
+            dense_edge_cache_dir=shared_dense_edge_cache_dir,
+            dense_edge_mem_cache=shared_dense_edge_mem_cache,
+            **clf_params,
+        )
         clf.fit(X_train, y_train)
+        # Train/test windows are disjoint within a fold, so training's mem-
+        # cache entries are guaranteed dead weight for eval -- clear before
+        # predict_proba (same reasoning as run_pipelines.py's 2026-09-19
+        # eval-boundary fix). NOT cleared *between* folds -- see docstring.
+        if shared_dense_edge_mem_cache is not None:
+            shared_dense_edge_mem_cache.clear()
         proba = clf.predict_proba(X_test)
         y_score_win = proba[:, 1]
 
@@ -253,6 +332,26 @@ def main() -> None:
         help="dense-edge precompute chunk size (VRAM safety valve) -- see LAUNCH_CHECKLIST.md.",
     )
     parser.add_argument(
+        "--disable-disk-cache", action="store_true",
+        help="skip the on-disk CWT/dense-edge cache (see module docstring's caching-regime "
+        "section) -- for a from-scratch timing A/B only, not routine use.",
+    )
+    parser.add_argument(
+        "--dense-edge-gpu-cache", action="store_true",
+        help="also keep a byte-budgeted GPU-resident dense-edge cache on top of the disk "
+        "cache (see module docstring) -- speeds up the active fold's hot windows.",
+    )
+    parser.add_argument(
+        "--dense-edge-gpu-cache-gb", type=float, default=None,
+        help="override the GPU cache's byte budget (GiB); default auto-sizes from the card's "
+        "total VRAM minus --dense-edge-gpu-cache-headroom-gb.",
+    )
+    parser.add_argument(
+        "--dense-edge-gpu-cache-headroom-gb", type=float, default=8.0,
+        help="VRAM to leave unclaimed by the GPU cache when auto-sizing it (ignored if "
+        "--dense-edge-gpu-cache-gb is also passed).",
+    )
+    parser.add_argument(
         "--output-dir",
         default=str(REPO_ROOT / "Epilepsy" / "results" / "temporal_graph_mamba" / "nv"),
     )
@@ -271,6 +370,10 @@ def main() -> None:
         grouping=args.grouping,
         nfreqs=args.nfreqs,
         precompute_chunk_size=args.precompute_chunk_size,
+        disable_disk_cache=args.disable_disk_cache,
+        dense_edge_gpu_cache=args.dense_edge_gpu_cache,
+        dense_edge_gpu_cache_gb=args.dense_edge_gpu_cache_gb,
+        dense_edge_gpu_cache_headroom_gb=args.dense_edge_gpu_cache_headroom_gb,
         output_dir=Path(args.output_dir),
     )
 
