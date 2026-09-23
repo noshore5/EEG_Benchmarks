@@ -316,6 +316,39 @@ AWS comparison have not been executed** — see `CONTEXT.md` for what the
 next session needs to do before any benchmark number from this pipeline
 should be trusted.
 
+### Kuhlmann NeuroVista (NV) contest benchmark (`scripts/run_nv_pat1.py`)
+
+A second seizure-prediction dataset, separate from CHB-MIT: the Kuhlmann
+NeuroVista Trial contest data (AES/Kaggle "Melbourne University
+AES-MathWorks-NIH Seizure Prediction" format), intracranial, DUA-restricted
+(NOT public — see `datasets/epilepsy/kuhlmann_nv.py`'s docstring before
+redistributing anything). Only **Pat1Train** is in scope (per explicit
+user request). Loader: `datasets/epilepsy/kuhlmann_nv.py`. First
+benchmark: `scripts/run_nv_pat1.py`, using `GodoyTMCClassifier` sliced
+into 30s sub-windows, `StratifiedGroupKFold` grouped by segment (default)
+or by reconstructed preictal block (`--grouping block`) — **this is
+explicitly NOT leave-one-seizure-out** (the released files carry no
+seizure/event-grouping metadata at all) and its numbers must never be
+pooled with CHB-MIT's LOSO table without that caveat. See `CONTEXT.md`'s
+2026-09-22/23 entries for the full status (segment-aggregation scoring fix,
+block-grouping reconstruction, and why no number from this pipeline is
+citable yet).
+
+Real contest leaderboard (for context, not a target to match — internal
+CV numbers here aren't directly comparable to it, see `CONTEXT.md`):
+`datasets/epilepsy/NV_Contest_results.csv`.
+
+**Getting the data onto a box** (including a cloud-launched shell with no
+access to the local Mac's Dropbox-downloaded copy): the actual data is
+gitignored (DUA-restricted, this repo is public), but `Pat1Train` is
+mirrored on a private S3 bucket every `eeg-run` worker can already read.
+Run `scripts/fetch_kuhlmann_nv_s3.sh` before `run_nv_pat1.py` — see
+`AWS_INFRA.md`'s "Shared storage" section for details. (Re-downloading
+straight from Dropbox instead, e.g. locally, uses
+`scripts/download_kuhlmann_nv.py` — needs `DROPBOX_APP_KEY`/
+`DROPBOX_APP_SECRET`/`DROPBOX_REFRESH_TOKEN` in `.env`, not needed for the
+S3 path.)
+
 ### SzCORE submission (`Epilepsy/szcore/`)
 
 Packages `godoy_tmc` as a container for
