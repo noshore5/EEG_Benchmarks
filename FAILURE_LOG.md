@@ -544,6 +544,18 @@ its first launch attempt (see #15's intro). Needs a plain retry (same
 the working hypothesis until a `g5.2xlarge`/`g6.2xlarge` box actually
 runs full-scale block-grouped 6-fold to completion.
 
+**`nv-pat1-block-6fold-v3` retry: same no-capacity failure.** Relaunched
+with the identical `--instance-types` list; exit code 3 again, all 8
+candidates reported "no capacity" a second time. Two consecutive
+launch-time failures on the same instance classes/AZs in one morning —
+still reads as AWS availability (`g5.2xlarge`/`g6.2xlarge` in `us-east-1`
+being genuinely scarce right now), not a bug in the launcher, but worth
+a plain retry later rather than assuming it'll clear on its own; the
+memory-sizing fix for the original OOM remains unverified. Deprioritized
+behind `nv-pat1-tgm-block-6fold` (temporal_graph_mamba on the same
+dataset, which *did* get `g6.2xlarge` capacity on its first try) per
+explicit user direction — not relaunched again this session.
+
 ---
 
 ## Patterns worth remembering across all of the above
