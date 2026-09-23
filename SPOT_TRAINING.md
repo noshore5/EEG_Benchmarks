@@ -9,6 +9,17 @@ detection of CHB-MIT"). The `eeg-spot-keepalive.yml` cron is
 run to drive, and never with the 24-subject default command (needs the
 dataset cache, §"What's NOT built" #2). Read `AWS_INFRA.md` first.
 
+**2026-09-23: Kuhlmann NV data now has a private-S3 mirror** for exactly
+the "no dataset cache on a fresh box" gap this doc keeps flagging --
+`scripts/fetch_kuhlmann_nv_s3.sh` pulls `Pat1Train` from
+`s3://noshore-eeg-benchmarks-827938107865/datasets/kuhlmann_nv/
+Pat1Train.tar.gz` (no Dropbox credentials needed on the box, works from a
+cloud-launched shell with no access to the local Mac). This is orthogonal
+to the SpotTrainer/checkpoint-resume machinery below -- run it as a
+pre-step before `run_nv_pat1.py` on any `eeg-run-spot.sh`/GH-Actions box.
+Full writeup: `AWS_INFRA.md`'s "Shared storage" section / `CONTEXT.md`'s
+2026-09-23 entry.
+
 What was actually proven:
 - `SpotTrainer` checkpoint / resume / SIGTERM-flush / config-guard --
   tested locally (chb01, cpu+mps), works.
