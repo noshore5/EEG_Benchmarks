@@ -37,7 +37,16 @@ fi
 
 mkdir -p "$DEST_ROOT"
 echo "[fetch_kuhlmann_nv_s3] downloading s3://$BUCKET/$S3_KEY ..."
-aws s3 cp "s3://$BUCKET/$S3_KEY" /tmp/kuhlmann_nv_fetch.tar.gz
+# --no-progress: without a TTY, aws cli's progress "bar" prints a full new
+# line per chunk instead of overwriting one line -- on this 2.9GB object
+# that's ~100k+ duplicate "Completed X GiB..." lines. Since this script
+# runs as a subprocess of run_nv_pat1.py (via kuhlmann_nv._try_fetch_from_s3),
+# that spam lands in run.log right alongside training output, bloating it
+# enough that GitHub's log API (which truncates from the FRONT on a large
+# log) drops the real error/traceback entirely -- confirmed 2026-09-23 on
+# nv-pat1-smoke's first CUDA run (rc=1, but the actual failure was
+# unreadable through eeg-tail.yml/get_job_logs because of this).
+aws s3 cp --no-progress "s3://$BUCKET/$S3_KEY" /tmp/kuhlmann_nv_fetch.tar.gz
 
 echo "[fetch_kuhlmann_nv_s3] extracting into $DEST_ROOT ..."
 tar -xzf /tmp/kuhlmann_nv_fetch.tar.gz -C "$DEST_ROOT"

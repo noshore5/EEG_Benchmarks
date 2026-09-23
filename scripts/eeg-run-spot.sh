@@ -295,7 +295,16 @@ print('MAMBA_SSM_CUDA_KERNEL_OK', torch.cuda.get_device_name(0), torch.cuda.get_
 " >> /root/run.log 2>&1 || echo "MAMBA_SSM_CUDA_KERNEL_FAILED" >> /root/run.log
 
 mkdir -p /root/mne_data
-aws s3 sync "s3://$BUCKET/datasets" /root/mne_data || true
+# --exclude kuhlmann_nv/*: that subtree is fetched separately, into a
+# different destination (/root/repo/datasets/epilepsy/kuhlmann_nv, see
+# scripts/fetch_kuhlmann_nv_s3.sh) -- pulling its 2.9GB tarball here too
+# would be pure waste (never read from /root/mne_data). --no-progress:
+# without a TTY, aws cli prints a full new line per progress update
+# instead of overwriting one line -- on a multi-GB sync that's tens of
+# thousands of duplicate lines flooding boot.log (confirmed 2026-09-23,
+# nv-pat1-smoke: buried the run.log section badly enough that
+# eeg-tail.yml/get_job_logs couldn't surface the actual failure).
+aws s3 sync --no-progress --exclude "kuhlmann_nv/*" "s3://$BUCKET/datasets" /root/mne_data || true
 export MNE_DATA=/root/mne_data PYTHONPATH=/root/repo
 
 # resume: pull any checkpoint left by a previous (interrupted) attempt at
