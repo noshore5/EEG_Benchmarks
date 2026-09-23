@@ -126,8 +126,8 @@ nv_pat1_first_benchmark.md` and `.../nv_pat1_block_grouping_and_leaderboard.md`.
 
 A real contest leaderboard was pulled fresh from the published Google
 Sheet embedded on epilepsyecosystem.org/leaderboard and committed at
-`Epilepsy/NV_Contest_results.csv` (a concurrent shell briefly relocated
-it to `datasets/epilepsy/`, moved back per explicit user instruction) --
+`datasets/epilepsy/NV_Contest_results.csv` (moved there and back once
+during this session -- final placement per explicit user instruction) --
 68 submissions / 7 teams, a 2024
 private-contest leaderboard (per user correction; NOT the 2016 Kaggle
 contest godoy_tmc's source paper would postdate) scored against the real
