@@ -510,6 +510,30 @@ filename/the destination you want — verify (or make the consumer robust
 to either layout) rather than hardcode a path that was never actually
 checked against the real tarball.
 
+## 17. `nv-pat1-block-6fold` (2026-09-23) — host-RAM OOM on `g5.xlarge`, same signature as #14
+
+First full-scale (no `--limit`) NV Pat1 run, 6-fold/`--grouping block`,
+on the default `g5.xlarge` candidate (4 vCPU / 16GB host RAM). Exited
+`rc=137` with a bare `Killed` line in `boot.log` — no Python traceback,
+same signature as #14's `nonstgm-mamba-smoke`. Got through data loading
+(809 segments, 3.1GB resident) and windowing (16,180 30s sub-windows,
+`X.shape=(16180, 16, 3000)` float32 ≈ 2.9GB on its own) and into
+`[Train] validation split: 2696/13480 samples` before getting killed —
+died entering/during training on fold 0, not during data loading itself.
+
+**Why this wasn't caught by the smoke test:** `nv-pat1-smoke3` used
+`--limit 60` (60 segments -> 1,180 sub-windows) and ran fine on the same
+instance class. Full-scale is ~14x that (809 segments -> 16,180
+sub-windows) — the smoke test validated the *pipeline*, not that it fits
+in 16GB at real scale. Same gap as #14: a small-scale dry run proves
+correctness, not sizing.
+
+**Fix, following #14's precedent exactly:** relaunch with
+`--instance-types` pointed at `g5.2xlarge`/`g6.2xlarge` (32GB host RAM)
+instead of iterating on batch size or windowing as a memory lever.
+Retry launched as `nv-pat1-block-6fold-v2`; this entry will be updated
+with the outcome once it completes.
+
 ---
 
 ## Patterns worth remembering across all of the above
