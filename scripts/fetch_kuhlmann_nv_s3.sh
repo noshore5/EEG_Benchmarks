@@ -48,9 +48,26 @@ echo "[fetch_kuhlmann_nv_s3] downloading s3://$BUCKET/$S3_KEY ..."
 # unreadable through eeg-tail.yml/get_job_logs because of this).
 aws s3 cp --no-progress "s3://$BUCKET/$S3_KEY" /tmp/kuhlmann_nv_fetch.tar.gz
 
-echo "[fetch_kuhlmann_nv_s3] extracting into $DEST_ROOT ..."
-tar -xzf /tmp/kuhlmann_nv_fetch.tar.gz -C "$DEST_ROOT"
+# Extract into a scratch staging dir rather than straight into $DEST_ROOT
+# and assume a $SUBFOLDER/ top-level entry -- confirmed 2026-09-23
+# (nv-pat1-smoke2) that assumption was wrong: the .mat files land flat
+# (no Pat1Train/ prefix inside the tarball), so `find "$DEST_DIR"`
+# immediately failed with "No such file or directory" and the whole run
+# never got past loading data. Finding the .mat files wherever they
+# actually ended up and moving them into $DEST_DIR is robust to that
+# layout, or a single level of nesting, either way.
+STAGING=$(mktemp -d)
+echo "[fetch_kuhlmann_nv_s3] extracting into $STAGING ..."
+tar -xzf /tmp/kuhlmann_nv_fetch.tar.gz -C "$STAGING"
 rm -f /tmp/kuhlmann_nv_fetch.tar.gz
 
+mkdir -p "$DEST_DIR"
+find "$STAGING" -name "*.mat" -exec mv {} "$DEST_DIR/" \;
+rm -rf "$STAGING"
+
 n=$(find "$DEST_DIR" -type f | wc -l | tr -d ' ')
+if [ "$n" -eq 0 ]; then
+  echo "[fetch_kuhlmann_nv_s3] ERROR: 0 .mat files found in the extracted tarball" >&2
+  exit 1
+fi
 echo "[fetch_kuhlmann_nv_s3] done -- $n files in $DEST_DIR"
