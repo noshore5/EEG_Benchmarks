@@ -156,6 +156,43 @@ Mac's Dropbox-downloaded copy -- can run NV benchmarks without touching
 Dropbox. Fetch on a box with `scripts/fetch_kuhlmann_nv_s3.sh` before
 `run_nv_pat1.py`; see `AWS_INFRA.md`'s "Shared storage" section.
 
+**2026-09-23, later: `temporal_graph_mamba` added for NV** (new file
+`scripts/run_nv_pat1_tgm.py`) -- same StratifiedGroupKFold/segment-or-
+block-grouping/segment-level-scoring machinery as `run_nv_pat1.py`, but
+swaps `GodoyTMCClassifier` for the dense-edge CWT->Mamba classifier
+(`StreamingSparseEvidenceGNNClassifier`) CHB-MIT's `--pipeline
+temporal_graph_mamba` uses. `sampling_rate` is overridden from CHB-MIT's
+256Hz default to NV's own decimated rate -- required, not optional, or
+CWT/coherence would be computed against the wrong sample rate.
+
+First version passed no cache at all (wrong assumption that NV's
+full-scale window count was small); stalled 30+ min recomputing every
+batch from scratch. **Fixed (commit `ab8f3cc`) with a two-tier cache**:
+disk (`DiskCWTCache`/`dense_edge_cache_dir`, unbounded by VRAM, the real
+floor) plus an opt-in GPU-resident `DenseEdgeMemCache` accelerator
+(`--dense-edge-gpu-cache`) on top -- CHB-MIT's GPU-cache-only regime
+doesn't fit NV's much larger (~16,180-window) working set. Validated:
+0%->100% disk-cache hit rate after one precompute pass, full 6-fold
+block-grouped run completed cleanly (`nv_pat1_tgm_stratified_kfold_
+blockgrouped_20260923-140142.csv`: roc_auc 0.801 mean across folds, range
+0.768-0.828). Full writeup: `Session_notes/2026_09_23/
+nv_tgm_integration_caching_fix_and_godoy_comparison.md`.
+
+**Important correction, caught same session:** a first draft compared
+this tgm result against `nv_pat1_stratified_kfold_blockgrouped_
+20260922-141154.csv` (godoy_tmc) and reported godoy as the winner. That
+was wrong -- that CSV uses the OLD `n_train`/`n_test` schema (sub-window
+counts), meaning it predates the segment-level-aggregation scoring fix
+this file's 2026-09-22 entry above already documents and explicitly warns
+must never be cited as current. **There is still no existing godoy_tmc
+full-scale block-grouped NV Pat1 result under the corrected scoring** --
+the "top pending task" note below from 2026-09-22 is STILL the top
+pending task. Three godoy relaunch attempts this session
+(`nv-pat1-block-6fold-v2`/`v3`) never got spot capacity and never ran
+(`FAILURE_LOG.md` #17) -- do not assume "we already have a godoy result"
+without checking the CSV's column schema, not just that a plausibly-named
+file exists.
+
 **Note (2026-09-20/21 nfreqs=16 first-success + SSM/IAM fix):** these
 happened between the NonStGM and Kuhlmann work below -- not superseded by
 either. `temporal_graph_mamba` nfreqs=16 prediction got its FIRST VERIFIED
